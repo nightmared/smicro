@@ -191,6 +191,8 @@ impl Stat {
         metadata: Metadata,
         generate_long_filename: bool,
     ) -> Result<Stat, Error> {
+        // All the subsequent unwraps inside attrs are safe because Attrs::from_metadata
+        // populate all fields
         let attrs = Attrs::from_metadata(&metadata);
 
         let long_filename = if generate_long_filename {
@@ -224,13 +226,13 @@ impl Stat {
             let output = format!(
                 "{}{} ? {:>7} {:>7} {:>12} {} ",
                 prefix,
-                std::str::from_utf8(&perms).unwrap(),
+                std::str::from_utf8(&perms)?,
                 attrs.uid.unwrap(),
                 attrs.gid.unwrap(),
                 attrs.size.unwrap(),
                 mtime
             );
-            let mut long_filename = OsString::from_str(&output).unwrap();
+            let mut long_filename = OsString::from_str(&output)?;
             long_filename.push(&filename);
             long_filename
         } else {

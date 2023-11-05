@@ -108,8 +108,7 @@ pub struct CommandOpendir {
 
 impl Command for CommandOpendir {
     fn process(&self, global_state: &mut GlobalState) -> Result<Response, Error> {
-        // safe because the error type is Infallible
-        let dir_path = PathBuf::from_str(&self.dir_path).unwrap();
+        let dir_path = PathBuf::from_str(&self.dir_path)?;
         if !dir_path.is_dir() {
             return Ok(Response::Status(ResponseStatus::new(
                 StatusCode::NotADirectory,
@@ -238,7 +237,7 @@ pub struct CommandOpen {
 
 impl Command for CommandOpen {
     fn process(&self, global_state: &mut GlobalState) -> Result<Response, Error> {
-        let path = PathBuf::from_str(&self.path).unwrap();
+        let path = PathBuf::from_str(&self.path)?;
         if path.is_dir() {
             Err(StatusCode::FileIsADirectory)?;
         };

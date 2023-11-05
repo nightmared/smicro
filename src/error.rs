@@ -1,3 +1,5 @@
+use std::convert::Infallible;
+
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     #[error("Building a syslog logger failed")]
@@ -12,8 +14,10 @@ pub enum Error {
     NonUTF8String(#[from] std::str::Utf8Error),
     #[error("Got a status code from the application")]
     StatusCode(#[from] crate::StatusCode),
-    //#[error("Failure when running stat on a path")]
-    //StatError(#[source] Errno),
+    #[error(
+        "An infallible error was triggered, this probably indicates a failure in our dependencies"
+    )]
+    Infallible(#[from] Infallible),
 }
 
 #[derive(thiserror::Error, Debug)]
