@@ -14,7 +14,7 @@ pub enum ResponseType {
     Data = 103,
     Name = 104,
     Attrs = 105,
-    //ExtendedReply = 201,
+    ExtendedReply = 201,
 }
 
 #[derive(Debug)]
@@ -27,6 +27,7 @@ pub enum ResponseWrapper {
     Handle(ResponseHandle),
     Data(ResponseData),
     Attrs(ResponseAttrs),
+    ExtendedReply(ResponseExtendedReply),
 }
 
 pub trait ResponsePacket {
@@ -56,9 +57,21 @@ pub struct ResponseStatus {
 
 impl ResponseStatus {
     pub fn new(code: StatusCode) -> Self {
+        let error_message = match code {
+            StatusCode::Ok => "Success",
+            StatusCode::Eof => "End of file",
+            StatusCode::NoSuchFile => "No such file",
+            StatusCode::PermissionDenied => "Permission denied",
+            StatusCode::Failure => "Failure",
+            StatusCode::BadMessage => "Bad message",
+            StatusCode::NoConnection => "No connection",
+            StatusCode::ConnectionLost => "Connection lost",
+            StatusCode::OpUnsupported => "Operation unsupported",
+        };
+
         Self {
             status_code: code,
-            error_message: "",
+            error_message,
             language: "",
         }
     }
@@ -77,4 +90,9 @@ pub struct ResponseData {
 #[declare_response_packet(packet_type = ResponseType::Attrs)]
 pub struct ResponseAttrs {
     pub attrs: Attrs,
+}
+
+#[declare_response_packet(packet_type = ResponseType::ExtendedReply)]
+pub struct ResponseExtendedReply {
+    pub data: Vec<u8>,
 }
