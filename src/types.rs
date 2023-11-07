@@ -11,7 +11,7 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
-use smicro_macros::serialize_struct;
+use smicro_macros::gen_serialize_impl;
 
 use crate::error::Error;
 use crate::serialize::SerializeForSftp;
@@ -42,23 +42,6 @@ pub enum StatusCode {
     NoConnection = 6,
     ConnectionLost = 7,
     OpUnsupported = 8,
-    InvalidHandle = 9,
-    NoSuchPath = 10,
-    FileAlreadyExists = 11,
-    WriteProtect = 12,
-    NoMedia = 13,
-    NoSpaceOnFilesystem = 14,
-    QuotaExceeded = 15,
-    LockConflict = 17,
-    DirNotEmpty = 18,
-    NotADirectory = 19,
-    InvalidFilename = 20,
-    LinkLoop = 21,
-    CannotDelete = 22,
-    InvalidParameter = 23,
-    FileIsADirectory = 24,
-    OwnerInvalid = 29,
-    GroupInvalid = 30,
 }
 
 impl std::fmt::Display for StatusCode {
@@ -127,7 +110,7 @@ impl Attrs {
 }
 
 #[derive(Debug)]
-#[serialize_struct]
+#[gen_serialize_impl]
 pub struct Stat {
     pub filename: OsString,
     // For most cases, long_filename holds the same entry as filename.
@@ -258,11 +241,11 @@ pub enum OpenModes {
     Exclusive = 32,
 }
 
-#[derive(Debug)]
-#[serialize_struct]
+#[derive(Debug, Copy, Clone)]
+#[gen_serialize_impl]
 pub struct Extension {
-    name: String,
-    data: String,
+    pub name: &'static str,
+    pub data: &'static str,
 }
 
 #[derive(Debug)]

@@ -4,7 +4,7 @@ use nom::{
 };
 
 use crate::{
-    command::{self, Command, CommandType},
+    command::{command_deserialize, CommandType, CommandWrapper},
     error::ParsingError,
     types::{Attrs, AttrsFlags, OpenModes},
 };
@@ -95,24 +95,9 @@ pub struct PacketHeader<Ty> {
 }
 
 #[derive(Debug)]
-pub struct Packet<Data, PktTy> {
+pub struct Packet<PktTy, Data> {
     pub hdr: PacketHeader<PktTy>,
     pub data: Data,
-}
-
-impl<Data, PktTy> Packet<Data, PktTy>
-where
-    Data: Command + DeserializeSftp + 'static,
-{
-    fn deserialize_input(
-        hdr: PacketHeader<PktTy>,
-        input: &[u8],
-    ) -> Result<Packet<Box<dyn Command>, PktTy>, nom::Err<ParsingError<&[u8]>>> {
-        Data::deserialize(input).map(|(_next_data, data)| Packet {
-            hdr,
-            data: Box::new(data) as Box<dyn Command>,
-        })
-    }
 }
 
 fn parse_command_type(input: &[u8]) -> IResult<&[u8], CommandType, ParsingError<&[u8]>> {
@@ -127,9 +112,8 @@ fn parse_command_type(input: &[u8]) -> IResult<&[u8], CommandType, ParsingError<
 
 pub fn parse_version(input: &[u8]) -> IResult<&[u8], u32, ParsingError<&[u8]>> {
     let (next_data, version) = be_u32(input)?;
-    // only accept version renegociation or the latest (by the time of the RFC
-    // draft) supported version number
-    if version != 3 && version != 6 {
+    // only accept clients that implement version renegociation
+    if version != 3 {
         return Err(nom::Err::Failure(ParsingError::InvalidVersionNumber(
             version,
         )));
@@ -179,7 +163,7 @@ pub fn parse_utf8_string(input: &[u8]) -> IResult<&[u8], String, ParsingError<&[
 
 pub fn parse_command(
     input: &[u8],
-) -> IResult<&[u8], Packet<Box<dyn Command>, CommandType>, ParsingError<&[u8]>> {
+) -> IResult<&[u8], Packet<CommandType, CommandWrapper>, ParsingError<&[u8]>> {
     let (_, hdr) = parse_command_header(input)?;
     if input.len() < hdr.length as usize + 4 {
         return Err(nom::Err::Incomplete(nom::Needed::Unknown));
@@ -190,29 +174,5 @@ pub fn parse_command(
         &input[5..hdr.length as usize + 4]
     };
     let next_data = &input[hdr.length as usize + 4..];
-    macro_rules! match_command {
-        ($($cmd:ident => $ty:ty),*) => {
-            match hdr.ty {
-                $( CommandType::$cmd => {
-                    Packet::<$ty, _>::deserialize_input(hdr, command_data)?
-                } ),*
-            }
-        };
-    }
-    Ok((
-        next_data,
-        match_command!(
-            Init => command::CommandInit,
-            Realpath => command::CommandRealpath,
-            Opendir => command::CommandOpendir,
-            Readdir => command::CommandReaddir,
-            Close => command::CommandClose,
-            Lstat => command::CommandLstat,
-            Fstat => command::CommandFstat,
-            Stat => command::CommandStat,
-            Open => command::CommandOpen,
-            Read => command::CommandRead,
-            Write => command::CommandWrite
-        ),
-    ))
+    Ok((next_data, command_deserialize(hdr, command_data)?))
 }

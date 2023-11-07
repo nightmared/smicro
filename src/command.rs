@@ -1,6 +1,10 @@
 use std::{
-    fs::{canonicalize, metadata, symlink_metadata, OpenOptions},
-    os::unix::prelude::{FileExt, OpenOptionsExt},
+    ffi::OsString,
+    fs::{canonicalize, metadata, read_link, rename, symlink_metadata, OpenOptions},
+    os::unix::{
+        fs::symlink,
+        prelude::{FileExt, OpenOptionsExt},
+    },
     path::PathBuf,
     str::FromStr,
 };
@@ -11,21 +15,22 @@ use nom::{
     Parser,
 };
 
-use smicro_macros::declare_command_packet;
+use smicro_macros::declare_deserializable_struct;
 
 use crate::{
     deserialize::{
         parse_attrs, parse_open_modes, parse_string, parse_utf8_string, parse_version,
-        DeserializeSftp,
+        DeserializeSftp, PacketHeader,
     },
-    error::Error,
+    error::{Error, ParsingError},
+    extensions::{Extension as ExtensionTrait, ExtensionPosixRename, POSIX_RENAME_EXT},
     response::{
-        Response, ResponseAttrs, ResponseData, ResponseHandle, ResponseName, ResponseStatus,
-        ResponseVersion,
+        ResponseAttrs, ResponseData, ResponseHandle, ResponseName, ResponseStatus, ResponseVersion,
+        ResponseWrapper,
     },
     state::GlobalState,
-    types::{Attrs, AttrsFlags, HandleType, OpenModes, SSHString, Stat, StatusCode},
-    MAX_READ_LENGTH,
+    types::{Attrs, AttrsFlags, Extension, HandleType, OpenModes, SSHString, Stat, StatusCode},
+    Packet, MAX_READ_LENGTH,
 };
 
 #[derive(Debug, Eq, PartialEq, num_enum::TryFromPrimitive, num_enum::IntoPrimitive)]
@@ -47,47 +52,44 @@ pub enum CommandType {
     //Rmdir = 15,
     Realpath = 16,
     Stat = 17,
-    //Rename = 18,
-    //Readlink = 19,
-    //Link = 21,
-    //Block = 22,
-    //Unblock = 23,
-    //Extended = 200,
-    //ExtendedReply = 201,
+    Rename = 18,
+    Readlink = 19,
+    Symlink = 20,
+    Extended = 200,
 }
 
 pub trait Command: std::fmt::Debug {
-    fn process(&self, global_state: &mut GlobalState) -> Result<Response, Error>;
+    fn process(self, global_state: &mut GlobalState) -> Result<ResponseWrapper, Error>;
 }
 
-#[derive(Debug)]
-#[declare_command_packet(packet_type = CommandType::Init)]
+#[declare_deserializable_struct]
 pub struct CommandInit {
     #[field(parser = parse_version)]
-    version: u32,
+    _version: u32,
 }
 
 impl Command for CommandInit {
-    fn process(&self, _global_state: &mut GlobalState) -> Result<Response, Error> {
-        // TODO: handle properly the supported client sftp version
-        Ok(Response::Version(ResponseVersion {
-            version: self.version,
-            extensions: Vec::new(),
+    fn process(self, _global_state: &mut GlobalState) -> Result<ResponseWrapper, Error> {
+        Ok(ResponseWrapper::Version(ResponseVersion {
+            version: 3,
+            extensions: vec![Extension {
+                name: POSIX_RENAME_EXT,
+                data: "1",
+            }],
         }))
     }
 }
 
-#[derive(Debug)]
-#[declare_command_packet(packet_type = CommandType::Realpath)]
+#[declare_deserializable_struct]
 pub struct CommandRealpath {
     #[field(parser = parse_utf8_string)]
     original_path: String,
 }
 
 impl Command for CommandRealpath {
-    fn process(&self, _global_state: &mut GlobalState) -> Result<Response, Error> {
+    fn process(self, _global_state: &mut GlobalState) -> Result<ResponseWrapper, Error> {
         let canonicalized_path = canonicalize(&self.original_path)?.into_os_string();
-        Ok(Response::Name(ResponseName {
+        Ok(ResponseWrapper::Name(ResponseName {
             count: 1,
             names: vec![Stat {
                 filename: canonicalized_path.clone(),
@@ -99,19 +101,18 @@ impl Command for CommandRealpath {
     }
 }
 
-#[derive(Debug)]
-#[declare_command_packet(packet_type = CommandType::Opendir)]
+#[declare_deserializable_struct]
 pub struct CommandOpendir {
     #[field(parser = parse_utf8_string)]
     dir_path: String,
 }
 
 impl Command for CommandOpendir {
-    fn process(&self, global_state: &mut GlobalState) -> Result<Response, Error> {
+    fn process(self, global_state: &mut GlobalState) -> Result<ResponseWrapper, Error> {
         let dir_path = PathBuf::from_str(&self.dir_path)?;
         if !dir_path.is_dir() {
-            return Ok(Response::Status(ResponseStatus::new(
-                StatusCode::NotADirectory,
+            return Ok(ResponseWrapper::Status(ResponseStatus::new(
+                StatusCode::Failure,
             )));
         }
 
@@ -119,19 +120,18 @@ impl Command for CommandOpendir {
 
         let handle = global_state.create_dir_handle(dir_path, dir_list);
 
-        Ok(Response::Handle(ResponseHandle { handle }))
+        Ok(ResponseWrapper::Handle(ResponseHandle { handle }))
     }
 }
 
-#[derive(Debug)]
-#[declare_command_packet(packet_type = CommandType::Readdir)]
+#[declare_deserializable_struct]
 pub struct CommandReaddir {
     #[field(parser = parse_utf8_string)]
     handle: String,
 }
 
 impl Command for CommandReaddir {
-    fn process(&self, global_state: &mut GlobalState) -> Result<Response, Error> {
+    fn process(self, global_state: &mut GlobalState) -> Result<ResponseWrapper, Error> {
         let (_name, dir_list) = global_state.get_dir_handle(&self.handle)?;
 
         let mut names = ResponseName {
@@ -162,38 +162,36 @@ impl Command for CommandReaddir {
             names.end_of_list = true;
         }
 
-        Ok(Response::Name(names))
+        Ok(ResponseWrapper::Name(names))
     }
 }
 
-#[derive(Debug)]
-#[declare_command_packet(packet_type = CommandType::Lstat)]
+#[declare_deserializable_struct]
 pub struct CommandLstat {
     #[field(parser = parse_utf8_string)]
     filename: String,
 }
 
 impl Command for CommandLstat {
-    fn process(&self, _global_state: &mut GlobalState) -> Result<Response, Error> {
+    fn process(self, _global_state: &mut GlobalState) -> Result<ResponseWrapper, Error> {
         let stat = symlink_metadata(self.filename.as_str())?;
-        Ok(Response::Attrs(ResponseAttrs {
+        Ok(ResponseWrapper::Attrs(ResponseAttrs {
             attrs: Attrs::from_metadata(&stat),
         }))
     }
 }
 
-#[derive(Debug)]
-#[declare_command_packet(packet_type = CommandType::Fstat)]
+#[declare_deserializable_struct]
 pub struct CommandFstat {
     #[field(parser = parse_utf8_string)]
     handle: String,
 }
 
 impl Command for CommandFstat {
-    fn process(&self, global_state: &mut GlobalState) -> Result<Response, Error> {
+    fn process(self, global_state: &mut GlobalState) -> Result<ResponseWrapper, Error> {
         let handle = match global_state.get_handle(&self.handle) {
             Some(x) => x,
-            None => Err(StatusCode::InvalidHandle)?,
+            None => Err(StatusCode::Failure)?,
         };
 
         let meta = match &handle.ty {
@@ -202,30 +200,28 @@ impl Command for CommandFstat {
             // the directory, hoping it didn't move under our feet
             HandleType::Directory(_) => metadata(&handle.filename)?,
         };
-        Ok(Response::Attrs(ResponseAttrs {
+        Ok(ResponseWrapper::Attrs(ResponseAttrs {
             attrs: Attrs::from_metadata(&meta),
         }))
     }
 }
 
-#[derive(Debug)]
-#[declare_command_packet(packet_type = CommandType::Stat)]
+#[declare_deserializable_struct]
 pub struct CommandStat {
     #[field(parser = parse_utf8_string)]
     filename: String,
 }
 
 impl Command for CommandStat {
-    fn process(&self, _global_state: &mut GlobalState) -> Result<Response, Error> {
+    fn process(self, _global_state: &mut GlobalState) -> Result<ResponseWrapper, Error> {
         let stat = metadata(self.filename.as_str())?;
-        Ok(Response::Attrs(ResponseAttrs {
+        Ok(ResponseWrapper::Attrs(ResponseAttrs {
             attrs: Attrs::from_metadata(&stat),
         }))
     }
 }
 
-#[derive(Debug)]
-#[declare_command_packet(packet_type = CommandType::Open)]
+#[declare_deserializable_struct]
 pub struct CommandOpen {
     #[field(parser = parse_utf8_string)]
     path: String,
@@ -236,10 +232,10 @@ pub struct CommandOpen {
 }
 
 impl Command for CommandOpen {
-    fn process(&self, global_state: &mut GlobalState) -> Result<Response, Error> {
+    fn process(self, global_state: &mut GlobalState) -> Result<ResponseWrapper, Error> {
         let path = PathBuf::from_str(&self.path)?;
         if path.is_dir() {
-            Err(StatusCode::FileIsADirectory)?;
+            Err(StatusCode::Failure)?;
         };
 
         let mut options = OpenOptions::new();
@@ -261,12 +257,11 @@ impl Command for CommandOpen {
 
         let handle = global_state.create_file_handle(path, file);
 
-        Ok(Response::Handle(ResponseHandle { handle }))
+        Ok(ResponseWrapper::Handle(ResponseHandle { handle }))
     }
 }
 
-#[derive(Debug)]
-#[declare_command_packet(packet_type = CommandType::Read)]
+#[declare_deserializable_struct]
 pub struct CommandRead {
     #[field(parser = parse_utf8_string)]
     handle: String,
@@ -277,7 +272,7 @@ pub struct CommandRead {
 }
 
 impl Command for CommandRead {
-    fn process(&self, global_state: &mut GlobalState) -> Result<Response, Error> {
+    fn process(self, global_state: &mut GlobalState) -> Result<ResponseWrapper, Error> {
         let (_name, file) = global_state.get_file_handle(&self.handle)?;
 
         let len = if self.len as usize > MAX_READ_LENGTH {
@@ -289,19 +284,20 @@ impl Command for CommandRead {
         let mut buf = vec![0; len];
         let nb_read = file.read_at(&mut buf, self.offset)?;
         if nb_read == 0 {
-            return Ok(Response::Status(ResponseStatus::new(StatusCode::Eof)));
+            return Ok(ResponseWrapper::Status(ResponseStatus::new(
+                StatusCode::Eof,
+            )));
         }
 
         buf.truncate(nb_read);
 
-        Ok(Response::Data(ResponseData {
+        Ok(ResponseWrapper::Data(ResponseData {
             data: SSHString(buf),
         }))
     }
 }
 
-#[derive(Debug)]
-#[declare_command_packet(packet_type = CommandType::Write)]
+#[declare_deserializable_struct]
 pub struct CommandWrite {
     #[field(parser = parse_utf8_string)]
     handle: String,
@@ -312,26 +308,160 @@ pub struct CommandWrite {
 }
 
 impl Command for CommandWrite {
-    fn process(&self, global_state: &mut GlobalState) -> Result<Response, Error> {
+    fn process(self, global_state: &mut GlobalState) -> Result<ResponseWrapper, Error> {
         let (_name, file) = global_state.get_file_handle(&self.handle)?;
 
         file.write_all_at(&self.data, self.offset)?;
 
-        Ok(Response::Status(ResponseStatus::new(StatusCode::Ok)))
+        Ok(ResponseWrapper::Status(ResponseStatus::new(StatusCode::Ok)))
     }
 }
 
-#[derive(Debug)]
-#[declare_command_packet(packet_type = CommandType::Close)]
+#[declare_deserializable_struct]
+pub struct CommandRename {
+    #[field(parser = parse_utf8_string)]
+    old_path: String,
+    #[field(parser = parse_utf8_string)]
+    new_path: String,
+}
+
+impl Command for CommandRename {
+    fn process(self, _global_state: &mut GlobalState) -> Result<ResponseWrapper, Error> {
+        rename(&self.old_path, &self.new_path)?;
+
+        Ok(ResponseWrapper::Status(ResponseStatus::new(StatusCode::Ok)))
+    }
+}
+
+#[declare_deserializable_struct]
+pub struct CommandReadlink {
+    #[field(parser = parse_utf8_string)]
+    path: String,
+}
+
+impl Command for CommandReadlink {
+    fn process(self, _global_state: &mut GlobalState) -> Result<ResponseWrapper, Error> {
+        let path = PathBuf::from_str(&self.path)?;
+
+        if !path.is_symlink() {
+            return Ok(ResponseWrapper::Status(ResponseStatus::new(
+                StatusCode::NoSuchFile,
+            )));
+        }
+
+        let target: OsString = read_link(path)?.into();
+        let stat = Stat {
+            filename: target.clone(),
+            long_filename: target,
+            attrs: Attrs::new(),
+        };
+
+        Ok(ResponseWrapper::Name(ResponseName {
+            count: 1,
+            names: vec![stat],
+            end_of_list: true,
+        }))
+    }
+}
+
+#[declare_deserializable_struct]
+pub struct CommandSymlink {
+    #[field(parser = parse_utf8_string)]
+    old_path: String,
+    #[field(parser = parse_utf8_string)]
+    new_path: String,
+}
+
+impl Command for CommandSymlink {
+    fn process(self, _global_state: &mut GlobalState) -> Result<ResponseWrapper, Error> {
+        symlink(&self.old_path, &self.new_path)?;
+
+        Ok(ResponseWrapper::Status(ResponseStatus::new(StatusCode::Ok)))
+    }
+}
+
+#[declare_deserializable_struct]
 pub struct CommandClose {
     #[field(parser = parse_utf8_string)]
     handle: String,
 }
 
 impl Command for CommandClose {
-    fn process(&self, global_state: &mut GlobalState) -> Result<Response, Error> {
+    fn process(self, global_state: &mut GlobalState) -> Result<ResponseWrapper, Error> {
         global_state.close_handle(&self.handle)?;
 
-        Ok(Response::Status(ResponseStatus::new(StatusCode::Ok)))
+        Ok(ResponseWrapper::Status(ResponseStatus::new(StatusCode::Ok)))
     }
 }
+
+#[declare_deserializable_struct]
+pub struct CommandExtended {
+    #[field(parser = parse_utf8_string)]
+    extension: String,
+    #[field(parser = nom::combinator::rest.map(Vec::from))]
+    req: Vec<u8>,
+}
+
+impl Command for CommandExtended {
+    fn process(self, global_state: &mut GlobalState) -> Result<ResponseWrapper, Error> {
+        // TODO: if I find enought motivation to do so, create a dedicated macro like
+        // `generate_command_wrapper!` below
+        match self.extension.as_str() {
+            POSIX_RENAME_EXT => {
+                let ext = ExtensionPosixRename::deserialize(&self.req)
+                    .map(|(_next_data, ext)| ext)
+                    .map_err(|_| Error::InvalidPacket)?;
+                Ok(ext.process(global_state)?)
+            }
+            _ => Ok(ResponseWrapper::Status(ResponseStatus::new(
+                StatusCode::OpUnsupported,
+            ))),
+        }
+    }
+}
+
+macro_rules! generate_command_wrapper {
+    ($($cmd:ident => $ty:ty),*) => {
+        #[derive(Debug)]
+        pub enum CommandWrapper {
+            $($cmd($ty)),*
+        }
+
+        impl Command for CommandWrapper {
+            fn process(self, global_state: &mut GlobalState) -> Result<ResponseWrapper, Error> {
+                match self {
+                    $(CommandWrapper::$cmd(val) => val.process(global_state)),*
+                }
+            }
+        }
+
+        pub(crate) fn command_deserialize(hdr: PacketHeader<CommandType>, command_data: &[u8]) -> Result<Packet<CommandType, CommandWrapper>, nom::Err<ParsingError<&[u8]>>> {
+            match hdr.ty {
+                $( CommandType::$cmd => {
+                    <$ty>::deserialize(command_data).map(|(_next_data, cmd)| Packet {
+                        hdr,
+                        data: CommandWrapper::$cmd(cmd),
+                    })
+                } ),*
+            }
+        }
+    };
+}
+
+generate_command_wrapper!(
+    Init => CommandInit,
+    Realpath => CommandRealpath,
+    Opendir => CommandOpendir,
+    Readdir => CommandReaddir,
+    Close => CommandClose,
+    Lstat => CommandLstat,
+    Fstat => CommandFstat,
+    Stat => CommandStat,
+    Open => CommandOpen,
+    Read => CommandRead,
+    Write => CommandWrite,
+    Readlink => CommandReadlink,
+    Rename => CommandRename,
+    Symlink => CommandSymlink,
+    Extended => CommandExtended
+);

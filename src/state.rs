@@ -67,10 +67,10 @@ impl GlobalState {
     ) -> Result<(&PathBuf, &mut Peekable<ReadDir>), StatusCode> {
         self.get_handle(handle)
             .map_or(
-                Err(StatusCode::InvalidHandle),
+                Err(StatusCode::Failure),
                 |Handle { filename, ty }| match ty {
                     HandleType::Directory(ref mut dir) => Ok((filename, dir)),
-                    _ => Err(StatusCode::NotADirectory),
+                    _ => Err(StatusCode::Failure),
                 },
             )
     }
@@ -78,19 +78,19 @@ impl GlobalState {
     pub fn get_file_handle(&mut self, handle: &str) -> Result<(&PathBuf, &mut File), StatusCode> {
         self.get_handle(handle)
             .map_or(
-                Err(StatusCode::InvalidHandle),
+                Err(StatusCode::Failure),
                 |Handle { filename, ty }| match ty {
                     HandleType::File(ref mut file) => Ok((filename, file)),
-                    _ => Err(StatusCode::FileIsADirectory),
+                    _ => Err(StatusCode::Failure),
                 },
             )
     }
 
     pub fn close_handle(&mut self, handle: &str) -> Result<(), StatusCode> {
-        let idx = str::parse(handle).map_err(|_| StatusCode::InvalidHandle)?;
+        let idx = str::parse(handle).map_err(|_| StatusCode::Failure)?;
         self.handles
             .remove(&idx)
-            .ok_or(StatusCode::InvalidHandle)
+            .ok_or(StatusCode::Failure)
             .map(|_| ())
     }
 }

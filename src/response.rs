@@ -14,12 +14,13 @@ pub enum ResponseType {
     Data = 103,
     Name = 104,
     Attrs = 105,
+    //ExtendedReply = 201,
 }
 
 #[derive(Debug)]
 #[implement_responsepacket_on_enum]
 #[serialize_variants_in_enum]
-pub enum Response {
+pub enum ResponseWrapper {
     Status(ResponseStatus),
     Version(ResponseVersion),
     Name(ResponseName),
@@ -32,7 +33,6 @@ pub trait ResponsePacket {
     fn get_type(&self) -> ResponseType;
 }
 
-#[derive(Debug)]
 #[declare_response_packet(packet_type = ResponseType::Name)]
 pub struct ResponseName {
     pub count: u32,
@@ -40,7 +40,6 @@ pub struct ResponseName {
     pub end_of_list: bool,
 }
 
-#[derive(Debug)]
 #[declare_response_packet(packet_type = ResponseType::Version)]
 pub struct ResponseVersion {
     pub version: u32,
@@ -48,7 +47,6 @@ pub struct ResponseVersion {
     pub extensions: Vec<Extension>,
 }
 
-#[derive(Debug)]
 #[declare_response_packet(packet_type = ResponseType::Status)]
 pub struct ResponseStatus {
     pub status_code: StatusCode,
@@ -66,19 +64,16 @@ impl ResponseStatus {
     }
 }
 
-#[derive(Debug)]
 #[declare_response_packet(packet_type = ResponseType::Handle)]
 pub struct ResponseHandle {
     pub handle: String,
 }
 
-#[derive(Debug)]
 #[declare_response_packet(packet_type = ResponseType::Data)]
 pub struct ResponseData {
     pub data: SSHString,
 }
 
-#[derive(Debug)]
 #[declare_response_packet(packet_type = ResponseType::Attrs)]
 pub struct ResponseAttrs {
     pub attrs: Attrs,

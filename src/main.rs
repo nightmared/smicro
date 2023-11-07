@@ -1,10 +1,9 @@
 use std::io::{stdin, stdout, Read, Write};
 
-use command::{Command, CommandType};
+use command::{Command, CommandType, CommandWrapper};
 use deserialize::{parse_command, Packet};
 use log::{debug, error, info, trace, LevelFilter};
 use nom::Err;
-use response::Response;
 use serialize::SerializeForSftp;
 use state::GlobalState;
 use syslog::{BasicLogger, Facility, Formatter3164};
@@ -12,13 +11,14 @@ use syslog::{BasicLogger, Facility, Formatter3164};
 mod command;
 mod deserialize;
 mod error;
+mod extensions;
 mod response;
 mod serialize;
 mod state;
 mod types;
 
 use error::Error;
-use response::{ResponsePacket, ResponseStatus};
+use response::{ResponsePacket, ResponseStatus, ResponseWrapper};
 use types::StatusCode;
 
 pub const MAX_PKT_SIZE: usize = 256000;
@@ -27,14 +27,15 @@ pub const MAX_READ_LENGTH: usize = MAX_PKT_SIZE - 1000;
 fn process_command(
     mut output: impl Write,
     state: &mut GlobalState,
-    mut pkt: Packet<Box<dyn Command>, CommandType>,
+    pkt: Packet<CommandType, CommandWrapper>,
 ) -> Result<(), Error> {
+    let mut hdr = pkt.hdr;
     debug!("Received command {:?}", pkt.data);
     let response = match pkt.data.process(state) {
         Ok(res) => res,
         Err(Error::StatusCode(status)) => {
             info!("Got the status code {status:?} handling the packet");
-            Response::Status(ResponseStatus {
+            ResponseWrapper::Status(ResponseStatus {
                 status_code: status,
                 error_message: "",
                 language: "english",
@@ -42,7 +43,7 @@ fn process_command(
         }
         Err(e) => {
             error!("Got an error handling the packet: {e:?}");
-            Response::Status(ResponseStatus {
+            ResponseWrapper::Status(ResponseStatus {
                 status_code: StatusCode::Failure,
                 error_message: "Got an error processing your query",
                 language: "english",
@@ -51,20 +52,20 @@ fn process_command(
     };
     // overwrite the request_id if this is a status response, because there is some operations
     // (well, one really: init) that do not supply one, and status should always provide one
-    if let Response::Status(_) = response {
-        if pkt.hdr.request_id.is_none() {
-            pkt.hdr.request_id = Some(0);
+    if let ResponseWrapper::Status(_) = response {
+        if hdr.request_id.is_none() {
+            hdr.request_id = Some(0);
         }
     }
 
     debug!("Got the response {response:?}");
 
-    let req_id_size = if pkt.hdr.request_id.is_some() { 4 } else { 0 };
+    let req_id_size = if hdr.request_id.is_some() { 4 } else { 0 };
     let length = response.get_size() + 1 + req_id_size;
     let mut buf = vec![0u8; 4 + length];
     (length as u32).serialize(&mut buf[0..4]);
     (response.get_type() as u8).serialize(&mut buf[4..5]);
-    if let Some(req_id) = pkt.hdr.request_id {
+    if let Some(req_id) = hdr.request_id {
         req_id.serialize(&mut buf[5..9]);
     }
     response.serialize(&mut buf[5 + req_id_size..]);

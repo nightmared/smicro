@@ -5,7 +5,7 @@ use quote::{quote, quote_spanned, ToTokens};
 
 use syn::{
     parse, parse::Parser, punctuated::Punctuated, spanned::Spanned, Attribute, Expr, ExprLit,
-    ExprPath, Fields, ItemEnum, ItemStruct, Lit, Meta, Path, Token, Type, Visibility,
+    ExprPath, Fields, ItemEnum, ItemStruct, Lit, Meta, Token, Type,
 };
 
 struct PacketArgs {
@@ -53,7 +53,7 @@ fn parse_packet_args(input: TokenStream) -> PacketArgs {
 }
 
 #[proc_macro_attribute]
-pub fn serialize_struct(_attrs: TokenStream, item: TokenStream) -> TokenStream {
+pub fn gen_serialize_impl(_attrs: TokenStream, item: TokenStream) -> TokenStream {
     let ast: ItemStruct = parse(item.clone()).unwrap();
     let name = ast.ident;
 
@@ -106,19 +106,17 @@ pub fn declare_response_packet(attrs: TokenStream, item: TokenStream) -> TokenSt
     let args = parse_packet_args(attrs);
 
     let ty = args.ty;
-    let responsepacket_impl = quote!(
+
+    quote! {
+        #[derive(Debug)]
+        #[smicro_macros::gen_serialize_impl]
+        #ast
+
         impl crate::response::ResponsePacket for #name {
             fn get_type(&self) -> ResponseType {
                 #ty
             }
         }
-    );
-
-    quote! {
-        #[smicro_macros::serialize_struct]
-        #ast
-
-        #responsepacket_impl
     }
     .into()
 }
@@ -127,14 +125,13 @@ struct Field<'a> {
     name: &'a Ident,
     ty: &'a Type,
     args: FieldArgs,
-    vis: &'a Visibility,
     attrs: Vec<&'a Attribute>,
 }
 
 struct FieldArgs {
     optional: bool,
     vec: bool,
-    parser: Path,
+    parser: Expr,
 }
 
 fn parse_field_args(input: TokenStream) -> syn::Result<FieldArgs> {
@@ -174,11 +171,7 @@ fn parse_field_args(input: TokenStream) -> syn::Result<FieldArgs> {
                         }
                     }
                     "parser" => {
-                        if let Expr::Path(ExprPath { path, .. }) = &namevalue.value {
-                            parser = Some(path.clone());
-                        } else {
-                            abort!(&namevalue.span(), "Expected a boolean");
-                        }
+                        parser = Some(namevalue.value.clone());
                     }
                     _ => abort!(arg.span(), "Unsupported macro parameter"),
                 }
@@ -236,7 +229,6 @@ fn get_fields(fields: &Fields) -> Vec<Field> {
             name: field.ident.as_ref().expect("Should be a names struct"),
             ty: &field.ty,
             args: args.unwrap(),
-            vis: &field.vis,
             attrs: additional_attributes,
         });
     }
@@ -246,7 +238,7 @@ fn get_fields(fields: &Fields) -> Vec<Field> {
 
 #[proc_macro_error]
 #[proc_macro_attribute]
-pub fn declare_command_packet(_attrs: TokenStream, item: TokenStream) -> TokenStream {
+pub fn declare_deserializable_struct(_attrs: TokenStream, item: TokenStream) -> TokenStream {
     let ast: ItemStruct = parse(item.clone()).unwrap();
     let name = &ast.ident;
 
@@ -256,7 +248,7 @@ pub fn declare_command_packet(_attrs: TokenStream, item: TokenStream) -> TokenSt
         .iter()
         .map(|field| {
             Ident::new(
-                &format!("__internal_field_value_{}", field.name),
+                &format!("__internal_field_{}", field.name),
                 field.name.span(),
             )
         })
@@ -283,6 +275,7 @@ pub fn declare_command_packet(_attrs: TokenStream, item: TokenStream) -> TokenSt
             }
             parsing_code = if field.args.optional {
                 quote!(
+                    #[allow(non_snake_case)]
                     let mut #new_field_ident = None;
                     if remaining_data.len() > 0 {
                         #parsing_code
@@ -292,6 +285,7 @@ pub fn declare_command_packet(_attrs: TokenStream, item: TokenStream) -> TokenSt
             } else {
                 quote!(
                     #parsing_code
+                    #[allow(non_snake_case)]
                     let #new_field_ident = new_field_value;
                 )
             };
@@ -333,11 +327,11 @@ pub fn declare_command_packet(_attrs: TokenStream, item: TokenStream) -> TokenSt
             quote!( #ty )
         };
         let attrs = &field.attrs;
-        let vis = &field.vis;
-        quote_spanned!(name.span() => #(#attrs) * #vis #name: #ty, )
+        quote_spanned!(name.span() => #(#attrs) * pub #name: #ty, )
     });
 
     quote! {
+        #[derive(Debug)]
         #(#attrs) * #vis struct #name {
             #(#new_fields)*
         }
