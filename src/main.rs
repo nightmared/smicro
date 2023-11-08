@@ -34,20 +34,12 @@ fn process_command(
     let response = match pkt.data.process(state) {
         Ok(res) => res,
         Err(Error::StatusCode(status)) => {
-            info!("Got the status code {status:?} handling the packet");
-            ResponseWrapper::Status(ResponseStatus {
-                status_code: status,
-                error_message: "",
-                language: "english",
-            })
+            info!("Got the status code {status:?} handling a packet");
+            ResponseWrapper::Status(ResponseStatus::new(status))
         }
         Err(e) => {
-            error!("Got an error handling the packet: {e:?}");
-            ResponseWrapper::Status(ResponseStatus {
-                status_code: StatusCode::Failure,
-                error_message: "Got an error processing your query",
-                language: "english",
-            })
+            error!("Got an error handling a packet: {e:?}");
+            ResponseWrapper::Status(ResponseStatus::new(StatusCode::Failure))
         }
     };
     // overwrite the request_id if this is a status response, because there is some operations

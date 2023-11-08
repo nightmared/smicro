@@ -1,8 +1,11 @@
 use std::{
     ffi::OsString,
-    fs::{canonicalize, metadata, read_link, rename, symlink_metadata, OpenOptions},
+    fs::{
+        canonicalize, metadata, read_link, remove_dir, remove_file, rename, symlink_metadata,
+        DirBuilder, OpenOptions,
+    },
     os::unix::{
-        fs::symlink,
+        fs::{symlink, DirBuilderExt},
         prelude::{FileExt, OpenOptionsExt},
     },
     path::PathBuf,
@@ -23,7 +26,10 @@ use crate::{
         DeserializeSftp, PacketHeader,
     },
     error::{Error, ParsingError},
-    extensions::{Extension as ExtensionTrait, ExtensionPosixRename, POSIX_RENAME_EXT},
+    extensions::{
+        Extension as ExtensionTrait, ExtensionCopyData, ExtensionPosixRename, COPY_DATA_EXT,
+        POSIX_RENAME_EXT,
+    },
     response::{
         ResponseAttrs, ResponseData, ResponseHandle, ResponseName, ResponseStatus, ResponseVersion,
         ResponseWrapper,
@@ -47,9 +53,9 @@ pub enum CommandType {
     //Fsetstat = 10,
     Opendir = 11,
     Readdir = 12,
-    //Remove = 13,
-    //Mkdir = 14,
-    //Rmdir = 15,
+    Remove = 13,
+    Mkdir = 14,
+    Rmdir = 15,
     Realpath = 16,
     Stat = 17,
     Rename = 18,
@@ -72,10 +78,16 @@ impl Command for CommandInit {
     fn process(self, _global_state: &mut GlobalState) -> Result<ResponseWrapper, Error> {
         Ok(ResponseWrapper::Version(ResponseVersion {
             version: 3,
-            extensions: vec![Extension {
-                name: POSIX_RENAME_EXT,
-                data: "1",
-            }],
+            extensions: vec![
+                Extension {
+                    name: POSIX_RENAME_EXT,
+                    data: "1",
+                },
+                Extension {
+                    name: COPY_DATA_EXT,
+                    data: "1",
+                },
+            ],
         }))
     }
 }
@@ -88,7 +100,7 @@ pub struct CommandRealpath {
 
 impl Command for CommandRealpath {
     fn process(self, _global_state: &mut GlobalState) -> Result<ResponseWrapper, Error> {
-        let canonicalized_path = canonicalize(&self.original_path)?.into_os_string();
+        let canonicalized_path = canonicalize(self.original_path)?.into_os_string();
         Ok(ResponseWrapper::Name(ResponseName {
             count: 1,
             names: vec![Stat {
@@ -381,6 +393,52 @@ impl Command for CommandSymlink {
 }
 
 #[declare_deserializable_struct]
+pub struct CommandRemove {
+    #[field(parser = parse_utf8_string)]
+    path: String,
+}
+
+impl Command for CommandRemove {
+    fn process(self, _global_state: &mut GlobalState) -> Result<ResponseWrapper, Error> {
+        remove_file(self.path)?;
+
+        Ok(ResponseWrapper::Status(ResponseStatus::new(StatusCode::Ok)))
+    }
+}
+
+#[declare_deserializable_struct]
+pub struct CommandMkdir {
+    #[field(parser = parse_utf8_string)]
+    path: String,
+    #[field(parser = parse_attrs)]
+    attrs: Attrs,
+}
+
+impl Command for CommandMkdir {
+    fn process(self, _global_state: &mut GlobalState) -> Result<ResponseWrapper, Error> {
+        DirBuilder::new()
+            .mode(self.attrs.permissions.unwrap_or(0o777))
+            .create(&self.path)?;
+
+        Ok(ResponseWrapper::Status(ResponseStatus::new(StatusCode::Ok)))
+    }
+}
+
+#[declare_deserializable_struct]
+pub struct CommandRmdir {
+    #[field(parser = parse_utf8_string)]
+    path: String,
+}
+
+impl Command for CommandRmdir {
+    fn process(self, _global_state: &mut GlobalState) -> Result<ResponseWrapper, Error> {
+        remove_dir(self.path)?;
+
+        Ok(ResponseWrapper::Status(ResponseStatus::new(StatusCode::Ok)))
+    }
+}
+
+#[declare_deserializable_struct]
 pub struct CommandClose {
     #[field(parser = parse_utf8_string)]
     handle: String,
@@ -406,17 +464,17 @@ impl Command for CommandExtended {
     fn process(self, global_state: &mut GlobalState) -> Result<ResponseWrapper, Error> {
         // TODO: if I find enought motivation to do so, create a dedicated macro like
         // `generate_command_wrapper!` below
-        match self.extension.as_str() {
+        Ok(match self.extension.as_str() {
             POSIX_RENAME_EXT => {
-                let ext = ExtensionPosixRename::deserialize(&self.req)
-                    .map(|(_next_data, ext)| ext)
-                    .map_err(|_| Error::InvalidPacket)?;
-                Ok(ext.process(global_state)?)
+                let (_next_data, ext) = ExtensionPosixRename::deserialize(&self.req)?;
+                ext.process(global_state)?
             }
-            _ => Ok(ResponseWrapper::Status(ResponseStatus::new(
-                StatusCode::OpUnsupported,
-            ))),
-        }
+            COPY_DATA_EXT => {
+                let (_next_data, ext) = ExtensionCopyData::deserialize(&self.req)?;
+                ext.process(global_state)?
+            }
+            _ => ResponseWrapper::Status(ResponseStatus::new(StatusCode::OpUnsupported)),
+        })
     }
 }
 
@@ -435,7 +493,7 @@ macro_rules! generate_command_wrapper {
             }
         }
 
-        pub(crate) fn command_deserialize(hdr: PacketHeader<CommandType>, command_data: &[u8]) -> Result<Packet<CommandType, CommandWrapper>, nom::Err<ParsingError<&[u8]>>> {
+        pub(crate) fn command_deserialize(hdr: PacketHeader<CommandType>, command_data: &[u8]) -> Result<Packet<CommandType, CommandWrapper>, nom::Err<ParsingError>> {
             match hdr.ty {
                 $( CommandType::$cmd => {
                     <$ty>::deserialize(command_data).map(|(_next_data, cmd)| Packet {
@@ -463,5 +521,8 @@ generate_command_wrapper!(
     Readlink => CommandReadlink,
     Rename => CommandRename,
     Symlink => CommandSymlink,
-    Extended => CommandExtended
+    Extended => CommandExtended,
+    Remove => CommandRemove,
+    Mkdir => CommandMkdir,
+    Rmdir => CommandRmdir
 );

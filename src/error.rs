@@ -18,14 +18,16 @@ pub enum Error {
         "An infallible error was triggered, this probably indicates a failure in our dependencies"
     )]
     Infallible(#[from] Infallible),
+    #[error("An error ocurred parsing a packet")]
+    ParsingError(#[from] nom::Err<ParsingError>),
 }
 
 #[derive(thiserror::Error, Debug)]
-pub enum ParsingError<I> {
+pub enum ParsingError {
     #[error("Invalid value for a command")]
     InvalidCommandType(#[from] num_enum::TryFromPrimitiveError<crate::CommandType>),
     #[error("Error applying nom combinators")]
-    NomError(#[from] nom::error::Error<I>),
+    NomError,
     #[error("Received an unsupported version number form the client")]
     InvalidVersionNumber(u32),
     #[error("Invalid UTF-8 input from the client")]
@@ -36,9 +38,9 @@ pub enum ParsingError<I> {
     InvalidOpenModes(u32),
 }
 
-impl<I> nom::error::ParseError<I> for ParsingError<I> {
-    fn from_error_kind(input: I, kind: nom::error::ErrorKind) -> Self {
-        ParsingError::NomError(nom::error::Error::from_error_kind(input, kind))
+impl<I> nom::error::ParseError<I> for ParsingError {
+    fn from_error_kind(_input: I, _kind: nom::error::ErrorKind) -> Self {
+        ParsingError::NomError
     }
 
     fn append(_: I, _: nom::error::ErrorKind, other: Self) -> Self {

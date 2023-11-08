@@ -305,7 +305,7 @@ pub fn declare_deserializable_struct(_attrs: TokenStream, item: TokenStream) -> 
 
     let deserialize_impl = quote!(
         impl DeserializeSftp for #name where Self: Sized {
-            fn deserialize(input: &[u8]) -> nom::IResult<&[u8], Self, crate::error::ParsingError<&[u8]>> {
+            fn deserialize(input: &[u8]) -> nom::IResult<&[u8], Self, crate::error::ParsingError> {
                 let mut remaining_data = input;
                 #(#deserialize_fields) *
 

@@ -10,10 +10,10 @@ use crate::{
 };
 
 pub trait DeserializeSftp: Sized {
-    fn deserialize(input: &[u8]) -> IResult<&[u8], Self, ParsingError<&[u8]>>;
+    fn deserialize(input: &[u8]) -> IResult<&[u8], Self, ParsingError>;
 }
 
-pub fn parse_open_modes(input: &[u8]) -> IResult<&[u8], u32, ParsingError<&[u8]>> {
+pub fn parse_open_modes(input: &[u8]) -> IResult<&[u8], u32, ParsingError> {
     let (next_data, modes) = be_u32(input)?;
 
     if modes
@@ -31,7 +31,7 @@ pub fn parse_open_modes(input: &[u8]) -> IResult<&[u8], u32, ParsingError<&[u8]>
     Ok((next_data, modes))
 }
 
-pub fn parse_attrs_flags(input: &[u8]) -> IResult<&[u8], u32, ParsingError<&[u8]>> {
+pub fn parse_attrs_flags(input: &[u8]) -> IResult<&[u8], u32, ParsingError> {
     let (next_data, flags) = be_u32(input)?;
 
     if flags
@@ -47,7 +47,7 @@ pub fn parse_attrs_flags(input: &[u8]) -> IResult<&[u8], u32, ParsingError<&[u8]
     Ok((next_data, flags))
 }
 
-pub fn parse_attrs(input: &[u8]) -> IResult<&[u8], Attrs, ParsingError<&[u8]>> {
+pub fn parse_attrs(input: &[u8]) -> IResult<&[u8], Attrs, ParsingError> {
     let (mut next_data, flags) = parse_attrs_flags(input)?;
 
     let mut size = None;
@@ -100,7 +100,7 @@ pub struct Packet<PktTy, Data> {
     pub data: Data,
 }
 
-fn parse_command_type(input: &[u8]) -> IResult<&[u8], CommandType, ParsingError<&[u8]>> {
+fn parse_command_type(input: &[u8]) -> IResult<&[u8], CommandType, ParsingError> {
     let (next, potential_cmd) = nom::number::streaming::u8(input)?;
     Ok((
         next,
@@ -110,7 +110,7 @@ fn parse_command_type(input: &[u8]) -> IResult<&[u8], CommandType, ParsingError<
     ))
 }
 
-pub fn parse_version(input: &[u8]) -> IResult<&[u8], u32, ParsingError<&[u8]>> {
+pub fn parse_version(input: &[u8]) -> IResult<&[u8], u32, ParsingError> {
     let (next_data, version) = be_u32(input)?;
     // only accept clients that implement version renegociation
     if version != 3 {
@@ -122,9 +122,7 @@ pub fn parse_version(input: &[u8]) -> IResult<&[u8], u32, ParsingError<&[u8]>> {
     Ok((next_data, version))
 }
 
-fn parse_command_header(
-    input: &[u8],
-) -> IResult<&[u8], PacketHeader<CommandType>, ParsingError<&[u8]>> {
+fn parse_command_header(input: &[u8]) -> IResult<&[u8], PacketHeader<CommandType>, ParsingError> {
     let (mut next_data, (length, ty)) =
         tuple((nom::number::streaming::be_u32, parse_command_type))(input)?;
 
@@ -143,7 +141,7 @@ fn parse_command_header(
     ))
 }
 
-pub fn parse_string(input: &[u8]) -> IResult<&[u8], Vec<u8>, ParsingError<&[u8]>> {
+pub fn parse_string(input: &[u8]) -> IResult<&[u8], Vec<u8>, ParsingError> {
     let (next_data, length) = be_u32(input)?;
 
     let (next_data, data) = take(length)(next_data)?;
@@ -151,7 +149,7 @@ pub fn parse_string(input: &[u8]) -> IResult<&[u8], Vec<u8>, ParsingError<&[u8]>
     Ok((next_data, data.to_vec()))
 }
 
-pub fn parse_utf8_string(input: &[u8]) -> IResult<&[u8], String, ParsingError<&[u8]>> {
+pub fn parse_utf8_string(input: &[u8]) -> IResult<&[u8], String, ParsingError> {
     let (next_data, bytes) = parse_string(input)?;
 
     let string = String::from_utf8(bytes)
@@ -163,7 +161,7 @@ pub fn parse_utf8_string(input: &[u8]) -> IResult<&[u8], String, ParsingError<&[
 
 pub fn parse_command(
     input: &[u8],
-) -> IResult<&[u8], Packet<CommandType, CommandWrapper>, ParsingError<&[u8]>> {
+) -> IResult<&[u8], Packet<CommandType, CommandWrapper>, ParsingError> {
     let (_, hdr) = parse_command_header(input)?;
     if input.len() < hdr.length as usize + 4 {
         return Err(nom::Err::Incomplete(nom::Needed::Unknown));
