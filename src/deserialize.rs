@@ -1,3 +1,9 @@
+use std::{
+    ffi::OsStr,
+    os::unix::prelude::OsStrExt,
+    path::{Path, PathBuf},
+};
+
 use nom::{
     bytes::complete::take, number::complete::be_u32, number::complete::be_u64, sequence::tuple,
     IResult, Parser,
@@ -147,6 +153,16 @@ pub fn parse_string(input: &[u8]) -> IResult<&[u8], Vec<u8>, ParsingError> {
     let (next_data, data) = take(length)(next_data)?;
 
     Ok((next_data, data.to_vec()))
+}
+
+pub fn parse_pathbuf(input: &[u8]) -> IResult<&[u8], PathBuf, ParsingError> {
+    let (next_data, length) = be_u32(input)?;
+
+    let (next_data, data) = take(length)(next_data)?;
+
+    let path = Path::new(OsStr::from_bytes(data)).to_path_buf();
+
+    Ok((next_data, path))
 }
 
 pub fn parse_utf8_string(input: &[u8]) -> IResult<&[u8], String, ParsingError> {

@@ -2,6 +2,7 @@ use std::fs::File;
 use std::os::fd::AsRawFd;
 use std::os::fd::FromRawFd;
 use std::os::unix::prelude::FileExt;
+use std::path::PathBuf;
 
 use log::debug;
 use log::warn;
@@ -12,6 +13,7 @@ use smicro_macros::declare_deserializable_struct;
 
 use crate::command::Command;
 use crate::command::CommandRename;
+use crate::deserialize::parse_pathbuf;
 use crate::deserialize::parse_utf8_string;
 use crate::deserialize::DeserializeSftp;
 use crate::error::Error;
@@ -26,10 +28,10 @@ pub trait Extension: std::fmt::Debug {
 
 #[declare_deserializable_struct]
 pub struct ExtensionPosixRename {
-    #[field(parser = parse_utf8_string)]
-    old_path: String,
-    #[field(parser = parse_utf8_string)]
-    new_path: String,
+    #[field(parser = parse_pathbuf)]
+    old_path: PathBuf,
+    #[field(parser = parse_pathbuf)]
+    new_path: PathBuf,
 }
 
 impl Extension for ExtensionPosixRename {

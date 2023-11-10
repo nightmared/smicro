@@ -1,4 +1,4 @@
-use std::convert::Infallible;
+use std::{convert::Infallible, ffi::NulError};
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
@@ -20,6 +20,8 @@ pub enum Error {
     Infallible(#[from] Infallible),
     #[error("An error ocurred parsing a packet")]
     ParsingError(#[from] nom::Err<ParsingError>),
+    #[error("As a path contains a null byte, it cannot be converted to a CString")]
+    NulError(#[from] NulError),
 }
 
 #[derive(thiserror::Error, Debug)]

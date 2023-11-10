@@ -1,17 +1,17 @@
 use std::{
-    ffi::OsString,
+    ffi::{CString, OsString},
     fs::{
-        canonicalize, metadata, read_link, remove_dir, remove_file, rename, symlink_metadata,
-        DirBuilder, OpenOptions,
+        canonicalize, metadata, read_link, remove_dir, remove_file, rename, set_permissions,
+        symlink_metadata, DirBuilder, OpenOptions, Permissions,
     },
     os::unix::{
-        fs::{symlink, DirBuilderExt},
-        prelude::{FileExt, OpenOptionsExt},
+        fs::{chown, symlink, DirBuilderExt},
+        prelude::{FileExt, OpenOptionsExt, OsStrExt, PermissionsExt},
     },
     path::PathBuf,
-    str::FromStr,
 };
 
+use libc::timespec;
 use log::debug;
 use nom::{
     number::complete::{be_u32, be_u64},
@@ -22,8 +22,8 @@ use smicro_macros::declare_deserializable_struct;
 
 use crate::{
     deserialize::{
-        parse_attrs, parse_open_modes, parse_string, parse_utf8_string, parse_version,
-        DeserializeSftp, PacketHeader,
+        parse_attrs, parse_open_modes, parse_pathbuf, parse_string, parse_utf8_string,
+        parse_version, DeserializeSftp, PacketHeader,
     },
     error::{Error, ParsingError},
     extensions::{
@@ -49,8 +49,8 @@ pub enum CommandType {
     Write = 6,
     Lstat = 7,
     Fstat = 8,
-    //Setstat = 9,
-    //Fsetstat = 10,
+    Setstat = 9,
+    Fsetstat = 10,
     Opendir = 11,
     Readdir = 12,
     Remove = 13,
@@ -94,8 +94,8 @@ impl Command for CommandInit {
 
 #[declare_deserializable_struct]
 pub struct CommandRealpath {
-    #[field(parser = parse_utf8_string)]
-    original_path: String,
+    #[field(parser = parse_pathbuf)]
+    original_path: PathBuf,
 }
 
 impl Command for CommandRealpath {
@@ -115,22 +115,21 @@ impl Command for CommandRealpath {
 
 #[declare_deserializable_struct]
 pub struct CommandOpendir {
-    #[field(parser = parse_utf8_string)]
-    dir_path: String,
+    #[field(parser = parse_pathbuf)]
+    dir_path: PathBuf,
 }
 
 impl Command for CommandOpendir {
     fn process(self, global_state: &mut GlobalState) -> Result<ResponseWrapper, Error> {
-        let dir_path = PathBuf::from_str(&self.dir_path)?;
-        if !dir_path.is_dir() {
+        if !self.dir_path.is_dir() {
             return Ok(ResponseWrapper::Status(ResponseStatus::new(
                 StatusCode::Failure,
             )));
         }
 
-        let dir_list = dir_path.read_dir()?;
+        let dir_list = self.dir_path.read_dir()?;
 
-        let handle = global_state.create_dir_handle(dir_path, dir_list);
+        let handle = global_state.create_dir_handle(self.dir_path, dir_list);
 
         Ok(ResponseWrapper::Handle(ResponseHandle { handle }))
     }
@@ -180,13 +179,13 @@ impl Command for CommandReaddir {
 
 #[declare_deserializable_struct]
 pub struct CommandLstat {
-    #[field(parser = parse_utf8_string)]
-    filename: String,
+    #[field(parser = parse_pathbuf)]
+    filename: PathBuf,
 }
 
 impl Command for CommandLstat {
     fn process(self, _global_state: &mut GlobalState) -> Result<ResponseWrapper, Error> {
-        let stat = symlink_metadata(self.filename.as_str())?;
+        let stat = symlink_metadata(self.filename)?;
         Ok(ResponseWrapper::Attrs(ResponseAttrs {
             attrs: Attrs::from_metadata(&stat),
         }))
@@ -220,13 +219,14 @@ impl Command for CommandFstat {
 
 #[declare_deserializable_struct]
 pub struct CommandStat {
-    #[field(parser = parse_utf8_string)]
-    filename: String,
+    #[field(parser = parse_pathbuf)]
+    filename: PathBuf,
 }
 
 impl Command for CommandStat {
     fn process(self, _global_state: &mut GlobalState) -> Result<ResponseWrapper, Error> {
-        let stat = metadata(self.filename.as_str())?;
+        let stat = metadata(self.filename)?;
+
         Ok(ResponseWrapper::Attrs(ResponseAttrs {
             attrs: Attrs::from_metadata(&stat),
         }))
@@ -235,8 +235,8 @@ impl Command for CommandStat {
 
 #[declare_deserializable_struct]
 pub struct CommandOpen {
-    #[field(parser = parse_utf8_string)]
-    path: String,
+    #[field(parser = parse_pathbuf)]
+    path: PathBuf,
     #[field(parser = parse_open_modes)]
     open_mode: u32,
     #[field(parser = parse_attrs)]
@@ -245,8 +245,7 @@ pub struct CommandOpen {
 
 impl Command for CommandOpen {
     fn process(self, global_state: &mut GlobalState) -> Result<ResponseWrapper, Error> {
-        let path = PathBuf::from_str(&self.path)?;
-        if path.is_dir() {
+        if self.path.is_dir() {
             Err(StatusCode::Failure)?;
         };
 
@@ -263,11 +262,11 @@ impl Command for CommandOpen {
         if self.open_mode & OpenModes::Exclusive as u32 != 0 {
             options.custom_flags(libc::O_EXCL);
         }
-        debug!("Opening file {path:?} with options {options:?}");
+        debug!("Opening file {:?} with options {:?}", self.path, options);
 
-        let file = options.open(&path)?;
+        let file = options.open(&self.path)?;
 
-        let handle = global_state.create_file_handle(path, file);
+        let handle = global_state.create_file_handle(self.path, file);
 
         Ok(ResponseWrapper::Handle(ResponseHandle { handle }))
     }
@@ -331,10 +330,10 @@ impl Command for CommandWrite {
 
 #[declare_deserializable_struct]
 pub struct CommandRename {
-    #[field(parser = parse_utf8_string)]
-    old_path: String,
-    #[field(parser = parse_utf8_string)]
-    new_path: String,
+    #[field(parser = parse_pathbuf)]
+    old_path: PathBuf,
+    #[field(parser = parse_pathbuf)]
+    new_path: PathBuf,
 }
 
 impl Command for CommandRename {
@@ -347,21 +346,19 @@ impl Command for CommandRename {
 
 #[declare_deserializable_struct]
 pub struct CommandReadlink {
-    #[field(parser = parse_utf8_string)]
-    path: String,
+    #[field(parser = parse_pathbuf)]
+    path: PathBuf,
 }
 
 impl Command for CommandReadlink {
     fn process(self, _global_state: &mut GlobalState) -> Result<ResponseWrapper, Error> {
-        let path = PathBuf::from_str(&self.path)?;
-
-        if !path.is_symlink() {
+        if !self.path.is_symlink() {
             return Ok(ResponseWrapper::Status(ResponseStatus::new(
                 StatusCode::NoSuchFile,
             )));
         }
 
-        let target: OsString = read_link(path)?.into();
+        let target: OsString = read_link(self.path)?.into();
         let stat = Stat {
             filename: target.clone(),
             long_filename: target,
@@ -378,10 +375,10 @@ impl Command for CommandReadlink {
 
 #[declare_deserializable_struct]
 pub struct CommandSymlink {
-    #[field(parser = parse_utf8_string)]
-    old_path: String,
-    #[field(parser = parse_utf8_string)]
-    new_path: String,
+    #[field(parser = parse_pathbuf)]
+    old_path: PathBuf,
+    #[field(parser = parse_pathbuf)]
+    new_path: PathBuf,
 }
 
 impl Command for CommandSymlink {
@@ -394,8 +391,8 @@ impl Command for CommandSymlink {
 
 #[declare_deserializable_struct]
 pub struct CommandRemove {
-    #[field(parser = parse_utf8_string)]
-    path: String,
+    #[field(parser = parse_pathbuf)]
+    path: PathBuf,
 }
 
 impl Command for CommandRemove {
@@ -408,8 +405,8 @@ impl Command for CommandRemove {
 
 #[declare_deserializable_struct]
 pub struct CommandMkdir {
-    #[field(parser = parse_utf8_string)]
-    path: String,
+    #[field(parser = parse_pathbuf)]
+    path: PathBuf,
     #[field(parser = parse_attrs)]
     attrs: Attrs,
 }
@@ -426,8 +423,8 @@ impl Command for CommandMkdir {
 
 #[declare_deserializable_struct]
 pub struct CommandRmdir {
-    #[field(parser = parse_utf8_string)]
-    path: String,
+    #[field(parser = parse_pathbuf)]
+    path: PathBuf,
 }
 
 impl Command for CommandRmdir {
@@ -435,6 +432,94 @@ impl Command for CommandRmdir {
         remove_dir(self.path)?;
 
         Ok(ResponseWrapper::Status(ResponseStatus::new(StatusCode::Ok)))
+    }
+}
+
+#[declare_deserializable_struct]
+pub struct CommandSetstat {
+    #[field(parser = parse_pathbuf)]
+    path: PathBuf,
+    #[field(parser = parse_attrs)]
+    attrs: Attrs,
+}
+
+impl Command for CommandSetstat {
+    fn process(self, _global_state: &mut GlobalState) -> Result<ResponseWrapper, Error> {
+        if let Some(size) = self.attrs.size {
+            OpenOptions::new()
+                .write(true)
+                .open(&self.path)?
+                .set_len(size)?;
+        }
+
+        if let Some(perms) = self.attrs.permissions {
+            set_permissions(&self.path, Permissions::from_mode(perms))?;
+        }
+
+        if let Some(mtime) = self.attrs.mtime {
+            let atime = self
+                .attrs
+                .atime
+                .expect("Invariant error: atime is not set, but mtime is");
+            let path = CString::new(self.path.as_os_str().as_bytes())?;
+            let atime = timespec {
+                tv_sec: atime as i64,
+                tv_nsec: 0,
+            };
+            let mtime = timespec {
+                tv_sec: mtime as i64,
+                tv_nsec: 0,
+            };
+            let times = [atime, mtime];
+            let res = unsafe { libc::utimensat(libc::AT_FDCWD, path.as_ptr(), times.as_ptr(), 0) };
+
+            if res != 0 {
+                Err(std::io::Error::last_os_error())?;
+            }
+        }
+
+        if let Some(uid) = self.attrs.uid {
+            let gid = self
+                .attrs
+                .gid
+                .expect("Invariant error: gid is not set, but atime is");
+
+            chown(&self.path, Some(uid), Some(gid))?;
+        }
+
+        Ok(ResponseWrapper::Status(ResponseStatus::new(StatusCode::Ok)))
+    }
+}
+
+#[declare_deserializable_struct]
+pub struct CommandFsetstat {
+    #[field(parser = parse_utf8_string)]
+    handle: String,
+    #[field(parser = parse_attrs)]
+    attrs: Attrs,
+}
+
+impl Command for CommandFsetstat {
+    fn process(self, global_state: &mut GlobalState) -> Result<ResponseWrapper, Error> {
+        let path = match global_state
+            .get_handle(&self.handle)
+            .map(|h| h.filename.clone())
+        {
+            Some(x) => x,
+            None => {
+                return Ok(ResponseWrapper::Status(ResponseStatus::new(
+                    StatusCode::NoSuchFile,
+                )))
+            }
+        };
+
+        // that's not quite as ideal on operating on the file descriptor directly, but that's a
+        // good enough subsitute
+        CommandSetstat {
+            path,
+            attrs: self.attrs,
+        }
+        .process(global_state)
     }
 }
 
@@ -524,5 +609,7 @@ generate_command_wrapper!(
     Extended => CommandExtended,
     Remove => CommandRemove,
     Mkdir => CommandMkdir,
-    Rmdir => CommandRmdir
+    Rmdir => CommandRmdir,
+    Setstat => CommandSetstat,
+    Fsetstat => CommandFsetstat
 );

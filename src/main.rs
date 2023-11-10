@@ -1,4 +1,4 @@
-use std::io::{stdin, stdout, Read, Write};
+use std::io::{stdin, stdout, ErrorKind as IOErrorKind, Read, Write};
 
 use command::{Command, CommandType, CommandWrapper};
 use deserialize::{parse_command, Packet};
@@ -34,8 +34,20 @@ fn process_command(
     let response = match pkt.data.process(state) {
         Ok(res) => res,
         Err(Error::StatusCode(status)) => {
-            info!("Got the status code {status:?} handling a packet");
+            debug!("Got the status code {status:?} handling a packet");
             ResponseWrapper::Status(ResponseStatus::new(status))
+        }
+        Err(Error::IoError(e)) => {
+            let code = match e.kind() {
+                IOErrorKind::NotFound => StatusCode::NoSuchFile,
+                IOErrorKind::InvalidData => StatusCode::BadMessage,
+                IOErrorKind::PermissionDenied => StatusCode::PermissionDenied,
+                IOErrorKind::BrokenPipe => StatusCode::ConnectionLost,
+                _ => StatusCode::Failure,
+            };
+
+            error!("Got an IO error handling a packet: {e:?}");
+            ResponseWrapper::Status(ResponseStatus::new(code))
         }
         Err(e) => {
             error!("Got an error handling a packet: {e:?}");
@@ -81,7 +93,7 @@ fn main() -> Result<(), Error> {
 
     let logger = syslog::unix(formatter)?;
     log::set_boxed_logger(Box::new(BasicLogger::new(logger)))
-        .map(|()| log::set_max_level(LevelFilter::Debug))?;
+        .map(|()| log::set_max_level(LevelFilter::Info))?;
 
     let mut input = stdin().lock();
     let mut output = stdout().lock();
