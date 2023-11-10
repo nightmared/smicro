@@ -5,7 +5,7 @@ use quote::{quote, quote_spanned, ToTokens};
 
 use syn::{
     parse, parse::Parser, punctuated::Punctuated, spanned::Spanned, Attribute, Expr, ExprLit,
-    ExprPath, Fields, ItemEnum, ItemStruct, Lit, Meta, Token, Type,
+    ExprPath, Fields, GenericParam, ItemEnum, ItemStruct, LifetimeParam, Lit, Meta, Token, Type,
 };
 
 struct PacketArgs {
@@ -241,6 +241,7 @@ fn get_fields(fields: &Fields) -> Vec<Field> {
 pub fn declare_deserializable_struct(_attrs: TokenStream, item: TokenStream) -> TokenStream {
     let ast: ItemStruct = parse(item.clone()).unwrap();
     let name = &ast.ident;
+    let generics = &ast.generics;
 
     let fields = get_fields(&ast.fields);
 
@@ -303,9 +304,17 @@ pub fn declare_deserializable_struct(_attrs: TokenStream, item: TokenStream) -> 
         .iter()
         .map(|(_, assignment_code)| assignment_code);
 
+    let mut fake_lifetime = quote!();
+    let mut lifetime_constraint = quote!();
+    for param in &generics.params {
+        if let GenericParam::Lifetime(LifetimeParam { .. }) = param {
+            fake_lifetime = quote!( 'fakelif );
+            lifetime_constraint = quote!( , 'a: 'fakelif );
+        }
+    }
     let deserialize_impl = quote!(
-        impl DeserializeSftp for #name where Self: Sized {
-            fn deserialize(input: &[u8]) -> nom::IResult<&[u8], Self, crate::error::ParsingError> {
+        impl<'a  , #fake_lifetime> DeserializeSftp<'a> for #name<#fake_lifetime> where Self: Sized  #lifetime_constraint {
+            fn deserialize(input: &'a [u8]) -> nom::IResult<&'a [u8], Self, crate::error::ParsingError>  {
                 let mut remaining_data = input;
                 #(#deserialize_fields) *
 
@@ -332,7 +341,7 @@ pub fn declare_deserializable_struct(_attrs: TokenStream, item: TokenStream) -> 
 
     quote! {
         #[derive(Debug)]
-        #(#attrs) * #vis struct #name {
+        #(#attrs) * #vis struct #name #generics {
             #(#new_fields)*
         }
 

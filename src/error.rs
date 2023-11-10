@@ -33,7 +33,7 @@ pub enum ParsingError {
     #[error("Received an unsupported version number form the client")]
     InvalidVersionNumber(u32),
     #[error("Invalid UTF-8 input from the client")]
-    FromUTF8Error(#[from] std::string::FromUtf8Error),
+    NonUTF8String(#[from] std::str::Utf8Error),
     #[error("Invalid value for the attribute flags")]
     InvalidAttrsFlags(u32),
     #[error("Invalid value for the open modes of a file")]

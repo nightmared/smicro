@@ -15,8 +15,8 @@ use crate::{
     types::{Attrs, AttrsFlags, OpenModes},
 };
 
-pub trait DeserializeSftp: Sized {
-    fn deserialize(input: &[u8]) -> IResult<&[u8], Self, ParsingError>;
+pub trait DeserializeSftp<'a>: Sized {
+    fn deserialize(input: &'a [u8]) -> IResult<&'a [u8], Self, ParsingError>;
 }
 
 pub fn parse_open_modes(input: &[u8]) -> IResult<&[u8], u32, ParsingError> {
@@ -147,12 +147,12 @@ fn parse_command_header(input: &[u8]) -> IResult<&[u8], PacketHeader<CommandType
     ))
 }
 
-pub fn parse_string(input: &[u8]) -> IResult<&[u8], Vec<u8>, ParsingError> {
+pub fn parse_slice(input: &[u8]) -> IResult<&[u8], &[u8], ParsingError> {
     let (next_data, length) = be_u32(input)?;
 
     let (next_data, data) = take(length)(next_data)?;
 
-    Ok((next_data, data.to_vec()))
+    Ok((next_data, data))
 }
 
 pub fn parse_pathbuf(input: &[u8]) -> IResult<&[u8], PathBuf, ParsingError> {
@@ -166,9 +166,10 @@ pub fn parse_pathbuf(input: &[u8]) -> IResult<&[u8], PathBuf, ParsingError> {
 }
 
 pub fn parse_utf8_string(input: &[u8]) -> IResult<&[u8], String, ParsingError> {
-    let (next_data, bytes) = parse_string(input)?;
+    let (next_data, bytes) = parse_slice(input)?;
 
-    let string = String::from_utf8(bytes)
+    let string = std::str::from_utf8(bytes)
+        .map(|x| x.to_string())
         .map_err(ParsingError::from)
         .map_err(nom::Err::Failure)?;
 

@@ -22,7 +22,7 @@ use smicro_macros::declare_deserializable_struct;
 
 use crate::{
     deserialize::{
-        parse_attrs, parse_open_modes, parse_pathbuf, parse_string, parse_utf8_string,
+        parse_attrs, parse_open_modes, parse_pathbuf, parse_slice, parse_utf8_string,
         parse_version, DeserializeSftp, PacketHeader,
     },
     error::{Error, ParsingError},
@@ -309,16 +309,16 @@ impl Command for CommandRead {
 }
 
 #[declare_deserializable_struct]
-pub struct CommandWrite {
+pub struct CommandWrite<'a> {
     #[field(parser = parse_utf8_string)]
     handle: String,
     #[field(parser = be_u64)]
     offset: u64,
-    #[field(parser = parse_string)]
-    data: Vec<u8>,
+    #[field(parser = parse_slice)]
+    data: &'a [u8],
 }
 
-impl Command for CommandWrite {
+impl<'a> Command for CommandWrite<'a> {
     fn process(self, global_state: &mut GlobalState) -> Result<ResponseWrapper, Error> {
         let (_name, file) = global_state.get_file_handle(&self.handle)?;
 
@@ -566,11 +566,11 @@ impl Command for CommandExtended {
 macro_rules! generate_command_wrapper {
     ($($cmd:ident => $ty:ty),*) => {
         #[derive(Debug)]
-        pub enum CommandWrapper {
+        pub enum CommandWrapper<'a> {
             $($cmd($ty)),*
         }
 
-        impl Command for CommandWrapper {
+        impl<'a> Command for CommandWrapper<'a> {
             fn process(self, global_state: &mut GlobalState) -> Result<ResponseWrapper, Error> {
                 match self {
                     $(CommandWrapper::$cmd(val) => val.process(global_state)),*
@@ -578,7 +578,7 @@ macro_rules! generate_command_wrapper {
             }
         }
 
-        pub(crate) fn command_deserialize(hdr: PacketHeader<CommandType>, command_data: &[u8]) -> Result<Packet<CommandType, CommandWrapper>, nom::Err<ParsingError>> {
+        pub(crate) fn command_deserialize<'a>(hdr: PacketHeader<CommandType>, command_data: &'a [u8]) -> Result<Packet<CommandType, CommandWrapper<'a>>, nom::Err<ParsingError>> {
             match hdr.ty {
                 $( CommandType::$cmd => {
                     <$ty>::deserialize(command_data).map(|(_next_data, cmd)| Packet {
@@ -602,7 +602,7 @@ generate_command_wrapper!(
     Stat => CommandStat,
     Open => CommandOpen,
     Read => CommandRead,
-    Write => CommandWrite,
+    Write => CommandWrite<'a>,
     Readlink => CommandReadlink,
     Rename => CommandRename,
     Symlink => CommandSymlink,

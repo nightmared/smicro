@@ -122,11 +122,11 @@ fn main() -> Result<(), Error> {
             }
 
             Ok((next_data, pkt)) => {
+                process_command(&mut output, &mut state, pkt)?;
                 // TODO: do this with less overhead
                 let mut new_buf = Vec::with_capacity(MAX_PKT_SIZE);
                 new_buf.extend_from_slice(next_data);
                 buf = new_buf;
-                process_command(&mut output, &mut state, pkt)?;
             }
         }
     }
