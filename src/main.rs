@@ -170,9 +170,9 @@ fn main() -> Result<(), Error> {
         match res {
             Err(Err::Incomplete(_)) => {
                 trace!("Not enough data, trying to read more from stdin");
-                let written = input.read(
-                    &mut buf[cur_pos..core::cmp::min(cur_pos + MAX_PKT_SIZE, 2 * MAX_PKT_SIZE)],
-                )?;
+                // Read enough data to hold *at least* a packet, but without overwriting previous
+                // data
+                let written = input.read(&mut buf[cur_pos..cur_pos + MAX_PKT_SIZE - data_start])?;
                 trace!("Read {written} bytes");
                 if written == 0 {
                     info!("The client closed the connection, shutting down");
