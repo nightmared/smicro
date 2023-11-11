@@ -534,14 +534,14 @@ impl Command for CommandClose {
 }
 
 #[declare_deserializable_struct]
-pub struct CommandExtended {
+pub struct CommandExtended<'a> {
     #[field(parser = parse_utf8_string)]
     extension: String,
-    #[field(parser = nom::combinator::rest.map(Vec::from))]
-    req: Vec<u8>,
+    #[field(parser = nom::combinator::rest)]
+    req: &'a [u8],
 }
 
-impl Command for CommandExtended {
+impl<'a> Command for CommandExtended<'a> {
     fn process(self, global_state: &mut GlobalState) -> Result<ResponseWrapper, Error> {
         // TODO: if I find enought motivation to do so, create a dedicated macro like
         // `generate_command_wrapper!` below
@@ -602,7 +602,7 @@ generate_command_wrapper!(
     Readlink => CommandReadlink,
     Rename => CommandRename,
     Symlink => CommandSymlink,
-    Extended => CommandExtended,
+    Extended => CommandExtended<'a>,
     Remove => CommandRemove,
     Mkdir => CommandMkdir,
     Rmdir => CommandRmdir,

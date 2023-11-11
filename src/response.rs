@@ -14,7 +14,8 @@ pub enum ResponseType {
     Data = 103,
     Name = 104,
     Attrs = 105,
-    ExtendedReply = 201,
+    // Not used yet
+    //ExtendedReply = 201,
 }
 
 #[derive(Debug)]
@@ -27,7 +28,7 @@ pub enum ResponseWrapper<'a> {
     Handle(ResponseHandle),
     Data(ResponseData<'a>),
     Attrs(ResponseAttrs),
-    ExtendedReply(ResponseExtendedReply),
+    //ExtendedReply(ResponseExtendedReply),
 }
 
 pub trait ResponsePacket {
@@ -98,7 +99,7 @@ pub struct ResponseAttrs {
     pub attrs: Attrs,
 }
 
-#[declare_response_packet(packet_type = ResponseType::ExtendedReply)]
-pub struct ResponseExtendedReply {
-    pub data: Vec<u8>,
-}
+//#[declare_response_packet(packet_type = ResponseType::ExtendedReply)]
+//pub struct ResponseExtendedReply {
+//    pub data: Vec<u8>,
+//}
