@@ -1,7 +1,4 @@
-use std::{
-    io::{stdin, stdout, ErrorKind as IOErrorKind, Read, Write},
-    ptr::copy_nonoverlapping,
-};
+use std::io::{stdin, stdout, ErrorKind as IOErrorKind, Read, Write};
 
 use command::{Command, CommandType, CommandWrapper};
 use deserialize::{parse_command, Packet};
@@ -24,7 +21,9 @@ use error::Error;
 use response::{ResponsePacket, ResponseStatus, ResponseWrapper};
 use types::StatusCode;
 
-pub const MAX_PKT_SIZE: usize = 256000;
+// this is the first multiple of a page size that span more than 256 000 (the openss-sftp max
+// packet size)
+pub const MAX_PKT_SIZE: usize = 4096 * 63;
 pub const MAX_READ_LENGTH: usize = MAX_PKT_SIZE - 1000;
 
 fn process_command(
@@ -86,6 +85,64 @@ fn process_command(
     Ok(())
 }
 
+unsafe fn create_read_buffer() -> Result<&'static mut [u8], Error> {
+    // reserve a memory map where we map twice our memory mapping, so that there is no risk of
+    // overwriting an existing memory map
+    let overwritable_mmaping = libc::mmap(
+        std::ptr::null_mut(),
+        2 * MAX_PKT_SIZE,
+        libc::PROT_READ | libc::PROT_WRITE,
+        libc::MAP_ANONYMOUS | libc::MAP_PRIVATE,
+        -1,
+        0,
+    );
+    if overwritable_mmaping as usize == usize::MAX {
+        return Err(Error::AllocationFailed(std::io::Error::last_os_error()));
+    }
+
+    let fd = libc::memfd_create(b"read_buffer\0".as_ptr() as *const i8, 0);
+    if fd == -1 {
+        return Err(Error::VirtualFileCreationFailed(
+            std::io::Error::last_os_error(),
+        ));
+    }
+
+    if libc::ftruncate(fd, MAX_PKT_SIZE as i64) == -1 {
+        return Err(Error::VirtualFileTruncationFailed(
+            std::io::Error::last_os_error(),
+        ));
+    }
+
+    let first_map = libc::mmap(
+        overwritable_mmaping,
+        MAX_PKT_SIZE,
+        libc::PROT_READ | libc::PROT_WRITE,
+        libc::MAP_FIXED | libc::MAP_SHARED,
+        fd,
+        0,
+    );
+    if first_map as usize == usize::MAX {
+        return Err(Error::AllocationFailed(std::io::Error::last_os_error()));
+    }
+
+    let second_map = libc::mmap(
+        overwritable_mmaping.offset(MAX_PKT_SIZE as isize),
+        MAX_PKT_SIZE,
+        libc::PROT_READ | libc::PROT_WRITE,
+        libc::MAP_FIXED | libc::MAP_SHARED,
+        fd,
+        0,
+    );
+    if second_map as usize == usize::MAX {
+        return Err(Error::AllocationFailed(std::io::Error::last_os_error()));
+    }
+
+    Ok(std::slice::from_raw_parts_mut(
+        overwritable_mmaping as *mut u8,
+        2 * MAX_PKT_SIZE,
+    ))
+}
+
 fn main() -> Result<(), Error> {
     let formatter = Formatter3164 {
         facility: Facility::LOG_USER,
@@ -101,7 +158,7 @@ fn main() -> Result<(), Error> {
     let mut input = stdin().lock();
     let mut output = stdout().lock();
 
-    let mut buf: Vec<u8> = vec![0; 2 * MAX_PKT_SIZE];
+    let buf = unsafe { create_read_buffer() }?;
     let mut data_start = 0;
     let mut cur_pos = 0;
 
@@ -133,19 +190,10 @@ fn main() -> Result<(), Error> {
                 // The start of the next packet is at the beginning of the data we haven't read yet
                 data_start = cur_pos - next_data.len();
 
-                if cur_pos > MAX_PKT_SIZE {
-                    let length_to_copy = cur_pos - data_start;
-                    // costly, but it's not easy to build a real ringbuffer without resorting to memory
-                    // mapping trickeries
-                    unsafe {
-                        copy_nonoverlapping(
-                            buf[data_start..cur_pos].as_ptr(),
-                            buf.as_mut_ptr(),
-                            length_to_copy,
-                        );
-                    }
-                    data_start = 0;
-                    cur_pos = length_to_copy;
+                // Thanks to the properties of our doubly-mapped buffer, we can loop like this
+                if data_start >= MAX_PKT_SIZE {
+                    data_start %= MAX_PKT_SIZE;
+                    cur_pos %= MAX_PKT_SIZE;
                 }
             }
         }

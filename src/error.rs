@@ -22,6 +22,12 @@ pub enum Error {
     ParsingError(#[from] nom::Err<ParsingError>),
     #[error("As a path contains a null byte, it cannot be converted to a CString")]
     NulError(#[from] NulError),
+    #[error("A memory allocation failed")]
+    AllocationFailed(std::io::Error),
+    #[error("Could not create a virtual buffer with memfd_create")]
+    VirtualFileCreationFailed(std::io::Error),
+    #[error("Could not truncate the virtual buffer")]
+    VirtualFileTruncationFailed(std::io::Error),
 }
 
 #[derive(thiserror::Error, Debug)]
