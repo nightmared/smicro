@@ -3,7 +3,7 @@ use smicro_macros::{
 };
 
 use crate::serialize::SerializeForSftp;
-use crate::types::{Attrs, Extension, SSHString, Stat, StatusCode};
+use crate::types::{Attrs, Extension, Stat, StatusCode};
 
 #[derive(Debug, Eq, PartialEq, num_enum::TryFromPrimitive, num_enum::IntoPrimitive)]
 #[repr(u8)]
@@ -20,12 +20,12 @@ pub enum ResponseType {
 #[derive(Debug)]
 #[implement_responsepacket_on_enum]
 #[serialize_variants_in_enum]
-pub enum ResponseWrapper {
+pub enum ResponseWrapper<'a> {
     Status(ResponseStatus),
     Version(ResponseVersion),
     Name(ResponseName),
     Handle(ResponseHandle),
-    Data(ResponseData),
+    Data(ResponseData<'a>),
     Attrs(ResponseAttrs),
     ExtendedReply(ResponseExtendedReply),
 }
@@ -82,9 +82,15 @@ pub struct ResponseHandle {
     pub handle: String,
 }
 
-#[declare_response_packet(packet_type = ResponseType::Data)]
-pub struct ResponseData {
-    pub data: SSHString,
+#[derive(Debug)]
+pub struct ResponseData<'a> {
+    pub data: &'a [u8],
+}
+
+impl<'a> ResponsePacket for ResponseData<'a> {
+    fn get_type(&self) -> ResponseType {
+        ResponseType::Data
+    }
 }
 
 #[declare_response_packet(packet_type = ResponseType::Attrs)]

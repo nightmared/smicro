@@ -355,6 +355,7 @@ pub fn declare_deserializable_struct(_attrs: TokenStream, item: TokenStream) -> 
 pub fn serialize_variants_in_enum(_attrs: TokenStream, item: TokenStream) -> TokenStream {
     let ast: ItemEnum = parse(item.clone()).unwrap();
     let name = ast.ident;
+    let generics = &ast.generics;
 
     let mut variants = Vec::with_capacity(ast.variants.len());
 
@@ -374,7 +375,7 @@ pub fn serialize_variants_in_enum(_attrs: TokenStream, item: TokenStream) -> Tok
 
     let mut output = item.into();
     quote! {
-        impl SerializeForSftp for #name {
+        impl #generics SerializeForSftp for #name #generics {
             fn get_size(&self) -> usize {
                 match self {
                     #(#name::#variants(val) => val.get_size()),*
@@ -398,6 +399,7 @@ pub fn serialize_variants_in_enum(_attrs: TokenStream, item: TokenStream) -> Tok
 pub fn implement_responsepacket_on_enum(_attrs: TokenStream, item: TokenStream) -> TokenStream {
     let ast: ItemEnum = parse(item.clone()).unwrap();
     let name = &ast.ident;
+    let generics = &ast.generics;
 
     let mut variants = Vec::with_capacity(ast.variants.len());
 
@@ -418,7 +420,7 @@ pub fn implement_responsepacket_on_enum(_attrs: TokenStream, item: TokenStream) 
     quote! {
         #ast
 
-        impl ResponsePacket for #name {
+        impl #generics ResponsePacket for #name #generics {
             fn get_type(&self) -> crate::response::ResponseType {
                 match self {
                     #(#name::#variants(val) => val.get_type()),*

@@ -1,6 +1,9 @@
 use std::{io::Write, os::unix::prelude::OsStrExt};
 
-use crate::types::{Attrs, AttrsFlags, SSHString};
+use crate::{
+    response::ResponseData,
+    types::{Attrs, AttrsFlags},
+};
 
 pub trait SerializeForSftp: Sized {
     fn get_size(&self) -> usize;
@@ -90,14 +93,14 @@ impl SerializeForSftp for std::ffi::OsString {
     }
 }
 
-impl SerializeForSftp for SSHString {
+impl<'a> SerializeForSftp for ResponseData<'a> {
     fn get_size(&self) -> usize {
-        4 + self.0.len()
+        4 + self.data.len()
     }
 
     fn serialize<W: Write>(&self, mut output: W) -> Result<(), std::io::Error> {
-        (self.0.len() as u32).serialize(&mut output)?;
-        output.write_all(self.0.as_slice())
+        (self.data.len() as u32).serialize(&mut output)?;
+        output.write_all(self.data)
     }
 }
 

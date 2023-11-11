@@ -1,4 +1,5 @@
 use std::{
+    cmp::min,
     ffi::{CString, OsString},
     fs::{
         canonicalize, metadata, read_link, remove_dir, remove_file, rename, set_permissions,
@@ -35,7 +36,7 @@ use crate::{
         ResponseWrapper,
     },
     state::GlobalState,
-    types::{Attrs, AttrsFlags, Extension, HandleType, OpenModes, SSHString, Stat, StatusCode},
+    types::{Attrs, AttrsFlags, Extension, HandleType, OpenModes, Stat, StatusCode},
     Packet, MAX_READ_LENGTH,
 };
 
@@ -282,17 +283,14 @@ pub struct CommandRead {
     len: u32,
 }
 
+// use a static buffer so that there is no buffer allocation on each read
+static mut READ_BUF: [u8; MAX_READ_LENGTH] = [0; MAX_READ_LENGTH];
+
 impl Command for CommandRead {
     fn process(self, global_state: &mut GlobalState) -> Result<ResponseWrapper, Error> {
         let (_name, file) = global_state.get_file_handle(&self.handle)?;
 
-        let len = if self.len as usize > MAX_READ_LENGTH {
-            MAX_READ_LENGTH
-        } else {
-            self.len as usize
-        };
-
-        let mut buf = vec![0; len];
+        let mut buf = unsafe { &mut READ_BUF[..min(MAX_READ_LENGTH, self.len as usize)] };
         let nb_read = file.read_at(&mut buf, self.offset)?;
         if nb_read == 0 {
             return Ok(ResponseWrapper::Status(ResponseStatus::new(
@@ -300,10 +298,8 @@ impl Command for CommandRead {
             )));
         }
 
-        buf.truncate(nb_read);
-
         Ok(ResponseWrapper::Data(ResponseData {
-            data: SSHString(buf),
+            data: unsafe { &READ_BUF[..nb_read] },
         }))
     }
 }

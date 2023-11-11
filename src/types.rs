@@ -247,6 +247,3 @@ pub struct Extension {
     pub name: &'static str,
     pub data: &'static str,
 }
-
-#[derive(Debug)]
-pub struct SSHString(pub Vec<u8>);

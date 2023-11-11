@@ -46,6 +46,4 @@ That's a good question.
 
 On a contemporary CPU (i7-11700), both reading and writing files with the OpenSSH `sftp` binary yields over 1.2GB/s.
 
-In fact, the write path is limited by the speed of OpenSSH itself and tops at around 1.6GB/s while consuming around 40% of a CPU core (which is quite understandable, given that OpenSSH must perform cryptographic operations on the data it transfers with the client, while we only need to copy data to/from a file).
-
-On the other hand, the read path is more severely limited, as we allocate a buffer the size of the read for every read, to the point that perf reports `smicro` spends nearly half its time allocating buffers when performing a read.
+In fact, both reading and writing are limited by the speed of OpenSSH itself and top at around 1.6-1.7GB/s while consuming around 40-50% of a CPU core (the fact the OpenSSH is the limiting factor is quite understandable, given that it must perform cryptographic operations on the data it transfers with the client, while we only need to copy data to/from a file).
