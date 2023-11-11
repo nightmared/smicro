@@ -1,4 +1,7 @@
-use std::io::{stdin, stdout, ErrorKind as IOErrorKind, Read, Write};
+use std::{
+    io::{stdin, stdout, ErrorKind as IOErrorKind, Read, Write},
+    ptr::copy_nonoverlapping,
+};
 
 use command::{Command, CommandType, CommandWrapper};
 use deserialize::{parse_command, Packet};
@@ -98,22 +101,25 @@ fn main() -> Result<(), Error> {
     let mut input = stdin().lock();
     let mut output = stdout().lock();
 
-    let mut buf: Vec<u8> = Vec::with_capacity(MAX_PKT_SIZE);
+    let mut buf: Vec<u8> = vec![0; 2 * MAX_PKT_SIZE];
+    let mut data_start = 0;
+    let mut cur_pos = 0;
 
     let mut state = GlobalState::new();
     loop {
-        let res = parse_command(buf.as_slice());
+        let res = parse_command(&buf[data_start..cur_pos]);
         match res {
             Err(Err::Incomplete(_)) => {
                 trace!("Not enough data, trying to read more from stdin");
-                let mut tmp_buf = [0u8; 8192];
-                let written = input.read(&mut tmp_buf)?;
+                let written = input.read(
+                    &mut buf[cur_pos..core::cmp::min(cur_pos + MAX_PKT_SIZE, 2 * MAX_PKT_SIZE)],
+                )?;
                 trace!("Read {written} bytes");
                 if written == 0 {
                     info!("The client closed the connection, shutting down");
                     return Ok(());
                 }
-                buf.extend_from_slice(&tmp_buf[0..written]);
+                cur_pos += written;
             }
             Err(e) => {
                 error!("Got an error while trying to parse the packet: {:?}", e);
@@ -123,10 +129,24 @@ fn main() -> Result<(), Error> {
 
             Ok((next_data, pkt)) => {
                 process_command(&mut output, &mut state, pkt)?;
-                // TODO: do this with less overhead
-                let mut new_buf = Vec::with_capacity(MAX_PKT_SIZE);
-                new_buf.extend_from_slice(next_data);
-                buf = new_buf;
+
+                // The start of the next packet is at the beginning of the data we haven't read yet
+                data_start = cur_pos - next_data.len();
+
+                if cur_pos > MAX_PKT_SIZE {
+                    let length_to_copy = cur_pos - data_start;
+                    // costly, but it's not easy to build a real ringbuffer without resorting to memory
+                    // mapping trickeries
+                    unsafe {
+                        copy_nonoverlapping(
+                            buf[data_start..cur_pos].as_ptr(),
+                            buf.as_mut_ptr(),
+                            length_to_copy,
+                        );
+                    }
+                    data_start = 0;
+                    cur_pos = length_to_copy;
+                }
             }
         }
     }

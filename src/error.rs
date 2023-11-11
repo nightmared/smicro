@@ -38,6 +38,8 @@ pub enum ParsingError {
     InvalidAttrsFlags(u32),
     #[error("Invalid value for the open modes of a file")]
     InvalidOpenModes(u32),
+    #[error("Invalid packet length")]
+    InvalidPacketLength(usize),
 }
 
 impl<I> nom::error::ParseError<I> for ParsingError {

@@ -16,3 +16,6 @@ thiserror = "1.0.50"
 smicro-macros = { path = "smicro-macros" }
 chrono = "0.4.31"
 libc = "0.2.149"
+
+[profile.release]
+debug = true

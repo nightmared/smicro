@@ -13,6 +13,7 @@ use crate::{
     command::{command_deserialize, CommandType, CommandWrapper},
     error::ParsingError,
     types::{Attrs, AttrsFlags, OpenModes},
+    MAX_PKT_SIZE,
 };
 
 pub trait DeserializeSftp<'a>: Sized {
@@ -165,6 +166,16 @@ pub fn parse_pathbuf(input: &[u8]) -> IResult<&[u8], PathBuf, ParsingError> {
     Ok((next_data, path))
 }
 
+pub fn parse_utf8_slice(input: &[u8]) -> IResult<&[u8], &str, ParsingError> {
+    let (next_data, bytes) = parse_slice(input)?;
+
+    let string = std::str::from_utf8(bytes)
+        .map_err(ParsingError::from)
+        .map_err(nom::Err::Failure)?;
+
+    Ok((next_data, string))
+}
+
 pub fn parse_utf8_string(input: &[u8]) -> IResult<&[u8], String, ParsingError> {
     let (next_data, bytes) = parse_slice(input)?;
 
@@ -180,6 +191,11 @@ pub fn parse_command(
     input: &[u8],
 ) -> IResult<&[u8], Packet<CommandType, CommandWrapper>, ParsingError> {
     let (_, hdr) = parse_command_header(input)?;
+    if hdr.length as usize > MAX_PKT_SIZE {
+        return Err(nom::Err::Failure(ParsingError::InvalidPacketLength(
+            hdr.length as usize,
+        )));
+    }
     if input.len() < hdr.length as usize + 4 {
         return Err(nom::Err::Incomplete(nom::Needed::Unknown));
     }

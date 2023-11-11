@@ -22,8 +22,8 @@ use smicro_macros::declare_deserializable_struct;
 
 use crate::{
     deserialize::{
-        parse_attrs, parse_open_modes, parse_pathbuf, parse_slice, parse_utf8_string,
-        parse_version, DeserializeSftp, PacketHeader,
+        parse_attrs, parse_open_modes, parse_pathbuf, parse_slice, parse_utf8_slice,
+        parse_utf8_string, parse_version, DeserializeSftp, PacketHeader,
     },
     error::{Error, ParsingError},
     extensions::{
@@ -310,8 +310,8 @@ impl Command for CommandRead {
 
 #[declare_deserializable_struct]
 pub struct CommandWrite<'a> {
-    #[field(parser = parse_utf8_string)]
-    handle: String,
+    #[field(parser = parse_utf8_slice)]
+    handle: &'a str,
     #[field(parser = be_u64)]
     offset: u64,
     #[field(parser = parse_slice)]
