@@ -65,8 +65,7 @@ pub fn gen_serialize_impl(_attrs: TokenStream, item: TokenStream) -> TokenStream
 
     let write_entries = fields.iter().map(|field| {
         quote!(
-            self.#field.serialize(&mut addr);
-            addr = &mut addr[self.#field.get_size()..];
+            self.#field.serialize(&mut output)?;
         )
     });
     let size_entries = fields.iter().map(|field| {
@@ -78,12 +77,13 @@ pub fn gen_serialize_impl(_attrs: TokenStream, item: TokenStream) -> TokenStream
         impl SerializeForSftp for #name {
             fn get_size(&self) -> usize {
                 let mut size = 0;
-                #(#size_entries) *
+                #(#size_entries)*
                 size
             }
 
-            fn serialize(&self, mut addr: &mut [u8]) {
+            fn serialize<W: std::io::Write>(&self, mut output: W) -> Result<(), std::io::Error> {
                 #(#write_entries) *
+                Ok(())
             }
         }
     );
@@ -381,9 +381,9 @@ pub fn serialize_variants_in_enum(_attrs: TokenStream, item: TokenStream) -> Tok
                 }
             }
 
-            fn serialize(&self, addr: &mut [u8]) {
+            fn serialize<W: std::io::Write>(&self, mut output: W) -> Result<(), std::io::Error> {
                 match self {
-                    #(#name::#variants(val) => val.serialize(addr)),*
+                    #(#name::#variants(val) => val.serialize(output)),*
                 }
             }
         }

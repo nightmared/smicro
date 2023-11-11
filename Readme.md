@@ -41,3 +41,11 @@ That's a good question.
 * You need to modify an sftp server to add/change some behaviour, and this procject is a good base for that, being small and fairly self-contained
 * Because you don't trust the SFTP server of OpenSSH (but in that case, good luck finding an SSH server you trust!)
 * You like to break your setup in subtle ways and want to see how this is gonna bite you later
+
+## Performance
+
+On a contemporary CPU (i7-11700), both reading and writing files with the OpenSSH `sftp` binary yields over 1.2GB/s.
+
+In fact, the write path is limited by the speed of OpenSSH itself and tops at around 1.6GB/s while consuming around 40% of a CPU core (which is quite understandable, given that OpenSSH must perform cryptographic operations on the data it transfers with the client, while we only need to copy data to/from a file).
+
+On the other hand, the read path is more severely limited, as we allocate a buffer the size of the read for every read, to the point that perf reports `smicro` spends nearly half its time allocating buffers when performing a read.

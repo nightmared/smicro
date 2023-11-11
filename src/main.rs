@@ -1,4 +1,8 @@
-use std::io::{stdin, stdout, ErrorKind as IOErrorKind, Read, Write};
+use std::{
+    fs::File,
+    io::{stdin, ErrorKind as IOErrorKind, Read, Write},
+    os::fd::FromRawFd,
+};
 
 use command::{Command, CommandType, CommandWrapper};
 use deserialize::{parse_command, Packet};
@@ -24,7 +28,7 @@ use types::StatusCode;
 // this is the first multiple of a page size that span more than 256 000 (the openss-sftp max
 // packet size)
 pub const MAX_PKT_SIZE: usize = 4096 * 63;
-pub const MAX_READ_LENGTH: usize = MAX_PKT_SIZE - 1000;
+pub const MAX_READ_LENGTH: usize = 255000;
 
 fn process_command(
     mut output: impl Write,
@@ -68,16 +72,12 @@ fn process_command(
 
     let req_id_size = if hdr.request_id.is_some() { 4 } else { 0 };
     let length = response.get_size() + 1 + req_id_size;
-    let mut buf = vec![0u8; 4 + length];
-    (length as u32).serialize(&mut buf[0..4]);
-    (response.get_type() as u8).serialize(&mut buf[4..5]);
+    (length as u32).serialize(&mut output)?;
+    (response.get_type() as u8).serialize(&mut output)?;
     if let Some(req_id) = hdr.request_id {
-        req_id.serialize(&mut buf[5..9]);
+        req_id.serialize(&mut output)?;
     }
-    response.serialize(&mut buf[5 + req_id_size..]);
-
-    trace!("Writing {buf:?}");
-    output.write_all(&buf)?;
+    response.serialize(&mut output)?;
     output.flush()?;
 
     trace!("Response written");
@@ -156,7 +156,9 @@ fn main() -> Result<(), Error> {
         .map(|()| log::set_max_level(LevelFilter::Info))?;
 
     let mut input = stdin().lock();
-    let mut output = stdout().lock();
+    // We do not use std::io::stdout() as it uses internally a LineWriter method that consumes a lot of CPu
+    // searching for newlines
+    let mut output = unsafe { File::from_raw_fd(libc::STDOUT_FILENO) };
 
     let buf = unsafe { create_read_buffer() }?;
     let mut data_start = 0;
