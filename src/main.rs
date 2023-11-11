@@ -88,7 +88,7 @@ fn process_command(
 unsafe fn create_read_buffer() -> Result<&'static mut [u8], Error> {
     // reserve a memory map where we map twice our memory mapping, so that there is no risk of
     // overwriting an existing memory map
-    let overwritable_mmaping = libc::mmap(
+    let overwritable_mapping = libc::mmap(
         std::ptr::null_mut(),
         2 * MAX_PKT_SIZE,
         libc::PROT_READ | libc::PROT_WRITE,
@@ -96,9 +96,17 @@ unsafe fn create_read_buffer() -> Result<&'static mut [u8], Error> {
         -1,
         0,
     );
-    if overwritable_mmaping as usize == usize::MAX {
+    if overwritable_mapping as usize == usize::MAX {
         return Err(Error::AllocationFailed(std::io::Error::last_os_error()));
     }
+
+    // Right now, our memory looks like this:
+    // <------- overwritable_mapping ------->
+    // --------------------------------------
+    // | MAX_PKT_SIZE    | MAX_PKT_SIZE     |
+    // --------------------------------------
+    //                  | |
+    //            Anonymous memory
 
     let fd = libc::memfd_create(b"read_buffer\0".as_ptr() as *const i8, 0);
     if fd == -1 {
@@ -114,7 +122,7 @@ unsafe fn create_read_buffer() -> Result<&'static mut [u8], Error> {
     }
 
     let first_map = libc::mmap(
-        overwritable_mmaping,
+        overwritable_mapping,
         MAX_PKT_SIZE,
         libc::PROT_READ | libc::PROT_WRITE,
         libc::MAP_FIXED | libc::MAP_SHARED,
@@ -126,7 +134,7 @@ unsafe fn create_read_buffer() -> Result<&'static mut [u8], Error> {
     }
 
     let second_map = libc::mmap(
-        overwritable_mmaping.offset(MAX_PKT_SIZE as isize),
+        overwritable_mapping.offset(MAX_PKT_SIZE as isize),
         MAX_PKT_SIZE,
         libc::PROT_READ | libc::PROT_WRITE,
         libc::MAP_FIXED | libc::MAP_SHARED,
@@ -137,8 +145,24 @@ unsafe fn create_read_buffer() -> Result<&'static mut [u8], Error> {
         return Err(Error::AllocationFailed(std::io::Error::last_os_error()));
     }
 
+    // Our memory now looks like this:
+    // <------- overwritable_mapping ------->
+    // <--- first_map ---><--- second_map -->
+    // --------------------------------------
+    // | MAX_PKT_SIZE    | MAX_PKT_SIZE     |
+    // --------------------------------------
+    //         \               /
+    //          \             /
+    //           \           /
+    //        <-- memfd file -->
+    //        -------------------
+    //        | MAX_PKT_SIZE    |
+    //        -------------------
+    // Which means both memory areas are completely aliases,
+    // and the two mapping together loop, hence forming a ringbuffer
+
     Ok(std::slice::from_raw_parts_mut(
-        overwritable_mmaping as *mut u8,
+        overwritable_mapping as *mut u8,
         2 * MAX_PKT_SIZE,
     ))
 }
