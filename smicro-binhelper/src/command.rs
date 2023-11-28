@@ -20,13 +20,17 @@ use nom::{
 };
 
 use smicro_macros::declare_deserializable_struct;
-
-use crate::{
+use smicro_types::sftp::{
     deserialize::{
         parse_attrs, parse_open_modes, parse_pathbuf, parse_slice, parse_utf8_slice,
-        parse_utf8_string, parse_version, DeserializeSftp, PacketHeader,
+        parse_utf8_string, parse_version, PacketHeader,
     },
-    error::{Error, ParsingError},
+    types::{Attrs, AttrsFlags, CommandType, Extension, OpenModes, Stat},
+};
+use smicro_types::{deserialize::DeserializePacket, error::ParsingError, sftp::types::StatusCode};
+
+use crate::{
+    error::Error,
     extensions::{
         Extension as ExtensionTrait, ExtensionCopyData, ExtensionPosixRename, COPY_DATA_EXT,
         POSIX_RENAME_EXT,
@@ -36,34 +40,9 @@ use crate::{
         ResponseWrapper,
     },
     state::GlobalState,
-    types::{Attrs, AttrsFlags, Extension, HandleType, OpenModes, Stat, StatusCode},
+    types::{generate_stat_from_path, HandleType},
     Packet, MAX_READ_LENGTH,
 };
-
-#[derive(Debug, Eq, PartialEq, num_enum::TryFromPrimitive, num_enum::IntoPrimitive)]
-#[repr(u8)]
-pub enum CommandType {
-    Init = 1,
-    Open = 3,
-    Close = 4,
-    Read = 5,
-    Write = 6,
-    Lstat = 7,
-    Fstat = 8,
-    Setstat = 9,
-    Fsetstat = 10,
-    Opendir = 11,
-    Readdir = 12,
-    Remove = 13,
-    Mkdir = 14,
-    Rmdir = 15,
-    Realpath = 16,
-    Stat = 17,
-    Rename = 18,
-    Readlink = 19,
-    Symlink = 20,
-    Extended = 200,
-}
 
 pub trait Command: std::fmt::Debug {
     fn process(self, global_state: &mut GlobalState) -> Result<ResponseWrapper, Error>;
@@ -161,7 +140,7 @@ impl Command for CommandReaddir {
             let metadata = entry.metadata()?;
             names
                 .names
-                .push(Stat::generate_from_path(entry.file_name(), metadata, true)?);
+                .push(generate_stat_from_path(entry.file_name(), metadata, true)?);
             names.count += 1;
         }
 

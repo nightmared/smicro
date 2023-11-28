@@ -1,7 +1,8 @@
 use std::fs::File;
-use std::os::fd::AsRawFd;
-use std::os::fd::FromRawFd;
-use std::os::unix::prelude::FileExt;
+use std::os::{
+    fd::{AsRawFd, FromRawFd},
+    unix::prelude::FileExt,
+};
 use std::path::PathBuf;
 
 use log::debug;
@@ -10,17 +11,18 @@ use nom::Parser;
 
 use nom::number::complete::be_u64;
 use smicro_macros::declare_deserializable_struct;
+use smicro_types::{
+    deserialize::DeserializePacket,
+    sftp::{
+        deserialize::{parse_pathbuf, parse_utf8_string},
+        types::StatusCode,
+    },
+};
 
-use crate::command::Command;
-use crate::command::CommandRename;
-use crate::deserialize::parse_pathbuf;
-use crate::deserialize::parse_utf8_string;
-use crate::deserialize::DeserializeSftp;
+use crate::command::{Command, CommandRename};
 use crate::error::Error;
-use crate::response::ResponseStatus;
-use crate::response::ResponseWrapper;
+use crate::response::{ResponseStatus, ResponseWrapper};
 use crate::state::GlobalState;
-use crate::types::StatusCode;
 
 pub trait Extension: std::fmt::Debug {
     fn process(self, global_state: &mut GlobalState) -> Result<ResponseWrapper, Error>;
@@ -70,7 +72,7 @@ impl Extension for ExtensionCopyData {
         {
             warn!("Requested a copy of data from a file unto itself");
             return Ok(ResponseWrapper::Status(ResponseStatus::new(
-                crate::types::StatusCode::Failure,
+                StatusCode::Failure,
             )));
         }
 

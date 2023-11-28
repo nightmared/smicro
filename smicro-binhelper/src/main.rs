@@ -4,26 +4,30 @@ use std::{
     os::fd::FromRawFd,
 };
 
-use command::{Command, CommandType, CommandWrapper};
-use deserialize::{parse_command, Packet};
 use log::{debug, error, info, trace, LevelFilter};
-use nom::Err;
-use serialize::SerializeForSftp;
-use state::GlobalState;
+use nom::{Err, IResult};
 use syslog::{BasicLogger, Facility, Formatter3164};
 
+use smicro_types::{
+    error::ParsingError,
+    serialize::SerializePacket,
+    sftp::{
+        deserialize::{parse_command_header, Packet},
+        types::{CommandType, StatusCode},
+    },
+};
+
 mod command;
-mod deserialize;
 mod error;
 mod extensions;
 mod response;
-mod serialize;
 mod state;
 mod types;
 
+use command::{command_deserialize, Command, CommandWrapper};
 use error::Error;
 use response::{ResponsePacket, ResponseStatus, ResponseWrapper};
-use types::StatusCode;
+use state::GlobalState;
 
 // this is the first multiple of a page size that span more than 256 000 (the openss-sftp max
 // packet size)
@@ -165,6 +169,27 @@ unsafe fn create_read_buffer() -> Result<&'static mut [u8], Error> {
         overwritable_mapping as *mut u8,
         2 * MAX_PKT_SIZE,
     ))
+}
+
+pub fn parse_command(
+    input: &[u8],
+) -> IResult<&[u8], Packet<CommandType, CommandWrapper>, ParsingError> {
+    let (_, hdr) = parse_command_header(input)?;
+    if hdr.length as usize > MAX_PKT_SIZE {
+        return Err(nom::Err::Failure(ParsingError::InvalidPacketLength(
+            hdr.length as usize,
+        )));
+    }
+    if input.len() < hdr.length as usize + 4 {
+        return Err(nom::Err::Incomplete(nom::Needed::Unknown));
+    }
+    let command_data = if hdr.request_id.is_some() {
+        &input[9..hdr.length as usize + 4]
+    } else {
+        &input[5..hdr.length as usize + 4]
+    };
+    let next_data = &input[hdr.length as usize + 4..];
+    Ok((next_data, command_deserialize(hdr, command_data)?))
 }
 
 fn main() -> Result<(), Error> {

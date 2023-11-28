@@ -1,0 +1,15 @@
+[package]
+name = "smicro_binhelper"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+log = "0.4.20"
+nom = "7.1.3"
+num_enum = "0.7.0"
+syslog = "6.1.0"
+thiserror = "1.0.50"
+smicro_macros = { path = "../smicro-macros" }
+smicro_types = { path = "../smicro-types" }
+chrono = "0.4.31"
+libc = "0.2.149"

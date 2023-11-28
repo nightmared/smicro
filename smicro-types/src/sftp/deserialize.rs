@@ -9,16 +9,9 @@ use nom::{
     IResult, Parser,
 };
 
-use crate::{
-    command::{command_deserialize, CommandType, CommandWrapper},
-    error::ParsingError,
-    types::{Attrs, AttrsFlags, OpenModes},
-    MAX_PKT_SIZE,
-};
+use crate::error::ParsingError;
 
-pub trait DeserializeSftp<'a>: Sized {
-    fn deserialize(input: &'a [u8]) -> IResult<&'a [u8], Self, ParsingError>;
-}
+use super::types::{Attrs, AttrsFlags, CommandType, OpenModes};
 
 pub fn parse_open_modes(input: &[u8]) -> IResult<&[u8], u32, ParsingError> {
     let (next_data, modes) = be_u32(input)?;
@@ -129,7 +122,9 @@ pub fn parse_version(input: &[u8]) -> IResult<&[u8], u32, ParsingError> {
     Ok((next_data, version))
 }
 
-fn parse_command_header(input: &[u8]) -> IResult<&[u8], PacketHeader<CommandType>, ParsingError> {
+pub fn parse_command_header(
+    input: &[u8],
+) -> IResult<&[u8], PacketHeader<CommandType>, ParsingError> {
     let (mut next_data, (length, ty)) =
         tuple((nom::number::streaming::be_u32, parse_command_type))(input)?;
 
@@ -185,25 +180,4 @@ pub fn parse_utf8_string(input: &[u8]) -> IResult<&[u8], String, ParsingError> {
         .map_err(nom::Err::Failure)?;
 
     Ok((next_data, string))
-}
-
-pub fn parse_command(
-    input: &[u8],
-) -> IResult<&[u8], Packet<CommandType, CommandWrapper>, ParsingError> {
-    let (_, hdr) = parse_command_header(input)?;
-    if hdr.length as usize > MAX_PKT_SIZE {
-        return Err(nom::Err::Failure(ParsingError::InvalidPacketLength(
-            hdr.length as usize,
-        )));
-    }
-    if input.len() < hdr.length as usize + 4 {
-        return Err(nom::Err::Incomplete(nom::Needed::Unknown));
-    }
-    let command_data = if hdr.request_id.is_some() {
-        &input[9..hdr.length as usize + 4]
-    } else {
-        &input[5..hdr.length as usize + 4]
-    };
-    let next_data = &input[hdr.length as usize + 4..];
-    Ok((next_data, command_deserialize(hdr, command_data)?))
 }

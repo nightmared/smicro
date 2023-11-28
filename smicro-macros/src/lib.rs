@@ -74,7 +74,7 @@ pub fn gen_serialize_impl(_attrs: TokenStream, item: TokenStream) -> TokenStream
         )
     });
     let serialize_impl = quote!(
-        impl SerializeForSftp for #name {
+        impl SerializePacket for #name {
             fn get_size(&self) -> usize {
                 let mut size = 0;
                 #(#size_entries)*
@@ -313,8 +313,8 @@ pub fn declare_deserializable_struct(_attrs: TokenStream, item: TokenStream) -> 
         }
     }
     let deserialize_impl = quote!(
-        impl<'a  , #fake_lifetime> DeserializeSftp<'a> for #name<#fake_lifetime> where Self: Sized  #lifetime_constraint {
-            fn deserialize(input: &'a [u8]) -> nom::IResult<&'a [u8], Self, crate::error::ParsingError>  {
+        impl<'a  , #fake_lifetime> DeserializePacket<'a> for #name<#fake_lifetime> where Self: Sized  #lifetime_constraint {
+            fn deserialize(input: &'a [u8]) -> nom::IResult<&'a [u8], Self, ::smicro_types::error::ParsingError>  {
                 let mut remaining_data = input;
                 #(#deserialize_fields) *
 
@@ -375,7 +375,7 @@ pub fn serialize_variants_in_enum(_attrs: TokenStream, item: TokenStream) -> Tok
 
     let mut output = item.into();
     quote! {
-        impl #generics SerializeForSftp for #name #generics {
+        impl #generics SerializePacket for #name #generics {
             fn get_size(&self) -> usize {
                 match self {
                     #(#name::#variants(val) => val.get_size()),*

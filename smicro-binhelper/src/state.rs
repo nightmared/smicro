@@ -7,10 +7,9 @@ use std::{
 
 use log::warn;
 
-use crate::{
-    types::StatusCode,
-    types::{Handle, HandleType},
-};
+use smicro_types::sftp::types::StatusCode;
+
+use crate::types::{Handle, HandleType};
 
 #[derive(Debug)]
 pub struct GlobalState {

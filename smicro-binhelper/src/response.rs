@@ -1,22 +1,10 @@
+use std::io::Write;
+
 use smicro_macros::{
     declare_response_packet, implement_responsepacket_on_enum, serialize_variants_in_enum,
 };
-
-use crate::serialize::SerializeForSftp;
-use crate::types::{Attrs, Extension, Stat, StatusCode};
-
-#[derive(Debug, Eq, PartialEq, num_enum::TryFromPrimitive, num_enum::IntoPrimitive)]
-#[repr(u8)]
-pub enum ResponseType {
-    Version = 2,
-    Status = 101,
-    Handle = 102,
-    Data = 103,
-    Name = 104,
-    Attrs = 105,
-    // Not used yet
-    //ExtendedReply = 201,
-}
+use smicro_types::serialize::SerializePacket;
+use smicro_types::sftp::types::{Attrs, Extension, ResponseType, Stat, StatusCode};
 
 #[derive(Debug)]
 #[implement_responsepacket_on_enum]
@@ -28,7 +16,7 @@ pub enum ResponseWrapper<'a> {
     Handle(ResponseHandle),
     Data(ResponseData<'a>),
     Attrs(ResponseAttrs),
-    //ExtendedReply(ResponseExtendedReply),
+    ExtendedReply(ResponseExtendedReply),
 }
 
 pub trait ResponsePacket {
@@ -88,6 +76,17 @@ pub struct ResponseData<'a> {
     pub data: &'a [u8],
 }
 
+impl<'a> SerializePacket for ResponseData<'a> {
+    fn get_size(&self) -> usize {
+        4 + self.data.len()
+    }
+
+    fn serialize<W: Write>(&self, mut output: W) -> Result<(), std::io::Error> {
+        (self.data.len() as u32).serialize(&mut output)?;
+        output.write_all(self.data)
+    }
+}
+
 impl<'a> ResponsePacket for ResponseData<'a> {
     fn get_type(&self) -> ResponseType {
         ResponseType::Data
@@ -99,7 +98,7 @@ pub struct ResponseAttrs {
     pub attrs: Attrs,
 }
 
-//#[declare_response_packet(packet_type = ResponseType::ExtendedReply)]
-//pub struct ResponseExtendedReply {
-//    pub data: Vec<u8>,
-//}
+#[declare_response_packet(packet_type = ResponseType::ExtendedReply)]
+pub struct ResponseExtendedReply {
+    pub data: Vec<u8>,
+}

@@ -316,7 +316,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "smicro"
+name = "smicro_binhelper"
 version = "0.1.0"
 dependencies = [
  "chrono",
@@ -324,19 +324,30 @@ dependencies = [
  "log",
  "nom",
  "num_enum",
- "smicro-macros",
+ "smicro_macros",
+ "smicro_types",
  "syslog",
  "thiserror",
 ]
 
 [[package]]
-name = "smicro-macros"
+name = "smicro_macros"
 version = "0.1.0"
 dependencies = [
  "proc-macro-error",
  "proc-macro2",
  "quote",
  "syn 2.0.38",
+]
+
+[[package]]
+name = "smicro_types"
+version = "0.1.0"
+dependencies = [
+ "nom",
+ "num_enum",
+ "smicro_macros",
+ "thiserror",
 ]
 
 [[package]]
