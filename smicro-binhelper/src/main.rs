@@ -6,6 +6,7 @@ use std::{
 
 use log::{debug, error, info, trace, LevelFilter};
 use nom::{Err, IResult};
+use smicro_common::create_read_buffer;
 use syslog::{BasicLogger, Facility, Formatter3164};
 
 use smicro_types::{
@@ -29,7 +30,7 @@ use error::Error;
 use response::{ResponsePacket, ResponseStatus, ResponseWrapper};
 use state::GlobalState;
 
-// this is the first multiple of a page size that span more than 256 000 (the openss-sftp max
+// this is the first multiple of a page size that span more than 256 000 (the openssh-sftp max
 // packet size)
 pub const MAX_PKT_SIZE: usize = 4096 * 63;
 pub const MAX_READ_LENGTH: usize = 255000;
@@ -89,88 +90,6 @@ fn process_command(
     Ok(())
 }
 
-unsafe fn create_read_buffer() -> Result<&'static mut [u8], Error> {
-    // reserve a memory map where we map twice our memory mapping, so that there is no risk of
-    // overwriting an existing memory map
-    let overwritable_mapping = libc::mmap(
-        std::ptr::null_mut(),
-        2 * MAX_PKT_SIZE,
-        libc::PROT_READ | libc::PROT_WRITE,
-        libc::MAP_ANONYMOUS | libc::MAP_PRIVATE,
-        -1,
-        0,
-    );
-    if overwritable_mapping as usize == usize::MAX {
-        return Err(Error::AllocationFailed(std::io::Error::last_os_error()));
-    }
-
-    // Right now, our memory looks like this:
-    // <------- overwritable_mapping ------->
-    // --------------------------------------
-    // | MAX_PKT_SIZE    | MAX_PKT_SIZE     |
-    // --------------------------------------
-    //                  | |
-    //            Anonymous memory
-
-    let fd = libc::memfd_create(b"read_buffer\0".as_ptr() as *const i8, 0);
-    if fd == -1 {
-        return Err(Error::VirtualFileCreationFailed(
-            std::io::Error::last_os_error(),
-        ));
-    }
-
-    if libc::ftruncate(fd, MAX_PKT_SIZE as i64) == -1 {
-        return Err(Error::VirtualFileTruncationFailed(
-            std::io::Error::last_os_error(),
-        ));
-    }
-
-    let first_map = libc::mmap(
-        overwritable_mapping,
-        MAX_PKT_SIZE,
-        libc::PROT_READ | libc::PROT_WRITE,
-        libc::MAP_FIXED | libc::MAP_SHARED,
-        fd,
-        0,
-    );
-    if first_map as usize == usize::MAX {
-        return Err(Error::AllocationFailed(std::io::Error::last_os_error()));
-    }
-
-    let second_map = libc::mmap(
-        overwritable_mapping.offset(MAX_PKT_SIZE as isize),
-        MAX_PKT_SIZE,
-        libc::PROT_READ | libc::PROT_WRITE,
-        libc::MAP_FIXED | libc::MAP_SHARED,
-        fd,
-        0,
-    );
-    if second_map as usize == usize::MAX {
-        return Err(Error::AllocationFailed(std::io::Error::last_os_error()));
-    }
-
-    // Our memory now looks like this:
-    // <------- overwritable_mapping ------->
-    // <--- first_map ---><--- second_map -->
-    // --------------------------------------
-    // | MAX_PKT_SIZE    | MAX_PKT_SIZE     |
-    // --------------------------------------
-    //         \               /
-    //          \             /
-    //           \           /
-    //        <-- memfd file -->
-    //        -------------------
-    //        | MAX_PKT_SIZE    |
-    //        -------------------
-    // Which means both memory areas are completely aliases,
-    // and the two mapping together loop, hence forming a ringbuffer
-
-    Ok(std::slice::from_raw_parts_mut(
-        overwritable_mapping as *mut u8,
-        2 * MAX_PKT_SIZE,
-    ))
-}
-
 pub fn parse_command(
     input: &[u8],
 ) -> IResult<&[u8], Packet<CommandType, CommandWrapper>, ParsingError> {
@@ -196,7 +115,7 @@ fn main() -> Result<(), Error> {
     let formatter = Formatter3164 {
         facility: Facility::LOG_USER,
         hostname: None,
-        process: "smicro".into(),
+        process: "smicro_sftp".into(),
         pid: 0,
     };
 
@@ -209,7 +128,7 @@ fn main() -> Result<(), Error> {
     // searching for newlines
     let mut output = unsafe { File::from_raw_fd(libc::STDOUT_FILENO) };
 
-    let buf = unsafe { create_read_buffer() }?;
+    let buf = create_read_buffer(MAX_PKT_SIZE)?;
     let mut data_start = 0;
     let mut cur_pos = 0;
 

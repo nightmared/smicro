@@ -316,6 +316,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "smicro-sshd"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "libc",
+ "log",
+ "nom",
+ "num_enum",
+ "smicro_common",
+ "smicro_macros",
+ "smicro_types",
+ "syslog",
+ "thiserror",
+]
+
+[[package]]
 name = "smicro_binhelper"
 version = "0.1.0"
 dependencies = [
@@ -324,9 +340,18 @@ dependencies = [
  "log",
  "nom",
  "num_enum",
+ "smicro_common",
  "smicro_macros",
  "smicro_types",
  "syslog",
+ "thiserror",
+]
+
+[[package]]
+name = "smicro_common"
+version = "0.1.0"
+dependencies = [
+ "libc",
  "thiserror",
 ]
 

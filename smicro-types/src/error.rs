@@ -3,7 +3,7 @@ pub enum ParsingError {
     #[error("Invalid value for a command")]
     InvalidCommandType(#[from] num_enum::TryFromPrimitiveError<crate::sftp::types::CommandType>),
     #[error("Error applying nom combinators")]
-    NomError,
+    NomError(nom::error::ErrorKind),
     #[error("Received an unsupported version number form the client")]
     InvalidVersionNumber(u32),
     #[error("Invalid UTF-8 input from the client")]
@@ -17,8 +17,8 @@ pub enum ParsingError {
 }
 
 impl<I> nom::error::ParseError<I> for ParsingError {
-    fn from_error_kind(_input: I, _kind: nom::error::ErrorKind) -> Self {
-        ParsingError::NomError
+    fn from_error_kind(_input: I, kind: nom::error::ErrorKind) -> Self {
+        ParsingError::NomError(kind)
     }
 
     fn append(_: I, _: nom::error::ErrorKind, other: Self) -> Self {
