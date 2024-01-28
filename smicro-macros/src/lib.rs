@@ -73,8 +73,9 @@ pub fn gen_serialize_impl(_attrs: TokenStream, item: TokenStream) -> TokenStream
             size += &self.#field.get_size();
         )
     });
+    let generics = ast.generics;
     let serialize_impl = quote!(
-        impl SerializePacket for #name {
+        impl #generics SerializePacket for #name #generics {
             fn get_size(&self) -> usize {
                 let mut size = 0;
                 #(#size_entries)*

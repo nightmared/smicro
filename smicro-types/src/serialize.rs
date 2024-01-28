@@ -98,6 +98,20 @@ impl<T: SerializePacket> SerializePacket for Vec<T> {
     }
 }
 
+impl<'a, T: SerializePacket, const N: usize> SerializePacket for [T; N] {
+    fn get_size(&self) -> usize {
+        self.iter().fold(0, |acc, elem| acc + elem.get_size())
+    }
+
+    fn serialize<W: Write>(&self, mut output: W) -> Result<(), std::io::Error> {
+        for val in self.iter() {
+            val.serialize(&mut output)?;
+        }
+
+        Ok(())
+    }
+}
+
 impl<'a, T: SerializePacket> SerializePacket for &'a [T] {
     fn get_size(&self) -> usize {
         self.iter().fold(0, |acc, elem| acc + elem.get_size())

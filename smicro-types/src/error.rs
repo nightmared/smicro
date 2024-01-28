@@ -2,6 +2,8 @@
 pub enum ParsingError {
     #[error("Invalid value for a command")]
     InvalidCommandType(#[from] num_enum::TryFromPrimitiveError<crate::sftp::types::CommandType>),
+    #[error("Invalid value for a message")]
+    InvalidMessageType(#[from] num_enum::TryFromPrimitiveError<crate::ssh::types::MessageType>),
     #[error("Error applying nom combinators")]
     NomError(nom::error::ErrorKind),
     #[error("Received an unsupported version number form the client")]
@@ -14,6 +16,8 @@ pub enum ParsingError {
     InvalidOpenModes(u32),
     #[error("Invalid packet length")]
     InvalidPacketLength(usize),
+    #[error("Invalid MAC field")]
+    InvalidMac,
 }
 
 impl<I> nom::error::ParseError<I> for ParsingError {
