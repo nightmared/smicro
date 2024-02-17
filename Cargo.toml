@@ -4,3 +4,6 @@ resolver = "2"
 
 [profile.release]
 debug = true
+
+[patch.crates-io]
+p521 = { git = 'https://github.com/RustCrypto/elliptic-curves.git', branch = 'master' }

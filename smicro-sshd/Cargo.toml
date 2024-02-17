@@ -14,5 +14,9 @@ smicro_macros = { path = "../smicro-macros" }
 smicro_types = { path = "../smicro-types" }
 chrono = "0.4.31"
 libc = "0.2.149"
-crypto = "0.5.1"
+elliptic-curve = { version = "0.14.0-pre.5", features = ["ecdh", "sec1", "std"] }
+p521 = { version = "0.14.0-pre", features = ["sha512", "digest", "ecdh"] }
 rand = "0.8.5"
+base64 = "0.21.7"
+ecdsa = { version = "0.17.0-pre.5", features = ["signing"] }
+signature = "2.3.0-pre.3"

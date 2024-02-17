@@ -1,11 +1,12 @@
 use std::{
     io::{self, Read, Write},
     net::{TcpListener, TcpStream},
+    path::Path,
     thread,
 };
 
 use log::{debug, error, info, trace, warn, LevelFilter};
-use messages::Message;
+use messages::{Message, MessageKeyExchangeInit};
 use nom::{
     bytes::streaming::{tag, take, take_until, take_while1},
     combinator::{opt, peek},
@@ -14,11 +15,12 @@ use nom::{
     AsChar, IResult,
 };
 use rand::Rng;
-use state::State;
+use state::{CryptoAlgs, ICryptoAlgs, State};
 use syslog::{BasicLogger, Facility, Formatter3164};
 
 use smicro_common::create_read_buffer;
 use smicro_types::{
+    deserialize::DeserializePacket,
     error::ParsingError,
     serialize::SerializePacket,
     ssh::{deserialize::parse_message_type, types::MessageType},
@@ -30,7 +32,7 @@ mod state;
 
 use error::Error;
 
-use crate::messages::{gen_kex_initial_list, message_process};
+use crate::messages::{gen_kex_initial_list, MessageKexEcdhInit};
 
 // A tad bit above the SFTP max packet size, so that we do not have too much fragmentation
 pub const MAX_PKT_SIZE: usize = 4096 * 64;
@@ -60,7 +62,8 @@ define_state_list!(
     UninitializedSession,
     IdentifierStringSent,
     IdentifierStringReceived,
-    KexSent
+    KexSent,
+    KexReceived
 );
 
 trait SessionState {
@@ -83,7 +86,8 @@ impl SessionState for UninitializedSession {
         input: &'a [u8],
     ) -> Result<(&'a [u8], SessionStates), Error> {
         // Write the identification string
-        stream.write_all(b"SSH-2.0-smicro_ssh\r\n")?;
+        stream.write_all(state.my_identifier_string.as_bytes())?;
+        stream.write_all(b"\r\n")?;
         Ok((
             input,
             SessionStates::IdentifierStringSent(IdentifierStringSent {}),
@@ -109,15 +113,23 @@ impl SessionState for IdentifierStringSent {
             peek(tag(b"SSH-")),
         ))(input)?;
 
-        let (input, _magic) = tag(b"SSH-2.0-")(input)?;
+        let (input, magic) = tag(b"SSH-2.0-")(input)?;
         let (input, softwareversion) = take_while1(|c: u8| {
             let c = c.as_char();
             c.is_ascii_graphic() && c != '-'
         })(input)?;
 
-        let (input, _comment) = opt(preceded(tag(b" "), consume_until_carriage))(input)?;
+        let (input, comment) = opt(preceded(tag(b" "), consume_until_carriage))(input)?;
 
         let (input, _) = consume_carriage(input)?;
+
+        let mut peer_identifier_string = Vec::new();
+        peer_identifier_string.extend_from_slice(magic);
+        peer_identifier_string.extend_from_slice(softwareversion);
+        if let Some(comment) = comment {
+            peer_identifier_string.extend_from_slice(comment);
+        }
+        state.peer_identifier_string = Some(peer_identifier_string);
 
         // this should be free, because we check that this is ascii before, but we can't tell the
         // compiler that
@@ -147,12 +159,19 @@ impl SessionState for IdentifierStringReceived {
         let kex_init_msg = gen_kex_initial_list(state);
         write_message(state, stream, &kex_init_msg)?;
 
-        Ok((input, SessionStates::KexSent(KexSent {})))
+        Ok((
+            input,
+            SessionStates::KexSent(KexSent {
+                my_kex_message: kex_init_msg,
+            }),
+        ))
     }
 }
 
 #[derive(Debug)]
-pub struct KexSent {}
+pub struct KexSent {
+    my_kex_message: MessageKeyExchangeInit,
+}
 
 impl SessionState for KexSent {
     fn process<'a>(
@@ -161,11 +180,53 @@ impl SessionState for KexSent {
         stream: &mut TcpStream,
         input: &'a [u8],
     ) -> Result<(&'a [u8], SessionStates), Error> {
-        let (next_, packet) = parse_packet(input, None, None)?;
-        //trace!("{packet:?}");
-        let msg = message_process(state, stream, packet.payload)?;
-        debug!("{msg:?}");
+        let (next, packet) = parse_packet(input, None, None)?;
 
+        let (message_data, message_type) = parse_message_type(packet.payload)?;
+        if message_type != MessageType::KexInit {
+            return Err(Error::DisallowedMessageType(message_type));
+        }
+
+        let (_, msg) = MessageKeyExchangeInit::deserialize(message_data)?;
+        debug!("Received {:?}", msg);
+        let crypto_algs = msg.compute_crypto_algs()?;
+
+        let next_state = KexReceived {
+            crypto_algs,
+            my_kex_message: self.my_kex_message.clone(),
+            peer_kex_message: msg,
+        };
+
+        Ok((next, SessionStates::KexReceived(next_state)))
+    }
+}
+
+#[derive(Debug)]
+pub struct KexReceived {
+    crypto_algs: Box<dyn ICryptoAlgs>,
+    my_kex_message: MessageKeyExchangeInit,
+    peer_kex_message: MessageKeyExchangeInit,
+}
+
+impl SessionState for KexReceived {
+    fn process<'a>(
+        &mut self,
+        state: &mut State,
+        stream: &mut TcpStream,
+        input: &'a [u8],
+    ) -> Result<(&'a [u8], SessionStates), Error> {
+        let (next, packet) = parse_packet(input, None, None)?;
+
+        let (message_data, message_type) = parse_message_type(packet.payload)?;
+        if message_type != MessageType::KexEcdhInit {
+            return Err(Error::DisallowedMessageType(message_type));
+        }
+
+        let (_, msg) = MessageKexEcdhInit::deserialize(message_data)?;
+        debug!("Received {:?}", msg);
+        self.crypto_algs
+            .get_kex()
+            .perform_key_exchange(state, stream, &msg)?;
         unimplemented!()
     }
 }
@@ -282,7 +343,11 @@ fn handle_packet(stream: io::Result<TcpStream>) -> Result<(), Error> {
     let mut data_start = 0;
     let mut cur_pos = 0;
 
-    let mut global_state = State::new();
+    let mut host_keys = Vec::new();
+    host_keys.push(State::load_hostkey(&Path::new(
+        "/home/sthoby/dev-fast/smicro/host_key",
+    ))?);
+    let mut global_state = State::new(host_keys);
     let mut state = SessionStates::UninitializedSession(UninitializedSession {});
 
     loop {
@@ -342,7 +407,11 @@ fn main() -> Result<(), Error> {
     let listener = TcpListener::bind("127.0.0.1:2222")?;
     for stream in listener.incoming() {
         info!("Received a new connection");
-        thread::spawn(move || handle_packet(stream));
+        thread::spawn(move || {
+            if let Err(e) = handle_packet(stream) {
+                error!("Got an error while handling a stream: {:?}", e);
+            }
+        });
     }
     Ok(())
 }

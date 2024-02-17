@@ -4,8 +4,9 @@ use proc_macro_error::{abort, proc_macro_error};
 use quote::{quote, quote_spanned, ToTokens};
 
 use syn::{
-    parse, parse::Parser, punctuated::Punctuated, spanned::Spanned, Attribute, Expr, ExprLit,
-    ExprPath, Fields, GenericParam, ItemEnum, ItemStruct, LifetimeParam, Lit, Meta, Token, Type,
+    parse, parse::Parser, punctuated::Punctuated, spanned::Spanned, token::Comma, Attribute, Expr,
+    ExprArray, ExprLit, ExprPath, Fields, GenericParam, ItemConst, ItemEnum, ItemStruct,
+    LifetimeParam, Lit, Meta, Token, Type,
 };
 
 struct PacketArgs {
@@ -428,6 +429,67 @@ pub fn implement_responsepacket_on_enum(_attrs: TokenStream, item: TokenStream) 
                 }
             }
         }
+    }
+    .into()
+}
+
+#[proc_macro_error]
+#[proc_macro_attribute]
+pub fn declare_crypto_algs_list(_attrs: TokenStream, item: TokenStream) -> TokenStream {
+    let ast: ItemConst = parse(item.clone()).expect("Not a constant assignment");
+
+    let elems = if let Expr::Array(ref expr_arr) = *ast.expr {
+        &expr_arr.elems
+    } else {
+        abort!(ast.expr, "Not a list of entries");
+    };
+    let entries_len = elems.len();
+    let name_list_ident = syn::Ident::new(&format!("{}_NAMES", ast.ident), ast.ident.span());
+    let mut name_list_values: Punctuated<_, Comma> = Punctuated::new();
+    for e in elems {
+        name_list_values.push(quote! { #e::NAME });
+    }
+
+    let negotiate_alg_ident = syn::Ident::new(
+        &format!("negotiate_alg_{}", ast.ident.to_string().to_lowercase()),
+        ast.ident.span(),
+    );
+    let inner_negotiate_alg_ident =
+        syn::Ident::new(&format!("__negotiate_alg_{}", ast.ident), ast.ident.span());
+
+    let mut match_list = quote! {};
+    for e in elems {
+        match_list = quote! {
+            #match_list
+            if client_alg == <$crate::messages::#e>::NAME {
+                out_variable = Some(<$crate::messages::#e>::new());
+                break 'out;
+            }
+        };
+    }
+
+    quote! {
+        const #name_list_ident: [&'static str; #entries_len] = [#name_list_values];
+
+        #[macro_export]
+        macro_rules! #inner_negotiate_alg_ident {
+            ($client_choices:expr, $error:expr) => {
+                {
+                    let mut out_variable = None;
+                    'out: for client_alg in &$client_choices {
+                        #match_list
+                    }
+
+                    if out_variable.is_none() {
+                        return Err($error);
+                    }
+
+                    out_variable.unwrap().clone()
+                }
+            };
+        }
+
+        pub use #inner_negotiate_alg_ident as #negotiate_alg_ident;
     }
     .into()
 }
