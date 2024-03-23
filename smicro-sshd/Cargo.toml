@@ -20,3 +20,4 @@ rand = "0.8.5"
 base64 = "0.21.7"
 ecdsa = { version = "0.17.0-pre.5", features = ["signing"] }
 signature = "2.3.0-pre.3"
+sha2 = "0.10"

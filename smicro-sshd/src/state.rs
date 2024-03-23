@@ -20,7 +20,7 @@ use crate::{
     error::KeyLoadingError,
     messages::{
         negotiate_alg_host_key_algorithms, CryptoAlg, ICipherAlgorithm, IKeyExchangeAlgorithm,
-        IKeyExchangeMethods, IKeySigningAlgorithm, IMACAlgorithm, ISigner,
+        IKeyExchangeMethods, IKeySigningAlgorithm, IMACAlgorithm, ISigningKey,
     },
     DeserializePacket,
 };
@@ -124,13 +124,13 @@ pub struct OpenSSHKeySerialized<'a> {
 
 pub struct State {
     pub rng: ThreadRng,
-    pub host_keys: Vec<Box<dyn ISigner>>,
+    pub host_keys: Vec<Box<dyn ISigningKey>>,
     pub my_identifier_string: &'static str,
     pub peer_identifier_string: Option<Vec<u8>>,
 }
 
 impl State {
-    pub fn new(host_keys: Vec<Box<dyn ISigner>>) -> Self {
+    pub fn new(host_keys: Vec<Box<dyn ISigningKey>>) -> Self {
         Self {
             rng: thread_rng(),
             host_keys,
@@ -139,7 +139,7 @@ impl State {
         }
     }
 
-    pub fn load_hostkey(hostkey_file: &Path) -> Result<Box<dyn ISigner>, KeyLoadingError> {
+    pub fn load_hostkey(hostkey_file: &Path) -> Result<Box<dyn ISigningKey>, KeyLoadingError> {
         let mut f = File::open(hostkey_file)?;
         let mut file_content = Vec::with_capacity(4096);
         f.read_to_end(&mut file_content)?;

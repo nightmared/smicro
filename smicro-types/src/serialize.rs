@@ -1,5 +1,7 @@
 use std::{io::Write, os::unix::prelude::OsStrExt};
 
+use crate::ssh::types::{SSHSlice, SharedSSHSlice};
+
 pub trait SerializePacket: Sized {
     fn get_size(&self) -> usize;
 
@@ -119,6 +121,36 @@ impl<'a, T: SerializePacket> SerializePacket for &'a [T] {
 
     fn serialize<W: Write>(&self, mut output: W) -> Result<(), std::io::Error> {
         for val in self.iter() {
+            val.serialize(&mut output)?;
+        }
+
+        Ok(())
+    }
+}
+
+impl<T: SerializePacket> SerializePacket for SSHSlice<T> {
+    fn get_size(&self) -> usize {
+        4 + self.0.iter().fold(0, |acc, elem| acc + elem.get_size())
+    }
+
+    fn serialize<W: Write>(&self, mut output: W) -> Result<(), std::io::Error> {
+        (self.0.len() as u32).serialize(&mut output)?;
+        for val in self.0.iter() {
+            val.serialize(&mut output)?;
+        }
+
+        Ok(())
+    }
+}
+
+impl<'a, T: SerializePacket> SerializePacket for SharedSSHSlice<'a, T> {
+    fn get_size(&self) -> usize {
+        4 + self.0.iter().fold(0, |acc, elem| acc + elem.get_size())
+    }
+
+    fn serialize<W: Write>(&self, mut output: W) -> Result<(), std::io::Error> {
+        (self.0.len() as u32).serialize(&mut output)?;
+        for val in self.0.iter() {
             val.serialize(&mut output)?;
         }
 

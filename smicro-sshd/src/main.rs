@@ -12,7 +12,7 @@ use nom::{
     combinator::{opt, peek},
     multi::many_till,
     sequence::{preceded, tuple},
-    AsChar, IResult,
+    AsBytes, AsChar, IResult,
 };
 use rand::Rng;
 use state::{CryptoAlgs, ICryptoAlgs, State};
@@ -32,7 +32,7 @@ mod state;
 
 use error::Error;
 
-use crate::messages::{gen_kex_initial_list, MessageKexEcdhInit};
+use crate::messages::{gen_kex_initial_list, MessageKexEcdhInit, MessageNewKeys};
 
 // A tad bit above the SFTP max packet size, so that we do not have too much fragmentation
 pub const MAX_PKT_SIZE: usize = 4096 * 64;
@@ -63,7 +63,8 @@ define_state_list!(
     IdentifierStringSent,
     IdentifierStringReceived,
     KexSent,
-    KexReceived
+    KexReceived,
+    KexReplySent
 );
 
 trait SessionState {
@@ -224,9 +225,37 @@ impl SessionState for KexReceived {
 
         let (_, msg) = MessageKexEcdhInit::deserialize(message_data)?;
         debug!("Received {:?}", msg);
-        self.crypto_algs
-            .get_kex()
-            .perform_key_exchange(state, stream, &msg)?;
+        let next_state = self.crypto_algs.get_kex().perform_key_exchange(
+            state,
+            stream,
+            &msg,
+            &self.my_kex_message,
+            &self.peer_kex_message,
+        )?;
+
+        write_message(state, stream, &MessageNewKeys {})?;
+
+        Ok((next, next_state))
+    }
+}
+
+#[derive(Debug)]
+pub struct KexReplySent {}
+
+impl SessionState for KexReplySent {
+    fn process<'a>(
+        &mut self,
+        state: &mut State,
+        stream: &mut TcpStream,
+        input: &'a [u8],
+    ) -> Result<(&'a [u8], SessionStates), Error> {
+        let (next, packet) = parse_packet(input, None, None)?;
+
+        let (message_data, message_type) = parse_message_type(packet.payload)?;
+        if message_type != MessageType::KexInit {
+            return Err(Error::DisallowedMessageType(message_type));
+        }
+
         unimplemented!()
     }
 }
@@ -240,9 +269,9 @@ struct Packet<'a> {
     mac: &'a [u8],
 }
 
-fn write_message<'a, T: SerializePacket + Message<'a>>(
+fn write_message<'a, T: SerializePacket + Message<'a>, W: Write>(
     state: &mut State,
-    mut stream: &mut TcpStream,
+    mut stream: &mut W,
     payload: &T,
 ) -> Result<(), Error> {
     let mut padding_length = 4;
@@ -262,6 +291,7 @@ fn write_message<'a, T: SerializePacket + Message<'a>>(
     stream.write_all(&[padding_length as u8, T::get_message_type() as u8])?;
     payload.serialize(&mut stream)?;
     (&padding[0..padding_length]).serialize(&mut stream)?;
+
     // TODO: mac
     Ok(())
 }
