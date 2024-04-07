@@ -22,6 +22,16 @@ pub enum Error {
     NoCommonHostKeyAlg,
     #[error("Error processing the client packet")]
     ProcessingFailed,
+    #[error("The cryptographic parameters should be available, yet there aen't defined")]
+    MissingCryptoAlgs,
+    #[error("Got data in a NEWKEYS message, this shouldn't happen")]
+    DataInNewKeysMessage,
+    #[error("Invalid length of the key for the MAC")]
+    InvalidMACKeyLength,
+    #[error("The packet MAC is invalid")]
+    InvalidMAC,
+    #[error("Cryptographic error: invalid length")]
+    InvalidLength(#[from] digest::InvalidLength),
     #[error("Invalid UTF-8 input from the client")]
     NonUTF8String(#[from] std::str::Utf8Error),
     #[error("Could not create a buffer")]
@@ -32,6 +42,10 @@ pub enum Error {
     DisallowedMessageType(MessageType),
     #[error("Cryptographic error while doing elliptic curve operations")]
     EllipticCurveCryptoError(#[from] elliptic_curve::Error),
+    #[error("Invalid point on the curve")]
+    InvalidPointForEcdh,
+    #[error("No host key could be found for that algorithm")]
+    NoGoodHostKeyFound(&'static str),
     #[error("Code error: this cryptographic algorithm should be implemented")]
     MissingCryptoCodePath,
     #[error("Could not load a private key")]

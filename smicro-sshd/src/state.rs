@@ -1,4 +1,4 @@
-use std::{fmt::Debug, fs::File, io::Read, path::Path};
+use std::{fmt::Debug, fs::File, io::Read, num::Wrapping, path::Path, rc::Rc, sync::Arc};
 
 use base64::engine::{general_purpose::STANDARD, Engine as _};
 use log::{info, trace};
@@ -12,30 +12,42 @@ use nom::{
     Parser,
 };
 use rand::{rngs::ThreadRng, thread_rng};
-use signature::Signer;
 use smicro_macros::declare_deserializable_struct;
 use smicro_types::sftp::deserialize::{parse_slice, parse_utf8_string};
 
 use crate::{
     error::KeyLoadingError,
     messages::{
-        negotiate_alg_host_key_algorithms, CryptoAlg, ICipherAlgorithm, IKeyExchangeAlgorithm,
-        IKeyExchangeMethods, IKeySigningAlgorithm, IMACAlgorithm, ISigningKey,
+        negotiate_alg_host_key_algorithms, CipherAlgorithm, CryptoAlg, DynCipher,
+        DynCipherAlgorithm, DynMAC, DynMACAlgorithm, IKeySigningAlgorithm, ISigningKey,
+        KeyExchangeAlgorithm, KeyExchangeMethods, MACAlgorithm,
     },
     DeserializePacket,
 };
 
 pub trait ICryptoAlgs: Debug {
-    fn get_kex(&self) -> &dyn IKeyExchangeMethods;
+    fn kex(&self) -> &dyn KeyExchangeMethods;
+
+    fn host_key_name(&self) -> &'static str;
+
+    fn key_max_length(&self) -> usize;
+
+    fn client_cipher(&self) -> &dyn DynCipherAlgorithm;
+
+    fn server_cipher(&self) -> &dyn DynCipherAlgorithm;
+
+    fn client_mac(&self) -> &dyn DynMACAlgorithm;
+
+    fn server_mac(&self) -> &dyn DynMACAlgorithm;
 }
 
 pub struct CryptoAlgs<
-    Kex: IKeyExchangeAlgorithm,
+    Kex: KeyExchangeAlgorithm,
     HostKey: IKeySigningAlgorithm,
-    C2SCipher: ICipherAlgorithm,
-    S2CCipher: ICipherAlgorithm,
-    C2SMac: IMACAlgorithm,
-    S2CMac: IMACAlgorithm,
+    C2SCipher: CipherAlgorithm,
+    S2CCipher: CipherAlgorithm,
+    C2SMac: MACAlgorithm,
+    S2CMac: MACAlgorithm,
 > {
     pub kex: Kex,
     pub host_key_alg: HostKey,
@@ -43,57 +55,54 @@ pub struct CryptoAlgs<
     pub server_to_client_cipher: S2CCipher,
     pub client_to_server_mac: C2SMac,
     pub server_to_client_mac: S2CMac,
+    pub key_max_length: usize,
 }
 
 impl<
-        Kex: IKeyExchangeAlgorithm,
+        Kex: KeyExchangeAlgorithm,
         HostKey: IKeySigningAlgorithm,
-        C2SCipher: ICipherAlgorithm,
-        S2CCipher: ICipherAlgorithm,
-        C2SMac: IMACAlgorithm,
-        S2CMac: IMACAlgorithm,
+        C2SCipher: CipherAlgorithm,
+        S2CCipher: CipherAlgorithm,
+        C2SMac: MACAlgorithm,
+        S2CMac: MACAlgorithm,
     > ICryptoAlgs for CryptoAlgs<Kex, HostKey, C2SCipher, S2CCipher, C2SMac, S2CMac>
 {
-    fn get_kex(&self) -> &dyn IKeyExchangeMethods {
+    fn kex(&self) -> &dyn KeyExchangeMethods {
         &self.kex
     }
-}
 
-impl<
-        Kex: IKeyExchangeAlgorithm,
-        HostKey: IKeySigningAlgorithm,
-        C2SCipher: ICipherAlgorithm,
-        S2CCipher: ICipherAlgorithm,
-        C2SMac: IMACAlgorithm,
-        S2CMac: IMACAlgorithm,
-    > CryptoAlgs<Kex, HostKey, C2SCipher, S2CCipher, C2SMac, S2CMac>
-{
-    pub fn new(
-        kex: Kex,
-        host_key_alg: HostKey,
-        client_to_server_cipher: C2SCipher,
-        server_to_client_cipher: S2CCipher,
-        client_to_server_mac: C2SMac,
-        server_to_client_mac: S2CMac,
-    ) -> Self {
-        Self {
-            kex,
-            host_key_alg,
-            client_to_server_cipher,
-            server_to_client_cipher,
-            client_to_server_mac,
-            server_to_client_mac,
-        }
+    fn host_key_name(&self) -> &'static str {
+        self.host_key_alg.name()
+    }
+
+    fn key_max_length(&self) -> usize {
+        self.key_max_length
+    }
+
+    fn client_cipher(&self) -> &dyn DynCipherAlgorithm {
+        &self.client_to_server_cipher
+    }
+
+    fn server_cipher(&self) -> &dyn DynCipherAlgorithm {
+        &self.server_to_client_cipher
+    }
+
+    fn client_mac(&self) -> &dyn DynMACAlgorithm {
+        &self.client_to_server_mac
+    }
+
+    fn server_mac(&self) -> &dyn DynMACAlgorithm {
+        &self.server_to_client_mac
     }
 }
 
 impl<
-        Kex: IKeyExchangeAlgorithm,
+        Kex: KeyExchangeAlgorithm,
         HostKey: IKeySigningAlgorithm,
-        C2SCipher: ICipherAlgorithm,
-        S2CCipher: ICipherAlgorithm,
-        C2SMac: IMACAlgorithm,
-        S2CMac: IMACAlgorithm,
+        C2SCipher: CipherAlgorithm,
+        S2CCipher: CipherAlgorithm,
+        C2SMac: MACAlgorithm,
+        S2CMac: MACAlgorithm,
     > Debug for CryptoAlgs<Kex, HostKey, C2SCipher, S2CCipher, C2SMac, S2CMac>
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -122,20 +131,41 @@ pub struct OpenSSHKeySerialized<'a> {
     key_data: &'a [u8],
 }
 
-pub struct State {
+pub struct State<'a> {
     pub rng: ThreadRng,
-    pub host_keys: Vec<Box<dyn ISigningKey>>,
+    pub host_keys: &'a [&'a dyn ISigningKey],
     pub my_identifier_string: &'static str,
     pub peer_identifier_string: Option<Vec<u8>>,
+    pub crypto_algs: Option<Arc<Box<dyn ICryptoAlgs>>>,
+    pub crypto_material: Option<SessionCryptoMaterials>,
+    pub sequence_number_c2s: Wrapping<u32>,
+    pub sequence_number_s2c: Wrapping<u32>,
 }
 
-impl State {
-    pub fn new(host_keys: Vec<Box<dyn ISigningKey>>) -> Self {
+pub struct SessionCryptoMaterials {
+    pub client_mac: Box<dyn DynMAC>,
+    pub server_mac: Box<dyn DynMAC>,
+    pub client_cipher: Box<dyn DynCipher>,
+    pub server_cipher: Box<dyn DynCipher>,
+}
+
+impl std::fmt::Debug for SessionCryptoMaterials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SessionCryptoMaterials { <REDACTED> }")
+    }
+}
+
+impl<'a> State<'a> {
+    pub fn new(host_keys: &'a [&'a dyn ISigningKey]) -> Self {
         Self {
             rng: thread_rng(),
             host_keys,
             my_identifier_string: "SSH-2.0-smicro_ssh",
             peer_identifier_string: None,
+            crypto_algs: None,
+            crypto_material: None,
+            sequence_number_c2s: Wrapping(0),
+            sequence_number_s2c: Wrapping(0),
         }
     }
 
@@ -183,7 +213,7 @@ impl State {
         }
 
         let next_data = key_openssh_raw_serialized.key_data;
-        let (next_data, public_key) = parse_slice(next_data)?;
+        let (next_data, _public_key) = parse_slice(next_data)?;
 
         let (_, next_data) = parse_slice(next_data)?;
         let (next_data, checkint1) = be_u32(next_data)?;

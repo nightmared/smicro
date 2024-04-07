@@ -1,12 +1,17 @@
 use std::{
+    borrow::Cow,
     io::{self, Read, Write},
     net::{TcpListener, TcpStream},
+    num::Wrapping,
     path::Path,
+    sync::Arc,
     thread,
 };
 
 use log::{debug, error, info, trace, warn, LevelFilter};
-use messages::{Message, MessageKeyExchangeInit};
+use messages::{
+    DynCipher, DynMAC, IKeySigningAlgorithm, ISigningKey, Message, MessageKeyExchangeInit,
+};
 use nom::{
     bytes::streaming::{tag, take, take_until, take_while1},
     combinator::{opt, peek},
@@ -15,7 +20,7 @@ use nom::{
     AsBytes, AsChar, IResult,
 };
 use rand::Rng;
-use state::{CryptoAlgs, ICryptoAlgs, State};
+use state::{CryptoAlgs, ICryptoAlgs, SessionCryptoMaterials, State};
 use syslog::{BasicLogger, Facility, Formatter3164};
 
 use smicro_common::create_read_buffer;
@@ -23,7 +28,10 @@ use smicro_types::{
     deserialize::DeserializePacket,
     error::ParsingError,
     serialize::SerializePacket,
-    ssh::{deserialize::parse_message_type, types::MessageType},
+    ssh::{
+        deserialize::{const_take, parse_message_type, streaming_const_take},
+        types::MessageType,
+    },
 };
 
 mod error;
@@ -35,6 +43,7 @@ use error::Error;
 use crate::messages::{gen_kex_initial_list, MessageKexEcdhInit, MessageNewKeys};
 
 // A tad bit above the SFTP max packet size, so that we do not have too much fragmentation
+// Besides, this is the same constant as OpenSSH
 pub const MAX_PKT_SIZE: usize = 4096 * 64;
 
 macro_rules! define_state_list {
@@ -49,7 +58,7 @@ macro_rules! define_state_list {
                 &mut self,
                 state: &mut State,
                 stream: &mut TcpStream,
-                input: &'a [u8],
+                input: &'a mut [u8],
             ) -> Result<(&'a [u8], SessionStates), Error> {
                 match self {
                     $(SessionStates::$name(val) => val.process(state, stream, input),)*
@@ -64,7 +73,8 @@ define_state_list!(
     IdentifierStringReceived,
     KexSent,
     KexReceived,
-    KexReplySent
+    KexReplySent,
+    KeysNegotiated
 );
 
 trait SessionState {
@@ -72,7 +82,7 @@ trait SessionState {
         &mut self,
         state: &mut State,
         stream: &mut TcpStream,
-        input: &'a [u8],
+        input: &'a mut [u8],
     ) -> Result<(&'a [u8], SessionStates), Error>;
 }
 
@@ -84,7 +94,7 @@ impl SessionState for UninitializedSession {
         &mut self,
         state: &mut State,
         stream: &mut TcpStream,
-        input: &'a [u8],
+        input: &'a mut [u8],
     ) -> Result<(&'a [u8], SessionStates), Error> {
         // Write the identification string
         stream.write_all(state.my_identifier_string.as_bytes())?;
@@ -104,8 +114,9 @@ impl SessionState for IdentifierStringSent {
         &mut self,
         state: &mut State,
         stream: &mut TcpStream,
-        input: &'a [u8],
+        input: &'a mut [u8],
     ) -> Result<(&'a [u8], SessionStates), Error> {
+        let input = input as &[u8];
         let consume_until_carriage = &take_until(b"\r\n" as &[u8]);
         let consume_carriage = &tag(b"\r\n");
         // consume all lines not starting by SSH-
@@ -154,11 +165,11 @@ impl SessionState for IdentifierStringReceived {
         &mut self,
         state: &mut State,
         stream: &mut TcpStream,
-        input: &'a [u8],
+        input: &'a mut [u8],
     ) -> Result<(&'a [u8], SessionStates), Error> {
         debug!("Sending the MessageKeyExchangeInit packet");
         let kex_init_msg = gen_kex_initial_list(state);
-        write_message(state, stream, &kex_init_msg)?;
+        write_message(state, stream, &kex_init_msg, None, None)?;
 
         Ok((
             input,
@@ -179,9 +190,9 @@ impl SessionState for KexSent {
         &mut self,
         state: &mut State,
         stream: &mut TcpStream,
-        input: &'a [u8],
+        input: &'a mut [u8],
     ) -> Result<(&'a [u8], SessionStates), Error> {
-        let (next, packet) = parse_packet(input, None, None)?;
+        let (next, packet) = parse_packet(input, state)?;
 
         let (message_data, message_type) = parse_message_type(packet.payload)?;
         if message_type != MessageType::KexInit {
@@ -190,10 +201,9 @@ impl SessionState for KexSent {
 
         let (_, msg) = MessageKeyExchangeInit::deserialize(message_data)?;
         debug!("Received {:?}", msg);
-        let crypto_algs = msg.compute_crypto_algs()?;
+        state.crypto_algs = Some(Arc::new(msg.compute_crypto_algs()?));
 
         let next_state = KexReceived {
-            crypto_algs,
             my_kex_message: self.my_kex_message.clone(),
             peer_kex_message: msg,
         };
@@ -204,7 +214,6 @@ impl SessionState for KexSent {
 
 #[derive(Debug)]
 pub struct KexReceived {
-    crypto_algs: Box<dyn ICryptoAlgs>,
     my_kex_message: MessageKeyExchangeInit,
     peer_kex_message: MessageKeyExchangeInit,
 }
@@ -214,9 +223,9 @@ impl SessionState for KexReceived {
         &mut self,
         state: &mut State,
         stream: &mut TcpStream,
-        input: &'a [u8],
+        input: &'a mut [u8],
     ) -> Result<(&'a [u8], SessionStates), Error> {
-        let (next, packet) = parse_packet(input, None, None)?;
+        let (next, packet) = parse_packet(input, state)?;
 
         let (message_data, message_type) = parse_message_type(packet.payload)?;
         if message_type != MessageType::KexEcdhInit {
@@ -225,7 +234,12 @@ impl SessionState for KexReceived {
 
         let (_, msg) = MessageKexEcdhInit::deserialize(message_data)?;
         debug!("Received {:?}", msg);
-        let next_state = self.crypto_algs.get_kex().perform_key_exchange(
+        let crypto_algs = state
+            .crypto_algs
+            .as_ref()
+            .ok_or(Error::MissingCryptoAlgs)?
+            .clone();
+        let next_state = crypto_algs.kex().perform_key_exchange(
             state,
             stream,
             &msg,
@@ -233,29 +247,84 @@ impl SessionState for KexReceived {
             &self.peer_kex_message,
         )?;
 
-        write_message(state, stream, &MessageNewKeys {})?;
+        write_message(state, stream, &MessageNewKeys {}, None, None)?;
 
         Ok((next, next_state))
     }
 }
 
 #[derive(Debug)]
-pub struct KexReplySent {}
+pub struct KexReplySent {
+    pub iv_c2s: Vec<u8>,
+    pub iv_s2c: Vec<u8>,
+    pub encryption_key_c2s: Vec<u8>,
+    pub encryption_key_s2c: Vec<u8>,
+    pub integrity_key_c2s: Vec<u8>,
+    pub integrity_key_s2c: Vec<u8>,
+}
 
 impl SessionState for KexReplySent {
     fn process<'a>(
         &mut self,
         state: &mut State,
         stream: &mut TcpStream,
-        input: &'a [u8],
+        input: &'a mut [u8],
     ) -> Result<(&'a [u8], SessionStates), Error> {
-        let (next, packet) = parse_packet(input, None, None)?;
+        let (next, packet) = parse_packet(input, state)?;
 
         let (message_data, message_type) = parse_message_type(packet.payload)?;
-        if message_type != MessageType::KexInit {
+        if message_type != MessageType::NewKeys {
             return Err(Error::DisallowedMessageType(message_type));
         }
 
+        if message_data != [] {
+            return Err(Error::DataInNewKeysMessage);
+        }
+
+        let crypto_algs = state
+            .crypto_algs
+            .as_ref()
+            .ok_or(Error::MissingCryptoAlgs)?
+            .clone();
+        let client_mac = crypto_algs
+            .client_mac()
+            .allocate_with_key(&self.integrity_key_c2s);
+        let server_mac = crypto_algs
+            .server_mac()
+            .allocate_with_key(&self.integrity_key_s2c);
+        let client_cipher = crypto_algs
+            .client_cipher()
+            .from_key(&self.encryption_key_c2s)?;
+        let server_cipher = crypto_algs
+            .server_cipher()
+            .from_key(&self.encryption_key_s2c)?;
+        let materials = SessionCryptoMaterials {
+            client_mac,
+            server_mac,
+            client_cipher,
+            server_cipher,
+        };
+
+        state.crypto_material = Some(materials);
+
+        Ok((next, SessionStates::KeysNegotiated(KeysNegotiated {})))
+    }
+}
+
+#[derive(Debug)]
+pub struct KeysNegotiated {}
+
+impl SessionState for KeysNegotiated {
+    fn process<'a>(
+        &mut self,
+        state: &mut State,
+        stream: &mut TcpStream,
+        input: &'a mut [u8],
+    ) -> Result<(&'a [u8], SessionStates), Error> {
+        let (next, packet) = parse_packet(input, state)?;
+
+        let (message_data, message_type) = parse_message_type(packet.payload)?;
+        debug!("{:?}: {:?}", message_type, message_data);
         unimplemented!()
     }
 }
@@ -273,6 +342,8 @@ fn write_message<'a, T: SerializePacket + Message<'a>, W: Write>(
     state: &mut State,
     mut stream: &mut W,
     payload: &T,
+    cipher: Option<&mut dyn DynCipher>,
+    mac: Option<&mut dyn DynMAC>,
 ) -> Result<(), Error> {
     let mut padding_length = 4;
     // length + padding_length + message_type + payload + random_padding, max not included
@@ -296,16 +367,9 @@ fn write_message<'a, T: SerializePacket + Message<'a>, W: Write>(
     Ok(())
 }
 
-struct MacParameters {
-    length: usize,
-    sequence_number: u32,
-    validate: &'static dyn Fn(&Packet, &[u8]) -> bool,
-}
-
-fn parse_packet<'a>(
+fn parse_plaintext_packet<'a>(
     input: &'a [u8],
-    cipher_block_size: Option<usize>,
-    mac: Option<&mut MacParameters>,
+    cipher: Option<&dyn DynCipher>,
 ) -> IResult<&'a [u8], Packet<'a>, ParsingError> {
     let (input, (length, padding_length)) = tuple((
         nom::number::streaming::be_u32,
@@ -324,17 +388,6 @@ fn parse_packet<'a>(
         )));
     }
 
-    let multiple = cipher_block_size.unwrap_or(8);
-    if (length + 4) % 8 != 0 {
-        warn!(
-            "The packet size is not a multiple of {}: {} bytes",
-            multiple, length
-        );
-        return Err(nom::Err::Failure(ParsingError::InvalidPacketLength(
-            length as usize,
-        )));
-    }
-
     if length <= padding_length as u32 + 1 {
         warn!("The packet size implies that the packet has no payload",);
         return Err(nom::Err::Failure(ParsingError::InvalidPacketLength(
@@ -342,28 +395,85 @@ fn parse_packet<'a>(
         )));
     }
 
+    // This does not apply in the AEAD case, which is the only one currently supported
+    //let multiple = if let Some(cipher) = cipher {
+    //    cipher.block_size_bytes()
+    //} else {
+    //    8
+    //};
+    if cipher.is_none() {
+        let multiple = 8;
+        if (length + 4) as usize % multiple != 0 {
+            warn!(
+                "The packet size is not a multiple of {}: {} bytes",
+                multiple, length
+            );
+            return Err(nom::Err::Failure(ParsingError::InvalidPacketLength(
+                length as usize,
+            )));
+        }
+    }
+
     let (input, payload) = take(length - padding_length as u32 - 1)(input)?;
     let (input, padding) = take(padding_length)(input)?;
-    let mut res = Packet {
+    let res = Packet {
         length,
         padding_length,
         payload,
         padding,
         mac: &[],
     };
-    if let Some(mac) = mac {
-        let (input, packet_mac) = take(mac.length)(input)?;
 
-        if !(mac.validate)(&res, packet_mac) {
-            return Err(nom::Err::Failure(ParsingError::InvalidMac));
+    Ok((input, res))
+}
+
+fn parse_packet<'a>(
+    input: &'a mut [u8],
+    state: &mut State,
+) -> IResult<&'a [u8], Packet<'a>, ParsingError> {
+    let cipher = state
+        .crypto_material
+        .as_ref()
+        .map(|mat| mat.client_cipher.as_ref());
+
+    let (next_data, res) = if let Some(cipher) = cipher {
+        let (next_data, plaintext_pkt) = cipher.decrypt(input, state.sequence_number_c2s.0)?;
+        let (should_be_empty, decrypted_pkt) = parse_plaintext_packet(plaintext_pkt, Some(cipher))?;
+        if should_be_empty != [] {
+            return Err(nom::Err::Failure(
+                ParsingError::RemainingDataAfterDecryption,
+            ));
         }
+
+        (next_data, decrypted_pkt)
+    } else {
+        parse_plaintext_packet(input, None)?
+    };
+
+    // We only support the AEAD mode chacha20-poly1305, where MAC is disabled
+    /*
+    if let Some(mac) = mac {
+        let (input, packet_mac) = take(mac.size_bytes())(input)?;
+
+        mac.verify(
+            &original_input[..(length + 4) as usize],
+            sequence_number,
+            packet_mac,
+        )
+        .map_err(|_| nom::Err::Failure(ParsingError::InvalidMac))?;
 
         res.mac = packet_mac;
 
         Ok((input, res))
     } else {
-        Ok((input, res))
+    */
+
+    state.sequence_number_c2s += 1;
+    if state.sequence_number_c2s.0 == 0 {
+        return Err(nom::Err::Failure(ParsingError::SequenceNumberWrapped));
     }
+
+    Ok((next_data, res))
 }
 
 fn handle_packet(stream: io::Result<TcpStream>) -> Result<(), Error> {
@@ -374,14 +484,17 @@ fn handle_packet(stream: io::Result<TcpStream>) -> Result<(), Error> {
     let mut cur_pos = 0;
 
     let mut host_keys = Vec::new();
-    host_keys.push(State::load_hostkey(&Path::new(
-        "/home/sthoby/dev-fast/smicro/host_key",
-    ))?);
-    let mut global_state = State::new(host_keys);
+    let test_hostkey = State::load_hostkey(&Path::new("/home/sthoby/dev-fast/smicro/host_key"))?;
+    host_keys.push(test_hostkey.as_ref());
+    let mut global_state = State::new(&host_keys);
     let mut state = SessionStates::UninitializedSession(UninitializedSession {});
 
     loop {
-        let res = state.process(&mut global_state, &mut stream, &buf[data_start..cur_pos]);
+        let res = state.process(
+            &mut global_state,
+            &mut stream,
+            &mut buf[data_start..cur_pos],
+        );
         match res {
             Err(Error::ParsingError(nom::Err::Incomplete(_))) => {
                 trace!("Not enough data, trying to read more");

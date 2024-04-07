@@ -47,6 +47,15 @@ pub fn parse_boolean(input: &[u8]) -> IResult<&[u8], bool, ParsingError> {
 }
 
 // see https://github.com/rust-bakery/nom/issues/1517
+pub fn streaming_const_take<const N: usize>(i: &[u8]) -> IResult<&[u8], [u8; N], ParsingError> {
+    // Safety: fine because `take` already check that we took N bytes
+    map(nom::bytes::streaming::take(N), |bytes: &[u8]| {
+        let mut res = [0; N];
+        res.copy_from_slice(bytes);
+        res
+    })(i)
+}
+// see https://github.com/rust-bakery/nom/issues/1517
 pub fn const_take<const N: usize>(i: &[u8]) -> IResult<&[u8], [u8; N], ParsingError> {
     // Safety: fine because `take` already check that we took N bytes
     map(take(N), |bytes: &[u8]| {

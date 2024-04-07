@@ -18,6 +18,12 @@ pub enum ParsingError {
     InvalidPacketLength(usize),
     #[error("Invalid MAC field")]
     InvalidMac,
+    #[error("Could not decipher data")]
+    DecipheringError,
+    #[error("Overflow: the sequence number wrapped")]
+    SequenceNumberWrapped,
+    #[error("Remaining data after the packet was parsed, inside a decrypted message")]
+    RemainingDataAfterDecryption,
 }
 
 impl<I> nom::error::ParseError<I> for ParsingError {
