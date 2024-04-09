@@ -90,7 +90,10 @@ impl SerializePacket for std::ffi::OsString {
     }
 }
 
-impl<T: SerializePacket> SerializePacket for Vec<T> {
+impl<T> SerializePacket for Vec<T>
+where
+    for<'a> &'a [T]: SerializePacket,
+{
     fn get_size(&self) -> usize {
         self.as_slice().get_size()
     }
@@ -114,45 +117,53 @@ impl<'a, T: SerializePacket, const N: usize> SerializePacket for [T; N] {
     }
 }
 
-impl<'a, T: SerializePacket> SerializePacket for &'a [T] {
+impl<'a> SerializePacket for &'a [u8] {
     fn get_size(&self) -> usize {
         self.iter().fold(0, |acc, elem| acc + elem.get_size())
     }
 
     fn serialize<W: Write>(&self, mut output: W) -> Result<(), std::io::Error> {
-        for val in self.iter() {
-            val.serialize(&mut output)?;
-        }
+        output.write_all(self)?;
 
         Ok(())
     }
 }
 
-impl<T: SerializePacket> SerializePacket for SSHSlice<T> {
+//impl<'a, T: SerializePacket> SerializePacket for &'a [T] {
+//    fn get_size(&self) -> usize {
+//        self.iter().fold(0, |acc, elem| acc + elem.get_size())
+//    }
+//
+//    fn serialize<W: Write>(&self, mut output: W) -> Result<(), std::io::Error> {
+//        for val in self.iter() {
+//            val.serialize(&mut output)?;
+//        }
+//
+//        Ok(())
+//    }
+//}
+
+impl SerializePacket for SSHSlice<u8> {
     fn get_size(&self) -> usize {
         4 + self.0.iter().fold(0, |acc, elem| acc + elem.get_size())
     }
 
     fn serialize<W: Write>(&self, mut output: W) -> Result<(), std::io::Error> {
         (self.0.len() as u32).serialize(&mut output)?;
-        for val in self.0.iter() {
-            val.serialize(&mut output)?;
-        }
+        self.0.serialize(&mut output)?;
 
         Ok(())
     }
 }
 
-impl<'a, T: SerializePacket> SerializePacket for SharedSSHSlice<'a, T> {
+impl<'a> SerializePacket for SharedSSHSlice<'a, u8> {
     fn get_size(&self) -> usize {
         4 + self.0.iter().fold(0, |acc, elem| acc + elem.get_size())
     }
 
     fn serialize<W: Write>(&self, mut output: W) -> Result<(), std::io::Error> {
         (self.0.len() as u32).serialize(&mut output)?;
-        for val in self.0.iter() {
-            val.serialize(&mut output)?;
-        }
+        self.0.serialize(&mut output)?;
 
         Ok(())
     }

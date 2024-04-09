@@ -3,6 +3,7 @@
 )]
 #[repr(u8)]
 pub enum MessageType {
+    ServiceRequest = 5,
     KexInit = 20,
     NewKeys = 21,
     KexEcdhInit = 30,
@@ -19,3 +20,6 @@ pub struct SSHSlice<T>(pub Vec<T>);
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct SharedSSHSlice<'a, T>(pub &'a [T]);
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct PositiveBigNum<'a>(pub &'a [u8]);

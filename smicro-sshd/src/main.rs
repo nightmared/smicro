@@ -1,26 +1,22 @@
 use std::{
-    borrow::Cow,
     io::{self, Read, Write},
     net::{TcpListener, TcpStream},
-    num::Wrapping,
     path::Path,
     sync::Arc,
     thread,
 };
 
 use log::{debug, error, info, trace, warn, LevelFilter};
-use messages::{
-    DynCipher, DynMAC, IKeySigningAlgorithm, ISigningKey, Message, MessageKeyExchangeInit,
-};
+use messages::{DynCipher, DynMAC, Message, MessageKeyExchangeInit};
 use nom::{
     bytes::streaming::{tag, take, take_until, take_while1},
     combinator::{opt, peek},
     multi::many_till,
     sequence::{preceded, tuple},
-    AsBytes, AsChar, IResult,
+    AsChar, IResult,
 };
 use rand::Rng;
-use state::{CryptoAlgs, ICryptoAlgs, SessionCryptoMaterials, State};
+use state::{SessionCryptoMaterials, State};
 use syslog::{BasicLogger, Facility, Formatter3164};
 
 use smicro_common::create_read_buffer;
@@ -28,10 +24,7 @@ use smicro_types::{
     deserialize::DeserializePacket,
     error::ParsingError,
     serialize::SerializePacket,
-    ssh::{
-        deserialize::{const_take, parse_message_type, streaming_const_take},
-        types::MessageType,
-    },
+    ssh::{deserialize::parse_message_type, types::MessageType},
 };
 
 mod error;
@@ -113,7 +106,7 @@ impl SessionState for IdentifierStringSent {
     fn process<'a>(
         &mut self,
         state: &mut State,
-        stream: &mut TcpStream,
+        _stream: &mut TcpStream,
         input: &'a mut [u8],
     ) -> Result<(&'a [u8], SessionStates), Error> {
         let input = input as &[u8];
@@ -189,7 +182,7 @@ impl SessionState for KexSent {
     fn process<'a>(
         &mut self,
         state: &mut State,
-        stream: &mut TcpStream,
+        _stream: &mut TcpStream,
         input: &'a mut [u8],
     ) -> Result<(&'a [u8], SessionStates), Error> {
         let (next, packet) = parse_packet(input, state)?;
@@ -267,7 +260,7 @@ impl SessionState for KexReplySent {
     fn process<'a>(
         &mut self,
         state: &mut State,
-        stream: &mut TcpStream,
+        _stream: &mut TcpStream,
         input: &'a mut [u8],
     ) -> Result<(&'a [u8], SessionStates), Error> {
         let (next, packet) = parse_packet(input, state)?;
@@ -318,7 +311,7 @@ impl SessionState for KeysNegotiated {
     fn process<'a>(
         &mut self,
         state: &mut State,
-        stream: &mut TcpStream,
+        _stream: &mut TcpStream,
         input: &'a mut [u8],
     ) -> Result<(&'a [u8], SessionStates), Error> {
         let (next, packet) = parse_packet(input, state)?;

@@ -1,9 +1,8 @@
+use std::borrow::Cow;
 use std::cmp::max;
-use std::num::Wrapping;
-use std::slice;
-use std::{io::Write, marker::PhantomData, net::TcpStream, ops::Mul};
+use std::{io::Write, net::TcpStream, ops::Mul};
 
-use chacha20::{ChaCha20, ChaCha20Legacy};
+use chacha20::ChaCha20Legacy;
 use cipher::generic_array::GenericArray;
 use cipher::{Iv, KeyIvInit, StreamCipher, StreamCipherSeek};
 use ecdsa::Signature;
@@ -12,15 +11,15 @@ use elliptic_curve::{
     ecdh::{EphemeralSecret as EcEphemeralSecret, SharedSecret},
     point::AffineCoordinates,
     scalar::FromUintUnchecked,
-    sec1::{EncodedPoint, FromEncodedPoint, ToEncodedPoint},
+    sec1::{EncodedPoint, FromEncodedPoint},
     AffinePoint, Curve, PublicKey as EcPublicKey,
 };
 use hmac::{Hmac, Mac};
 use log::{debug, error, info};
 use nom::IResult;
-use nom::{bytes::streaming::take, combinator::rest, number::complete::be_u32, AsBytes, Parser};
+use nom::{bytes::streaming::take, number::complete::be_u32, AsBytes, Parser};
 use p521::NistP521;
-use poly1305::{Block, Poly1305};
+use poly1305::Poly1305;
 use rand::Rng;
 use sha2::{Digest, Sha512};
 use signature::Signer;
@@ -28,22 +27,22 @@ use signature::Signer;
 use smicro_macros::{declare_crypto_algs_list, declare_deserializable_struct, gen_serialize_impl};
 use smicro_types::error::ParsingError;
 use smicro_types::ssh::deserialize::streaming_const_take;
+use smicro_types::ssh::types::PositiveBigNum;
 use smicro_types::{
     deserialize::DeserializePacket,
     serialize::SerializePacket,
     sftp::deserialize::parse_slice,
     ssh::{
-        deserialize::{const_take, parse_boolean, parse_message_type, parse_name_list},
+        deserialize::{const_take, parse_boolean, parse_name_list},
         types::{MessageType, NameList, SSHSlice, SharedSSHSlice},
     },
 };
 
-use crate::state::SessionCryptoMaterials;
 use crate::MAX_PKT_SIZE;
 use crate::{
     error::{Error, KeyLoadingError},
     state::{CryptoAlgs, ICryptoAlgs, State},
-    write_message, KexReceived, KexReplySent, SessionStates,
+    write_message, KexReplySent, SessionStates,
 };
 
 pub trait Message<'a>: Sized {
@@ -134,7 +133,7 @@ fn compute_hash<C: elliptic_curve::Curve>(
     q_server.serialize(&mut hash)?;
 
     // Finally, hash the shared secret
-    SharedSSHSlice(shared_secret.raw_secret_bytes().as_bytes()).serialize(&mut hash)?;
+    PositiveBigNum(shared_secret.raw_secret_bytes().as_bytes()).serialize(&mut hash)?;
 
     let mut result = vec![0; hash.0.output_size()];
     hash.0.finalize_into_reset(&mut result).unwrap();
@@ -155,7 +154,7 @@ fn derive_encryption_key<C: elliptic_curve::Curve>(
     let mut keys: Vec<Vec<u8>> = Vec::new();
     let mut total_len_bits = 0;
     while total_len_bits < needed_bits {
-        SharedSSHSlice(shared_secret.raw_secret_bytes().as_slice()).serialize(&mut hash)?;
+        PositiveBigNum(shared_secret.raw_secret_bytes().as_slice()).serialize(&mut hash)?;
         exchange_hash_digest.serialize(&mut hash)?;
         if total_len_bits == 0 {
             hash.0.update(&[char_index]);
@@ -238,7 +237,7 @@ impl KeyExchangeMethods for EcdhSha2Nistp521 {
         KexHostKeyEcdsa {
             name: key_name,
             curve_name: matching_host_key.curve_name(),
-            key: SharedSSHSlice(matching_host_key.public_sec1_part().as_bytes()),
+            key: PositiveBigNum(matching_host_key.public_sec1_part().as_bytes()),
         }
         .serialize(&mut k_server)?;
         let k_server = SSHSlice(k_server);
@@ -901,7 +900,7 @@ impl<'a> Message<'a> for MessageKexEcdhInit<'a> {
 pub struct KexHostKeyEcdsa<'a> {
     name: &'a str,
     curve_name: &'a str,
-    key: SharedSSHSlice<'a, u8>,
+    key: PositiveBigNum<'a>,
 }
 
 #[gen_serialize_impl]
