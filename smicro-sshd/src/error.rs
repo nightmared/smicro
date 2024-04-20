@@ -58,6 +58,14 @@ pub enum Error {
     SequenceNumberWrapped,
     #[error("Could not encrypt data")]
     EncryptionError,
+    #[error("No signature provided in the authentication request")]
+    NoSignatureProvided,
+    #[error("This public key is not properly encoded")]
+    InvalidPublicKey,
+    #[error("A session identifier should be available")]
+    MissingSessionIdentifier,
+    #[error("This signature is not properly encoded")]
+    InvalidSignature,
 }
 
 #[derive(thiserror::Error, Debug)]

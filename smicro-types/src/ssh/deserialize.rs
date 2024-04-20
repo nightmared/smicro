@@ -12,6 +12,7 @@ use super::types::{MessageType, NameList};
 
 pub fn parse_message_type(input: &[u8]) -> IResult<&[u8], MessageType, ParsingError> {
     let (next, potential_cmd) = be_u8(input)?;
+
     Ok((
         next,
         MessageType::try_from(potential_cmd)

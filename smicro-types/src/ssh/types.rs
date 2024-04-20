@@ -4,11 +4,25 @@
 #[repr(u8)]
 pub enum MessageType {
     Disconnect = 1,
+    Ignore = 2,
+    Unimplemented = 3,
+    Debug = 4,
     ServiceRequest = 5,
+    ServiceAccept = 6,
+
     KexInit = 20,
     NewKeys = 21,
+
     KexEcdhInit = 30,
     KexEcdhReply = 31,
+
+    UserAuthRequest = 50,
+    UserAuthFailure = 51,
+    UserAuthSuccess = 52,
+
+    UserAuthPublickKeyOk = 60,
+
+    ChannelOpen = 90,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]

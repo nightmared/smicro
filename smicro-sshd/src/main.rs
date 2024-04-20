@@ -1,13 +1,18 @@
 use std::{
-    io::{self, Read, Write},
+    io::{Read, Write},
     net::{TcpListener, TcpStream},
     path::Path,
     sync::Arc,
     thread,
 };
 
+use base64::engine::{general_purpose::STANDARD, Engine as _};
 use log::{debug, error, info, trace, warn, LevelFilter};
-use messages::{DynCipher, DynMAC, Message, MessageKeyExchangeInit};
+use messages::{
+    CryptoAlg, DynCipher, EcdsaSha2Nistp521, IKeySigningAlgorithm, Message, MessageKeyExchangeInit,
+    MessageServiceAccept, MessageUserAuthFailure, MessageUserAuthPublicKeyOk,
+    MessageUserAuthRequest, MessageUserAuthSuccess, UserAuthPublickey,
+};
 use nom::{
     bytes::streaming::{tag, take, take_until, take_while1},
     combinator::{opt, peek},
@@ -16,6 +21,7 @@ use nom::{
     AsChar, IResult,
 };
 use rand::Rng;
+use smicro_macros::declare_session_state_with_allowed_message_types;
 use state::{SessionCryptoMaterials, State};
 use syslog::{BasicLogger, Facility, Formatter3164};
 
@@ -24,7 +30,10 @@ use smicro_types::{
     deserialize::DeserializePacket,
     error::ParsingError,
     serialize::SerializePacket,
-    ssh::{deserialize::parse_message_type, types::MessageType},
+    ssh::{
+        deserialize::parse_message_type,
+        types::{MessageType, NameList, SharedSSHSlice},
+    },
 };
 
 mod error;
@@ -70,7 +79,9 @@ define_state_list!(
     KexSent,
     KexReceived,
     KexReplySent,
-    KeysNegotiated
+    ExpectsServiceRequest,
+    ExpectsUserAuthRequest,
+    ExpectsChannelOpen
 );
 
 trait SessionState {
@@ -176,80 +187,54 @@ impl SessionState for IdentifierStringReceived {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct KexSent {
     my_kex_message: MessageKeyExchangeInit,
 }
 
-impl SessionState for KexSent {
-    fn process<'a>(
-        &mut self,
-        state: &mut State,
-        _stream: &mut TcpStream,
-        input: &'a mut [u8],
-    ) -> Result<(&'a [u8], SessionStates), Error> {
-        let (next, packet_payload) = parse_packet(input, state)?;
+#[declare_session_state_with_allowed_message_types(structure = KexSent, msg_type = MessageType::KexInit)]
+fn process(message_data: &[u8]) {
+    let (_, msg) = MessageKeyExchangeInit::deserialize(message_data)?;
+    debug!("Received {:?}", msg);
+    state.crypto_algs = Some(Arc::new(msg.compute_crypto_algs()?));
 
-        let (message_data, message_type) = parse_message_type(packet_payload)?;
-        if message_type != MessageType::KexInit {
-            return Err(Error::DisallowedMessageType(message_type));
-        }
+    let next_state = KexReceived {
+        my_kex_message: self.my_kex_message.clone(),
+        peer_kex_message: msg,
+    };
 
-        let (_, msg) = MessageKeyExchangeInit::deserialize(message_data)?;
-        debug!("Received {:?}", msg);
-        state.crypto_algs = Some(Arc::new(msg.compute_crypto_algs()?));
-
-        let next_state = KexReceived {
-            my_kex_message: self.my_kex_message.clone(),
-            peer_kex_message: msg,
-        };
-
-        Ok((next, SessionStates::KexReceived(next_state)))
-    }
+    Ok((next, SessionStates::KexReceived(next_state)))
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct KexReceived {
     my_kex_message: MessageKeyExchangeInit,
     peer_kex_message: MessageKeyExchangeInit,
 }
 
-impl SessionState for KexReceived {
-    fn process<'a>(
-        &mut self,
-        state: &mut State,
-        stream: &mut TcpStream,
-        input: &'a mut [u8],
-    ) -> Result<(&'a [u8], SessionStates), Error> {
-        let (next, packet_payload) = parse_packet(input, state)?;
+#[declare_session_state_with_allowed_message_types(structure = KexReceived, msg_type = MessageType::KexEcdhInit)]
+fn process(message_data: &[u8]) {
+    let (_, msg) = MessageKexEcdhInit::deserialize(message_data)?;
+    debug!("Received {:?}", msg);
+    let crypto_algs = state
+        .crypto_algs
+        .as_ref()
+        .ok_or(Error::MissingCryptoAlgs)?
+        .clone();
+    let next_state = crypto_algs.kex().perform_key_exchange(
+        state,
+        stream,
+        &msg,
+        &self.my_kex_message,
+        &self.peer_kex_message,
+    )?;
 
-        let (message_data, message_type) = parse_message_type(packet_payload)?;
-        if message_type != MessageType::KexEcdhInit {
-            return Err(Error::DisallowedMessageType(message_type));
-        }
+    write_message(state, stream, &MessageNewKeys {})?;
 
-        let (_, msg) = MessageKexEcdhInit::deserialize(message_data)?;
-        debug!("Received {:?}", msg);
-        let crypto_algs = state
-            .crypto_algs
-            .as_ref()
-            .ok_or(Error::MissingCryptoAlgs)?
-            .clone();
-        let next_state = crypto_algs.kex().perform_key_exchange(
-            state,
-            stream,
-            &msg,
-            &self.my_kex_message,
-            &self.peer_kex_message,
-        )?;
-
-        write_message(state, stream, &MessageNewKeys {})?;
-
-        Ok((next, next_state))
-    }
+    Ok((next, next_state))
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct KexReplySent {
     pub iv_c2s: Vec<u8>,
     pub iv_s2c: Vec<u8>,
@@ -259,79 +244,147 @@ pub struct KexReplySent {
     pub integrity_key_s2c: Vec<u8>,
 }
 
-impl SessionState for KexReplySent {
-    fn process<'a>(
-        &mut self,
-        state: &mut State,
-        _stream: &mut TcpStream,
-        input: &'a mut [u8],
-    ) -> Result<(&'a [u8], SessionStates), Error> {
-        let (next, packet_payload) = parse_packet(input, state)?;
-
-        let (message_data, message_type) = parse_message_type(packet_payload)?;
-        if message_type != MessageType::NewKeys {
-            return Err(Error::DisallowedMessageType(message_type));
-        }
-
-        if message_data != [] {
-            return Err(Error::DataInNewKeysMessage);
-        }
-
-        let crypto_algs = state
-            .crypto_algs
-            .as_ref()
-            .ok_or(Error::MissingCryptoAlgs)?
-            .clone();
-        let client_mac = crypto_algs
-            .client_mac()
-            .allocate_with_key(&self.integrity_key_c2s);
-        let server_mac = crypto_algs
-            .server_mac()
-            .allocate_with_key(&self.integrity_key_s2c);
-        let client_cipher = crypto_algs
-            .client_cipher()
-            .from_key(&self.encryption_key_c2s)?;
-        let server_cipher = crypto_algs
-            .server_cipher()
-            .from_key(&self.encryption_key_s2c)?;
-        let materials = SessionCryptoMaterials {
-            client_mac,
-            server_mac,
-            client_cipher,
-            server_cipher,
-        };
-
-        state.crypto_material = Some(materials);
-
-        Ok((next, SessionStates::KeysNegotiated(KeysNegotiated {})))
+#[declare_session_state_with_allowed_message_types(structure = KexReplySent, msg_type = MessageType::NewKeys)]
+fn process(message_data: &[u8]) {
+    if message_data != [] {
+        return Err(Error::DataInNewKeysMessage);
     }
+
+    let crypto_algs = state
+        .crypto_algs
+        .as_ref()
+        .ok_or(Error::MissingCryptoAlgs)?
+        .clone();
+    let client_mac = crypto_algs
+        .client_mac()
+        .allocate_with_key(&self.integrity_key_c2s);
+    let server_mac = crypto_algs
+        .server_mac()
+        .allocate_with_key(&self.integrity_key_s2c);
+    let client_cipher = crypto_algs
+        .client_cipher()
+        .from_key(&self.encryption_key_c2s)?;
+    let server_cipher = crypto_algs
+        .server_cipher()
+        .from_key(&self.encryption_key_s2c)?;
+    let materials = SessionCryptoMaterials {
+        client_mac,
+        server_mac,
+        client_cipher,
+        server_cipher,
+    };
+
+    state.crypto_material = Some(materials);
+
+    Ok((
+        next,
+        SessionStates::ExpectsServiceRequest(ExpectsServiceRequest {}),
+    ))
 }
 
-#[derive(Debug)]
-pub struct KeysNegotiated {}
+#[derive(Clone, Debug)]
+pub struct ExpectsServiceRequest {}
 
-impl SessionState for KeysNegotiated {
-    fn process<'a>(
-        &mut self,
-        state: &mut State,
-        _stream: &mut TcpStream,
-        input: &'a mut [u8],
-    ) -> Result<(&'a [u8], SessionStates), Error> {
-        let (next, packet_payload) = parse_packet(input, state)?;
+#[declare_session_state_with_allowed_message_types(structure = ExpectsServiceRequest, msg_type = MessageType::ServiceRequest)]
+fn process(message_data: &[u8]) {
+    let (_, msg) = MessageServiceRequest::deserialize(message_data)?;
 
-        let (message_data, message_type) = parse_message_type(packet_payload)?;
-        if message_type != MessageType::ServiceRequest {
-            return Err(Error::DisallowedMessageType(message_type));
-        }
-
-        let (_, msg) = MessageServiceRequest::deserialize(message_data)?;
-
-        if msg.service_name != "ssh-userauth" {
-            return Err(Error::InvalidServiceRequest);
-        }
-
-        unimplemented!()
+    if msg.service_name != "ssh-userauth" {
+        return Err(Error::InvalidServiceRequest);
     }
+
+    write_message(
+        state,
+        stream,
+        &MessageServiceAccept {
+            service_name: msg.service_name,
+        },
+    )?;
+
+    Ok((
+        next,
+        SessionStates::ExpectsUserAuthRequest(ExpectsUserAuthRequest {}),
+    ))
+}
+
+#[derive(Clone, Debug)]
+pub struct ExpectsUserAuthRequest {}
+
+#[declare_session_state_with_allowed_message_types(structure = ExpectsUserAuthRequest, msg_type = MessageType::UserAuthRequest)]
+fn process(message_data: &[u8]) {
+    let (_, msg) = MessageUserAuthRequest::deserialize(message_data)?;
+
+    if msg.method_name == "publickey" {
+        let (_, pk) = UserAuthPublickey::deserialize(msg.method_data)?;
+
+        if pk.public_key_alg_name == <EcdsaSha2Nistp521 as IKeySigningAlgorithm>::NAME {
+            let verifier = EcdsaSha2Nistp521::new();
+            let allowed_key = STANDARD.decode("AAAAE2VjZHNhLXNoYTItbmlzdHA1MjEAAAAIbmlzdHA1MjEAAACFBAD2J8ayINyXiTREW9oNZ/TTveKGTAPe0orWMgMJ/unT72Lo/NUA2G4LcgCrjpunTctfT88Drq5NB5uyULw3tLMI+wBvJqL7ACK5+j9c1GDx8wZ1W5AN+hYzi1fjvMICS/MCDmG2J3KaDZOci3A5DQCtaJ7COs9BzVmJQzWFpF76QxgJJQ==").unwrap();
+            if pk.public_key_blob == allowed_key {
+                if pk.with_signature {
+                    let sig = pk.signature.ok_or(Error::NoSignatureProvided)?;
+
+                    let session_identifier = state
+                        .session_identifier
+                        .as_ref()
+                        .ok_or(Error::MissingSessionIdentifier)?;
+                    let mut message = Vec::new();
+                    SharedSSHSlice(session_identifier.as_slice()).serialize(&mut message)?;
+                    message.push(MessageType::UserAuthRequest as u8);
+                    msg.user_name.serialize(&mut message)?;
+                    msg.service_name.serialize(&mut message)?;
+                    "publickey".serialize(&mut message)?;
+                    true.serialize(&mut message)?;
+                    pk.public_key_alg_name.serialize(&mut message)?;
+                    SharedSSHSlice(pk.public_key_blob).serialize(&mut message)?;
+
+                    if verifier.signature_is_valid(pk.public_key_blob, &message, sig)? {
+                        write_message(state, stream, &MessageUserAuthSuccess {})?;
+
+                        return Ok((
+                            next,
+                            SessionStates::ExpectsChannelOpen(ExpectsChannelOpen {
+                                user_name: msg.user_name.to_string(),
+                            }),
+                        ));
+                    }
+                } else {
+                    write_message(
+                        state,
+                        stream,
+                        &MessageUserAuthPublicKeyOk {
+                            public_key_alg_name: pk.public_key_alg_name,
+                            public_key_blob: SharedSSHSlice(pk.public_key_blob),
+                        },
+                    )?;
+
+                    return Ok((next, SessionStates::ExpectsUserAuthRequest(self.clone())));
+                }
+            }
+        }
+    }
+    write_message(
+        state,
+        stream,
+        &MessageUserAuthFailure {
+            allowed_auth_methods: NameList {
+                entries: vec![String::from("publickey")],
+            },
+            partial_success: false,
+        },
+    )?;
+
+    Ok((next, SessionStates::ExpectsUserAuthRequest(self.clone())))
+}
+
+#[derive(Clone, Debug)]
+pub struct ExpectsChannelOpen {
+    user_name: String,
+}
+
+#[declare_session_state_with_allowed_message_types(structure = ExpectsChannelOpen, msg_type = MessageType::ChannelOpen)]
+fn process(message_data: &[u8]) {
+    unimplemented!()
 }
 
 fn write_message<'a, T: SerializePacket + Message<'a>, W: Write>(
@@ -532,6 +585,7 @@ fn handle_packet(mut stream: TcpStream) -> Result<(), Error> {
                 );
                 return Err(Error::InvalidPacket);
             }
+            Err(Error::DisallowedMessageType(MessageType::Ignore | MessageType::Debug)) => {}
             Err(e) => {
                 error!("Got an error while processing the packet: {:?}", e);
                 debug!("The data that triggered the error was: {:?}", buf);

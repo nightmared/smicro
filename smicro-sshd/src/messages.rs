@@ -6,6 +6,7 @@ use cipher::generic_array::GenericArray;
 use cipher::{Iv, KeyIvInit, StreamCipher, StreamCipherSeek};
 use ecdsa::Signature;
 use elliptic_curve::subtle::ConstantTimeEq;
+use elliptic_curve::Scalar;
 use elliptic_curve::{
     ecdh::{EphemeralSecret as EcEphemeralSecret, SharedSecret},
     point::AffineCoordinates,
@@ -21,7 +22,7 @@ use p521::NistP521;
 use poly1305::Poly1305;
 use rand::Rng;
 use sha2::{Digest, Sha512};
-use signature::Signer;
+use signature::{Signer, Verifier};
 
 use smicro_macros::{declare_crypto_algs_list, declare_deserializable_struct, gen_serialize_impl};
 use smicro_types::error::ParsingError;
@@ -234,7 +235,7 @@ impl KeyExchangeMethods for EcdhSha2Nistp521 {
 
         // Print the server host key to a byte string
         let mut k_server = Vec::new();
-        KexHostKeyEcdsa {
+        KeyEcdsa {
             name: key_name,
             curve_name: matching_host_key.curve_name(),
             key: PositiveBigNum(matching_host_key.public_sec1_part().as_bytes()),
@@ -259,7 +260,7 @@ impl KeyExchangeMethods for EcdhSha2Nistp521 {
         matching_host_key.sign(exchange_hash.as_bytes(), &mut signature)?;
 
         let mut kex_signature = Vec::new();
-        KeyWithName {
+        SignatureWithName {
             name: key_name,
             key: SharedSSHSlice(&signature),
         }
@@ -285,13 +286,22 @@ impl KeyExchangeMethods for EcdhSha2Nistp521 {
             )
         };
 
+        let iv_c2s = derive_key(b'A')?;
+        let iv_s2c = derive_key(b'B')?;
+        let encryption_key_c2s = derive_key(b'C')?;
+        let encryption_key_s2c = derive_key(b'D')?;
+        let integrity_key_c2s = derive_key(b'E')?;
+        let integrity_key_s2c = derive_key(b'F')?;
+
+        state.session_identifier = Some(exchange_hash);
+
         Ok(SessionStates::KexReplySent(KexReplySent {
-            iv_c2s: derive_key(b'A')?,
-            iv_s2c: derive_key(b'B')?,
-            encryption_key_c2s: derive_key(b'C')?,
-            encryption_key_s2c: derive_key(b'D')?,
-            integrity_key_c2s: derive_key(b'E')?,
-            integrity_key_s2c: derive_key(b'F')?,
+            iv_c2s,
+            iv_s2c,
+            encryption_key_c2s,
+            encryption_key_s2c,
+            integrity_key_c2s,
+            integrity_key_s2c,
         }))
     }
 }
@@ -320,6 +330,13 @@ pub trait IKeySigningAlgorithm: CryptoAlg {
         &self,
         buf: &'a [u8],
     ) -> Result<(&'a [u8], Self::KeyType), KeyLoadingError>;
+
+    fn signature_is_valid(
+        &self,
+        key: &[u8],
+        message: &[u8],
+        signature: &[u8],
+    ) -> Result<bool, Error>;
 }
 
 #[derive(Clone)]
@@ -367,6 +384,43 @@ impl IKeySigningAlgorithm for EcdsaSha2Nistp521 {
 
         Ok((next_data, signing_key))
     }
+
+    fn signature_is_valid(
+        &self,
+        key: &[u8],
+        message: &[u8],
+        signature: &[u8],
+    ) -> Result<bool, Error> {
+        let (_, key) = KeyEcdsa::deserialize(key)?;
+        let signer = <ecdsa::VerifyingKey<NistP521>>::from_sec1_bytes(key.key.0)
+            .map_err(|_| Error::InvalidPublicKey)?;
+
+        let (_, sig) = SignatureWithName::deserialize(signature)?;
+        let (_, raw_ecdsa_sig) = EcdsaSignature::deserialize(sig.key.0)?;
+
+        let expand_bignum =
+            |bignum: PositiveBigNum| -> Result<p521::Scalar, elliptic_curve::Error> {
+                let mut out = [0; 66];
+
+                let slice = if bignum.0.len() < 66 {
+                    out[66 - bignum.0.len()..].copy_from_slice(bignum.0);
+                    &out
+                } else {
+                    bignum.0
+                };
+
+                p521::Scalar::from_slice(slice)
+            };
+
+        let r = expand_bignum(raw_ecdsa_sig.r)?;
+        let s = expand_bignum(raw_ecdsa_sig.s)?;
+
+        let ecdsa_sig = <ecdsa::Signature<NistP521>>::from_scalars(&r, &s)
+            .map_err(|_| Error::InvalidSignature)?;
+
+        println!("{:?}", signer.verify(message, &ecdsa_sig));
+        Ok(signer.verify(message, &ecdsa_sig).is_ok())
+    }
 }
 
 pub trait ISigningKey {
@@ -401,15 +455,10 @@ impl ISigningKey for <EcdsaSha2Nistp521 as IKeySigningAlgorithm>::KeyType {
             .map_err(|_| Error::SigningError)?
             .to_bytes();
 
-        //((12 + 2 * self.integer_size_bytes()) as u32).serialize(&mut output)?;
-        (self.integer_size_bytes() as u32).serialize(&mut output)?;
-        data[0..self.integer_size_bytes()]
-            .as_ref()
-            .serialize(&mut output)?;
-        (self.integer_size_bytes() as u32).serialize(&mut output)?;
-        data[self.integer_size_bytes()..]
-            .as_ref()
-            .serialize(output)?;
+        let r = PositiveBigNum(&data[0..self.integer_size_bytes()]);
+        let s = PositiveBigNum(&data[self.integer_size_bytes()..]);
+
+        EcdsaSignature { r, s }.serialize(&mut output)?;
 
         Ok(())
     }
@@ -520,8 +569,6 @@ impl DynCipher for Chacha20Poly1305Impl {
         sequence_number: u32,
         mut ciphered_data: &mut dyn Write,
     ) -> Result<(), Error> {
-        debug!("input={:?}", cleartext_data);
-        debug!("seqnr={:?}", sequence_number);
         // this is a cipher with authenticated encryptions, so we need to extract the packet length
         // beforehand
         let (_, size_field) =
@@ -531,7 +578,6 @@ impl DynCipher for Chacha20Poly1305Impl {
 
         // decrypt in place
         self.cipher_main_message(&mut cleartext_data[4..], sequence_number);
-        debug!("output={:?}", cleartext_data);
 
         let poly1305_tag = self.compute_poly1305_hash(cleartext_data, sequence_number);
 
@@ -905,15 +951,22 @@ impl<'a> Message<'a> for MessageKexEcdhInit<'a> {
 }
 
 #[gen_serialize_impl]
-pub struct KexHostKeyEcdsa<'a> {
+#[declare_deserializable_struct]
+pub struct KeyEcdsa<'a> {
+    #[field(parser = parse_utf8_slice)]
     name: &'a str,
+    #[field(parser = parse_utf8_slice)]
     curve_name: &'a str,
+    #[field(parser = parse_slice.map(|x| PositiveBigNum(x)))]
     key: PositiveBigNum<'a>,
 }
 
 #[gen_serialize_impl]
-pub struct KeyWithName<'a> {
+#[declare_deserializable_struct]
+pub struct SignatureWithName<'a> {
+    #[field(parser = parse_utf8_slice)]
     name: &'a str,
+    #[field(parser = parse_slice.map(SharedSSHSlice))]
     key: SharedSSHSlice<'a, u8>,
 }
 
@@ -944,6 +997,17 @@ impl<'a> Message<'a> for MessageNewKeys {
 pub struct MessageServiceRequest<'a> {
     #[field(parser = parse_utf8_slice)]
     service_name: &'a str,
+}
+
+#[gen_serialize_impl]
+pub struct MessageServiceAccept<'a> {
+    pub service_name: &'a str,
+}
+
+impl<'a> Message<'a> for MessageServiceAccept<'a> {
+    fn get_message_type() -> MessageType {
+        MessageType::ServiceAccept
+    }
 }
 
 #[repr(u32)]
@@ -986,4 +1050,81 @@ impl<'a> MessageDisconnect<'a> {
             language: "",
         }
     }
+}
+
+#[gen_serialize_impl]
+pub struct MessageUnimplemented {
+    pub sequence_number: u32,
+}
+
+impl<'a> Message<'a> for MessageUnimplemented {
+    fn get_message_type() -> MessageType {
+        MessageType::Unimplemented
+    }
+}
+
+#[declare_deserializable_struct]
+pub struct MessageUserAuthRequest<'a> {
+    #[field(parser = parse_utf8_slice)]
+    pub user_name: &'a str,
+    #[field(parser = parse_utf8_slice)]
+    pub service_name: &'a str,
+    #[field(parser = parse_utf8_slice)]
+    pub method_name: &'a str,
+    #[field(parser = nom::combinator::rest)]
+    pub method_data: &'a [u8],
+}
+
+#[gen_serialize_impl]
+pub struct MessageUserAuthFailure {
+    pub allowed_auth_methods: NameList,
+    pub partial_success: bool,
+}
+
+impl<'a> Message<'a> for MessageUserAuthFailure {
+    fn get_message_type() -> MessageType {
+        MessageType::UserAuthFailure
+    }
+}
+
+#[gen_serialize_impl]
+pub struct MessageUserAuthSuccess {}
+
+impl<'a> Message<'a> for MessageUserAuthSuccess {
+    fn get_message_type() -> MessageType {
+        MessageType::UserAuthSuccess
+    }
+}
+
+#[declare_deserializable_struct]
+pub struct UserAuthPublickey<'a> {
+    #[field(parser = parse_boolean)]
+    pub with_signature: bool,
+    #[field(parser = parse_utf8_slice)]
+    pub public_key_alg_name: &'a str,
+    #[field(parser = parse_slice)]
+    pub public_key_blob: &'a [u8],
+    #[field(parser = parse_slice, optional = true)]
+    pub signature: &'a [u8],
+}
+
+#[gen_serialize_impl]
+pub struct MessageUserAuthPublicKeyOk<'a> {
+    pub public_key_alg_name: &'a str,
+    pub public_key_blob: SharedSSHSlice<'a, u8>,
+}
+
+impl<'a> Message<'a> for MessageUserAuthPublicKeyOk<'a> {
+    fn get_message_type() -> MessageType {
+        MessageType::UserAuthPublickKeyOk
+    }
+}
+
+#[gen_serialize_impl]
+#[declare_deserializable_struct]
+struct EcdsaSignature<'a> {
+    #[field(parser = parse_slice.map(PositiveBigNum))]
+    r: PositiveBigNum<'a>,
+    #[field(parser = parse_slice.map(PositiveBigNum))]
+    s: PositiveBigNum<'a>,
 }

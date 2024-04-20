@@ -1,7 +1,7 @@
-use std::{fmt::Debug, fs::File, io::Read, num::Wrapping, path::Path, rc::Rc, sync::Arc};
+use std::{fmt::Debug, fs::File, io::Read, num::Wrapping, path::Path, sync::Arc};
 
 use base64::engine::{general_purpose::STANDARD, Engine as _};
-use log::{info, trace};
+use log::info;
 use nom::{
     bytes::complete::{tag, take_till1},
     character::complete::line_ending,
@@ -138,6 +138,7 @@ pub struct State<'a> {
     pub peer_identifier_string: Option<Vec<u8>>,
     pub crypto_algs: Option<Arc<Box<dyn ICryptoAlgs>>>,
     pub crypto_material: Option<SessionCryptoMaterials>,
+    pub session_identifier: Option<Vec<u8>>,
     pub sequence_number_c2s: Wrapping<u32>,
     pub sequence_number_s2c: Wrapping<u32>,
 }
@@ -164,6 +165,7 @@ impl<'a> State<'a> {
             peer_identifier_string: None,
             crypto_algs: None,
             crypto_material: None,
+            session_identifier: None,
             sequence_number_c2s: Wrapping(0),
             sequence_number_s2c: Wrapping(0),
         }

@@ -5,8 +5,8 @@ use quote::{quote, quote_spanned, ToTokens};
 
 use syn::{
     parse, parse::Parser, punctuated::Punctuated, spanned::Spanned, token::Comma, Attribute, Expr,
-    ExprArray, ExprLit, ExprPath, Fields, GenericParam, ItemConst, ItemEnum, ItemStruct,
-    LifetimeParam, Lit, Meta, Token, Type,
+    ExprLit, ExprPath, Fields, GenericParam, ItemConst, ItemEnum, ItemFn, ItemStruct,
+    LifetimeParam, Lit, Meta, MetaNameValue, Token, Type,
 };
 
 struct PacketArgs {
@@ -490,6 +490,87 @@ pub fn declare_crypto_algs_list(_attrs: TokenStream, item: TokenStream) -> Token
         }
 
         pub use #inner_negotiate_alg_ident as #negotiate_alg_ident;
+    }
+    .into()
+}
+
+#[proc_macro_error]
+#[proc_macro_attribute]
+pub fn declare_session_state_with_allowed_message_types(
+    attrs: TokenStream,
+    item: TokenStream,
+) -> TokenStream {
+    let ast: ItemFn = parse(item).expect("Not a function");
+
+    let parser = Punctuated::<MetaNameValue, Token![,]>::parse_terminated;
+    let attribute_args = match parser.parse(attrs) {
+        Ok(x) => x,
+        Err(e) => abort!(
+            Span::call_site(),
+            "Couldn't parse the fields of the macro: {}",
+            e
+        ),
+    };
+
+    let args: Vec<&MetaNameValue> = attribute_args.iter().collect();
+    if args.len() != 2 {
+        abort!(attribute_args.span(), "Invalid number of arguments");
+    }
+
+    if args[0]
+        .path
+        .get_ident()
+        .expect("expected ident")
+        .to_string()
+        != "structure"
+    {
+        abort!(args[0].span(), "Invalid name for the attribute");
+    }
+
+    if args[1]
+        .path
+        .get_ident()
+        .expect("expected ident")
+        .to_string()
+        != "msg_type"
+    {
+        abort!(args[1].span(), "Invalid name for the attribute");
+    }
+
+    let struct_name = &args[0].value;
+    let allowed_type = &args[1].value;
+
+    let fun_content = ast.block.stmts;
+
+    quote! {
+        impl SessionState for #struct_name {
+            fn process<'a>(
+                &mut self,
+                state: &mut State,
+                stream: &mut TcpStream,
+                input: &'a mut [u8],
+            ) -> Result<(&'a [u8], SessionStates), Error> {
+                let (next, packet_payload) = parse_packet(input, state)?;
+
+                let (message_data, message_type) = match parse_message_type(packet_payload) {
+                    Ok(x) => x,
+                    Err(_) => {
+                        crate::write_message(state, stream, &crate::messages::MessageUnimplemented { sequence_number: state.sequence_number_c2s.0 })?;
+                        return Ok((next, SessionStates::#struct_name(self.clone())));
+                    }
+                };
+
+                if message_type == MessageType::Ignore || message_type == MessageType::Debug || message_type == MessageType::Unimplemented {
+                    return Ok((next, SessionStates::#struct_name(self.clone())));
+                }
+
+                if message_type != #allowed_type {
+                    return Err(Error::DisallowedMessageType(message_type));
+                }
+
+                #(#fun_content)*
+            }
+        }
     }
     .into()
 }
