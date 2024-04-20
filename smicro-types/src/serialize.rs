@@ -119,7 +119,7 @@ impl<'a, T: SerializePacket, const N: usize> SerializePacket for [T; N] {
 
 impl<'a> SerializePacket for &'a [u8] {
     fn get_size(&self) -> usize {
-        self.iter().fold(0, |acc, elem| acc + elem.get_size())
+        self.len()
     }
 
     fn serialize<W: Write>(&self, mut output: W) -> Result<(), std::io::Error> {

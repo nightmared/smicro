@@ -30,6 +30,8 @@ pub enum Error {
     InvalidMACKeyLength,
     #[error("The packet MAC is invalid")]
     InvalidMAC,
+    #[error("Invalid service name in SERVICE_REQUEST")]
+    InvalidServiceRequest,
     #[error("Cryptographic error: invalid length")]
     InvalidLength(#[from] digest::InvalidLength),
     #[error("Invalid UTF-8 input from the client")]
@@ -52,6 +54,10 @@ pub enum Error {
     KeyLoadingError(#[from] KeyLoadingError),
     #[error("Could not sign some data")]
     SigningError,
+    #[error("Overflow: the sequence number wrapped")]
+    SequenceNumberWrapped,
+    #[error("Could not encrypt data")]
+    EncryptionError,
 }
 
 #[derive(thiserror::Error, Debug)]

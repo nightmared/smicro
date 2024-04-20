@@ -33,7 +33,10 @@ mod state;
 
 use error::Error;
 
-use crate::messages::{gen_kex_initial_list, MessageKexEcdhInit, MessageNewKeys};
+use crate::messages::{
+    gen_kex_initial_list, DisconnectReason, MessageDisconnect, MessageKexEcdhInit, MessageNewKeys,
+    MessageServiceRequest,
+};
 
 // A tad bit above the SFTP max packet size, so that we do not have too much fragmentation
 // Besides, this is the same constant as OpenSSH
@@ -162,7 +165,7 @@ impl SessionState for IdentifierStringReceived {
     ) -> Result<(&'a [u8], SessionStates), Error> {
         debug!("Sending the MessageKeyExchangeInit packet");
         let kex_init_msg = gen_kex_initial_list(state);
-        write_message(state, stream, &kex_init_msg, None, None)?;
+        write_message(state, stream, &kex_init_msg)?;
 
         Ok((
             input,
@@ -185,9 +188,9 @@ impl SessionState for KexSent {
         _stream: &mut TcpStream,
         input: &'a mut [u8],
     ) -> Result<(&'a [u8], SessionStates), Error> {
-        let (next, packet) = parse_packet(input, state)?;
+        let (next, packet_payload) = parse_packet(input, state)?;
 
-        let (message_data, message_type) = parse_message_type(packet.payload)?;
+        let (message_data, message_type) = parse_message_type(packet_payload)?;
         if message_type != MessageType::KexInit {
             return Err(Error::DisallowedMessageType(message_type));
         }
@@ -218,9 +221,9 @@ impl SessionState for KexReceived {
         stream: &mut TcpStream,
         input: &'a mut [u8],
     ) -> Result<(&'a [u8], SessionStates), Error> {
-        let (next, packet) = parse_packet(input, state)?;
+        let (next, packet_payload) = parse_packet(input, state)?;
 
-        let (message_data, message_type) = parse_message_type(packet.payload)?;
+        let (message_data, message_type) = parse_message_type(packet_payload)?;
         if message_type != MessageType::KexEcdhInit {
             return Err(Error::DisallowedMessageType(message_type));
         }
@@ -240,7 +243,7 @@ impl SessionState for KexReceived {
             &self.peer_kex_message,
         )?;
 
-        write_message(state, stream, &MessageNewKeys {}, None, None)?;
+        write_message(state, stream, &MessageNewKeys {})?;
 
         Ok((next, next_state))
     }
@@ -263,9 +266,9 @@ impl SessionState for KexReplySent {
         _stream: &mut TcpStream,
         input: &'a mut [u8],
     ) -> Result<(&'a [u8], SessionStates), Error> {
-        let (next, packet) = parse_packet(input, state)?;
+        let (next, packet_payload) = parse_packet(input, state)?;
 
-        let (message_data, message_type) = parse_message_type(packet.payload)?;
+        let (message_data, message_type) = parse_message_type(packet_payload)?;
         if message_type != MessageType::NewKeys {
             return Err(Error::DisallowedMessageType(message_type));
         }
@@ -314,56 +317,80 @@ impl SessionState for KeysNegotiated {
         _stream: &mut TcpStream,
         input: &'a mut [u8],
     ) -> Result<(&'a [u8], SessionStates), Error> {
-        let (next, packet) = parse_packet(input, state)?;
+        let (next, packet_payload) = parse_packet(input, state)?;
 
-        let (message_data, message_type) = parse_message_type(packet.payload)?;
-        debug!("{:?}: {:?}", message_type, message_data);
+        let (message_data, message_type) = parse_message_type(packet_payload)?;
+        if message_type != MessageType::ServiceRequest {
+            return Err(Error::DisallowedMessageType(message_type));
+        }
+
+        let (_, msg) = MessageServiceRequest::deserialize(message_data)?;
+
+        if msg.service_name != "ssh-userauth" {
+            return Err(Error::InvalidServiceRequest);
+        }
+
         unimplemented!()
     }
-}
-
-#[derive(Debug)]
-struct Packet<'a> {
-    length: u32,
-    padding_length: u8,
-    payload: &'a [u8],
-    padding: &'a [u8],
-    mac: &'a [u8],
 }
 
 fn write_message<'a, T: SerializePacket + Message<'a>, W: Write>(
     state: &mut State,
     mut stream: &mut W,
     payload: &T,
-    cipher: Option<&mut dyn DynCipher>,
-    mac: Option<&mut dyn DynMAC>,
 ) -> Result<(), Error> {
-    let mut padding_length = 4;
-    // length + padding_length + message_type + payload + random_padding, max not included
-    let mut real_packet_length = 4 + 1 + 1 + payload.get_size() + padding_length;
-    // BAD: probable timing oracle!
-    while real_packet_length < 16 || real_packet_length % 8 != 0 {
-        padding_length += 1;
-        real_packet_length += 1;
-    }
+    let mut tmp_out = Vec::new();
 
     let mut padding = [0u8; 256];
     state.rng.fill(&mut padding);
 
-    // the packet_length field does not count in the packet size)
-    ((real_packet_length - 4) as u32).serialize(&mut stream)?;
-    stream.write_all(&[padding_length as u8, T::get_message_type() as u8])?;
-    payload.serialize(&mut stream)?;
-    (&padding[0..padding_length]).serialize(&mut stream)?;
+    let cipher = state
+        .crypto_material
+        .as_ref()
+        .map(|mat| mat.server_cipher.as_ref());
 
-    // TODO: mac
+    let mut padding_length = 4;
+    // length + padding_length + message_type + payload + random_padding, max not included
+    let mut real_packet_length = 4 + 1 + 1 + payload.get_size() + padding_length;
+    // BAD: probable timing oracle!
+    // For AEAD mode, the packet length does not count in the modulus
+    while real_packet_length < 16
+        || (real_packet_length - if cipher.is_some() { 4 } else { 0 }) % 8 != 0
+    {
+        padding_length += 1;
+        real_packet_length += 1;
+    }
+
+    // the packet_length field does not count in the packet size)
+    ((real_packet_length - 4) as u32).serialize(&mut tmp_out)?;
+    tmp_out.write_all(&[padding_length as u8, T::get_message_type() as u8])?;
+    payload.serialize(&mut tmp_out)?;
+    (&padding[0..padding_length]).serialize(&mut tmp_out)?;
+
+    if let Some(cipher) = cipher {
+        cipher.encrypt(
+            tmp_out.as_mut_slice(),
+            state.sequence_number_s2c.0,
+            &mut stream,
+        )?;
+    } else {
+        tmp_out.as_slice().serialize(&mut stream)?;
+    };
+
+    // We only support the AEAD mode chacha20-poly1305, where MAC is disabled
+
+    state.sequence_number_s2c += 1;
+    if state.sequence_number_s2c.0 == 0 {
+        return Err(Error::SequenceNumberWrapped);
+    }
+
     Ok(())
 }
 
 fn parse_plaintext_packet<'a>(
     input: &'a [u8],
     cipher: Option<&dyn DynCipher>,
-) -> IResult<&'a [u8], Packet<'a>, ParsingError> {
+) -> IResult<&'a [u8], &'a [u8], ParsingError> {
     let (input, (length, padding_length)) = tuple((
         nom::number::streaming::be_u32,
         nom::number::streaming::be_u8,
@@ -408,22 +435,16 @@ fn parse_plaintext_packet<'a>(
     }
 
     let (input, payload) = take(length - padding_length as u32 - 1)(input)?;
+    // TODO: check the padding
     let (input, padding) = take(padding_length)(input)?;
-    let res = Packet {
-        length,
-        padding_length,
-        payload,
-        padding,
-        mac: &[],
-    };
 
-    Ok((input, res))
+    Ok((input, payload))
 }
 
 fn parse_packet<'a>(
     input: &'a mut [u8],
     state: &mut State,
-) -> IResult<&'a [u8], Packet<'a>, ParsingError> {
+) -> IResult<&'a [u8], &'a [u8], ParsingError> {
     let cipher = state
         .crypto_material
         .as_ref()
@@ -469,9 +490,7 @@ fn parse_packet<'a>(
     Ok((next_data, res))
 }
 
-fn handle_packet(stream: io::Result<TcpStream>) -> Result<(), Error> {
-    let mut stream = stream?;
-
+fn handle_packet(mut stream: TcpStream) -> Result<(), Error> {
     let buf = create_read_buffer(MAX_PKT_SIZE)?;
     let mut data_start = 0;
     let mut cur_pos = 0;
@@ -505,13 +524,26 @@ fn handle_packet(stream: io::Result<TcpStream>) -> Result<(), Error> {
             Err(Error::ParsingError(e)) => {
                 error!("Got an error while trying to parse the packet: {:?}", e);
                 debug!("The data that triggered the error was: {:?}", buf);
+
+                let _ = write_message(
+                    &mut global_state,
+                    &mut stream,
+                    &MessageDisconnect::new(DisconnectReason::ProtocolError),
+                );
                 return Err(Error::InvalidPacket);
             }
             Err(e) => {
                 error!("Got an error while processing the packet: {:?}", e);
                 debug!("The data that triggered the error was: {:?}", buf);
+                let _ = write_message(
+                    &mut global_state,
+                    &mut stream,
+                    &MessageDisconnect::new(DisconnectReason::ProtocolError),
+                );
+
                 return Err(Error::ProcessingFailed);
             }
+
             Ok((next_data, new_state)) => {
                 state = new_state;
 
@@ -543,11 +575,13 @@ fn main() -> Result<(), Error> {
     let listener = TcpListener::bind("127.0.0.1:2222")?;
     for stream in listener.incoming() {
         info!("Received a new connection");
-        thread::spawn(move || {
-            if let Err(e) = handle_packet(stream) {
-                error!("Got an error while handling a stream: {:?}", e);
-            }
-        });
+        if let Ok(stream) = stream {
+            thread::spawn(move || {
+                if let Err(e) = handle_packet(stream) {
+                    error!("Got an error while handling a stream: {:?}", e);
+                }
+            });
+        }
     }
     Ok(())
 }

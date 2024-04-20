@@ -3,6 +3,7 @@
 )]
 #[repr(u8)]
 pub enum MessageType {
+    Disconnect = 1,
     ServiceRequest = 5,
     KexInit = 20,
     NewKeys = 21,

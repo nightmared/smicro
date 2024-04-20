@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use std::cmp::max;
 use std::{io::Write, net::TcpStream, ops::Mul};
 
@@ -26,6 +25,7 @@ use signature::Signer;
 
 use smicro_macros::{declare_crypto_algs_list, declare_deserializable_struct, gen_serialize_impl};
 use smicro_types::error::ParsingError;
+use smicro_types::sftp::deserialize::{parse_utf8_slice, parse_utf8_string};
 use smicro_types::ssh::deserialize::streaming_const_take;
 use smicro_types::ssh::types::PositiveBigNum;
 use smicro_types::{
@@ -272,7 +272,7 @@ impl KeyExchangeMethods for EcdhSha2Nistp521 {
             signature: kex_signature,
         };
 
-        write_message(state, stream, &res, None, None)?;
+        write_message(state, stream, &res)?;
 
         let derive_key = |c: u8| -> Result<Vec<u8>, Error> {
             derive_encryption_key(
@@ -482,7 +482,7 @@ impl DynCipherAlgorithm for Chacha20Poly1305 {
         )
         .clone();
 
-        Ok(Box::new(Chacha20Poly1305Wrapper { key, aad_key }))
+        Ok(Box::new(Chacha20Poly1305Impl { key, aad_key }))
     }
 }
 
@@ -491,7 +491,7 @@ pub trait DynCipher {
 
     fn encrypt(
         &self,
-        cleartext_data: &[u8],
+        cleartext_data: &mut [u8],
         sequence_number: u32,
         ciphered_data: &mut dyn Write,
     ) -> Result<(), Error>;
@@ -504,33 +504,41 @@ pub trait DynCipher {
 }
 
 #[derive(Clone)]
-pub struct Chacha20Poly1305Wrapper {
+pub struct Chacha20Poly1305Impl {
     key: GenericArray<u8, cipher::consts::U32>,
     aad_key: GenericArray<u8, cipher::consts::U32>,
 }
 
-impl DynCipher for Chacha20Poly1305Wrapper {
+impl DynCipher for Chacha20Poly1305Impl {
     fn block_size_bytes(&self) -> usize {
         64
     }
 
     fn encrypt(
         &self,
-        cleartext_data: &[u8],
+        cleartext_data: &mut [u8],
         sequence_number: u32,
-        ciphered_data: &mut dyn Write,
+        mut ciphered_data: &mut dyn Write,
     ) -> Result<(), Error> {
-        unimplemented!()
-        //let sequence_number = (sequence_number as u64).to_be_bytes();
-        //let nonce = <Nonce<ChaCha20Poly1305>>::from_slice(&sequence_number);
-        //let data = self
-        //    .inner
-        //    .encrypt(nonce, cleartext_data)
-        //    .map_err(Error::AEADError)?;
+        debug!("input={:?}", cleartext_data);
+        debug!("seqnr={:?}", sequence_number);
+        // this is a cipher with authenticated encryptions, so we need to extract the packet length
+        // beforehand
+        let (_, size_field) =
+            const_take::<4>(cleartext_data).map_err(|_| Error::EncryptionError)?;
+        let pkt_size = self.get_pkt_size(size_field, sequence_number);
+        cleartext_data[0..4].copy_from_slice(pkt_size.to_be_bytes().as_slice());
 
-        //ciphered_data.write_all(&data)?;
+        // decrypt in place
+        self.cipher_main_message(&mut cleartext_data[4..], sequence_number);
+        debug!("output={:?}", cleartext_data);
 
-        //Ok(())
+        let poly1305_tag = self.compute_poly1305_hash(cleartext_data, sequence_number);
+
+        (cleartext_data as &[u8]).serialize(&mut ciphered_data)?;
+        poly1305_tag.as_slice().serialize(&mut ciphered_data)?;
+
+        Ok(())
     }
 
     fn decrypt<'a>(
@@ -560,7 +568,7 @@ impl DynCipher for Chacha20Poly1305Wrapper {
 
         // decrypt in place
         input[0..4].copy_from_slice(pkt_size.to_be_bytes().as_slice());
-        self.decipher_main_message(&mut input[4..], sequence_number);
+        self.cipher_main_message(&mut input[4..], sequence_number);
 
         let next_data = &input[poly1305::BLOCK_SIZE + 4 + pkt_size as usize..];
         let cur_pkt_plaintext = &input[..4 + pkt_size as usize];
@@ -569,7 +577,7 @@ impl DynCipher for Chacha20Poly1305Wrapper {
     }
 }
 
-impl Chacha20Poly1305Wrapper {
+impl Chacha20Poly1305Impl {
     fn compute_poly1305_hash(&self, bytes: &[u8], sequence_number: u32) -> poly1305::Block {
         let sequence_number = (sequence_number as u64).to_be_bytes();
         let mut cipher = <ChaCha20Legacy as KeyIvInit>::new(
@@ -589,7 +597,7 @@ impl Chacha20Poly1305Wrapper {
         poly.compute_unpadded(bytes)
     }
 
-    fn decipher_main_message(&self, bytes: &mut [u8], sequence_number: u32) {
+    fn cipher_main_message(&self, bytes: &mut [u8], sequence_number: u32) {
         let sequence_number = (sequence_number as u64).to_be_bytes();
         let mut cipher = <ChaCha20Legacy as KeyIvInit>::new(
             &self.key,
@@ -929,5 +937,53 @@ pub struct MessageNewKeys {}
 impl<'a> Message<'a> for MessageNewKeys {
     fn get_message_type() -> MessageType {
         MessageType::NewKeys
+    }
+}
+
+#[declare_deserializable_struct]
+pub struct MessageServiceRequest<'a> {
+    #[field(parser = parse_utf8_slice)]
+    service_name: &'a str,
+}
+
+#[repr(u32)]
+#[derive(Copy, Clone)]
+pub enum DisconnectReason {
+    HostNotAllowedToConnect = 1,
+    ProtocolError = 2,
+    KeyExchangeFailed = 3,
+    ServiceNotAvailable = 7,
+}
+
+impl SerializePacket for DisconnectReason {
+    fn get_size(&self) -> usize {
+        (*self as u32).get_size()
+    }
+
+    fn serialize<W: Write>(&self, output: W) -> Result<(), std::io::Error> {
+        (*self as u32).serialize(output)
+    }
+}
+
+#[gen_serialize_impl]
+pub struct MessageDisconnect<'a> {
+    reason: DisconnectReason,
+    description: &'a str,
+    language: &'a str,
+}
+
+impl<'a> Message<'a> for MessageDisconnect<'a> {
+    fn get_message_type() -> MessageType {
+        MessageType::Disconnect
+    }
+}
+
+impl<'a> MessageDisconnect<'a> {
+    pub fn new(reason: DisconnectReason) -> MessageDisconnect<'static> {
+        MessageDisconnect {
+            reason,
+            description: "",
+            language: "",
+        }
     }
 }
