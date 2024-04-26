@@ -66,6 +66,12 @@ pub enum Error {
     MissingSessionIdentifier,
     #[error("This signature is not properly encoded")]
     InvalidSignature,
+    #[error("Maximum number of channels reached")]
+    MaxChannelNumberReached,
+    #[error("Invalid channel message")]
+    InvalidChannelMessage,
+    #[error("Could not retrieve the handle of a stdin/stdout/stderr process")]
+    InvalidStdioHandle,
 }
 
 #[derive(thiserror::Error, Debug)]

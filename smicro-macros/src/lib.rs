@@ -5,7 +5,7 @@ use quote::{quote, quote_spanned, ToTokens};
 
 use syn::{
     parse, parse::Parser, punctuated::Punctuated, spanned::Spanned, token::Comma, Attribute, Expr,
-    ExprLit, ExprPath, Fields, GenericParam, ItemConst, ItemEnum, ItemFn, ItemStruct,
+    ExprArray, ExprLit, ExprPath, Fields, GenericParam, ItemConst, ItemEnum, ItemFn, ItemStruct,
     LifetimeParam, Lit, Meta, MetaNameValue, Token, Type,
 };
 
@@ -539,6 +539,11 @@ pub fn declare_session_state_with_allowed_message_types(
 
     let struct_name = &args[0].value;
     let allowed_type = &args[1].value;
+    let allowed_types = if let Expr::Array(_) = allowed_type {
+        quote!( #allowed_type )
+    } else {
+        quote!( [#allowed_type] )
+    };
 
     let fun_content = ast.block.stmts;
 
@@ -564,7 +569,7 @@ pub fn declare_session_state_with_allowed_message_types(
                     return Ok((next, SessionStates::#struct_name(self.clone())));
                 }
 
-                if message_type != #allowed_type {
+                if !#allowed_types.contains(&message_type) {
                     return Err(Error::DisallowedMessageType(message_type));
                 }
 

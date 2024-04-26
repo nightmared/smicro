@@ -1,4 +1,6 @@
-use std::{fmt::Debug, fs::File, io::Read, num::Wrapping, path::Path, sync::Arc};
+use std::{
+    collections::HashMap, fmt::Debug, fs::File, io::Read, num::Wrapping, path::Path, sync::Arc,
+};
 
 use base64::engine::{general_purpose::STANDARD, Engine as _};
 use log::info;
@@ -131,6 +133,12 @@ pub struct OpenSSHKeySerialized<'a> {
     key_data: &'a [u8],
 }
 
+pub struct Channel {
+    pub window_size: u32,
+    pub max_pkt_size: u32,
+    pub remote_channel_number: u32,
+}
+
 pub struct State<'a> {
     pub rng: ThreadRng,
     pub host_keys: &'a [&'a dyn ISigningKey],
@@ -139,6 +147,9 @@ pub struct State<'a> {
     pub crypto_algs: Option<Arc<Box<dyn ICryptoAlgs>>>,
     pub crypto_material: Option<SessionCryptoMaterials>,
     pub session_identifier: Option<Vec<u8>>,
+    pub authentified_user: Option<String>,
+    pub channels: HashMap<u32, Channel>,
+    pub num_channels: u32,
     pub sequence_number_c2s: Wrapping<u32>,
     pub sequence_number_s2c: Wrapping<u32>,
 }
@@ -166,6 +177,9 @@ impl<'a> State<'a> {
             crypto_algs: None,
             crypto_material: None,
             session_identifier: None,
+            authentified_user: None,
+            channels: HashMap::new(),
+            num_channels: 0,
             sequence_number_c2s: Wrapping(0),
             sequence_number_s2c: Wrapping(0),
         }

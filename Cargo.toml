@@ -7,3 +7,4 @@ debug = true
 
 [patch.crates-io]
 p521 = { git = 'https://github.com/RustCrypto/elliptic-curves.git', branch = 'master' }
+mio = { git = 'https://github.com/tokio-rs/mio.git', branch = 'master' }

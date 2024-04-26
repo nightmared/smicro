@@ -130,7 +130,7 @@ fn compute_hash<C: elliptic_curve::Curve>(
     k_server.serialize(&mut hash)?;
 
     // Hash the ephemeral public keys
-    SharedSSHSlice(ecdh_init.Q_client).serialize(&mut hash)?;
+    SharedSSHSlice(ecdh_init.q_client).serialize(&mut hash)?;
     q_server.serialize(&mut hash)?;
 
     // Finally, hash the shared secret
@@ -201,7 +201,7 @@ impl KeyExchangeMethods for EcdhSha2Nistp521 {
 
         // Compute the shared secret
         let peer_pubkey: EcPublicKey<p521::NistP521> =
-            EcPublicKey::from_sec1_bytes(&ecdh_init.Q_client)?;
+            EcPublicKey::from_sec1_bytes(&ecdh_init.q_client)?;
 
         // Elliptic Curve Public Key Validation Primitive (see https://www.secg.org/sec1-v2.pdf)
         // `from_sec1_bytes` checks for us that the point is not "at infinity" and that the
@@ -268,8 +268,8 @@ impl KeyExchangeMethods for EcdhSha2Nistp521 {
         let kex_signature = SSHSlice(kex_signature);
 
         let res = MessageKexEcdhReply {
-            K_server: k_server,
-            Q_server: q_server,
+            k_server,
+            q_server,
             signature: kex_signature,
         };
 
@@ -418,7 +418,6 @@ impl IKeySigningAlgorithm for EcdsaSha2Nistp521 {
         let ecdsa_sig = <ecdsa::Signature<NistP521>>::from_scalars(&r, &s)
             .map_err(|_| Error::InvalidSignature)?;
 
-        println!("{:?}", signer.verify(message, &ecdsa_sig));
         Ok(signer.verify(message, &ecdsa_sig).is_ok())
     }
 }
@@ -941,7 +940,7 @@ impl<'a> Message<'a> for MessageKeyExchangeInit {
 #[declare_deserializable_struct]
 pub struct MessageKexEcdhInit<'a> {
     #[field(parser = parse_slice)]
-    Q_client: &'a [u8],
+    q_client: &'a [u8],
 }
 
 impl<'a> Message<'a> for MessageKexEcdhInit<'a> {
@@ -972,8 +971,8 @@ pub struct SignatureWithName<'a> {
 
 #[gen_serialize_impl]
 pub struct MessageKexEcdhReply {
-    K_server: SSHSlice<u8>,
-    Q_server: SSHSlice<u8>,
+    k_server: SSHSlice<u8>,
+    q_server: SSHSlice<u8>,
     signature: SSHSlice<u8>,
 }
 
@@ -1127,4 +1126,101 @@ struct EcdsaSignature<'a> {
     r: PositiveBigNum<'a>,
     #[field(parser = parse_slice.map(PositiveBigNum))]
     s: PositiveBigNum<'a>,
+}
+
+#[declare_deserializable_struct]
+pub struct MessageChannelOpen<'a> {
+    #[field(parser = parse_utf8_slice)]
+    pub channel_type: &'a str,
+    #[field(parser = be_u32)]
+    pub sender_channel: u32,
+    #[field(parser = be_u32)]
+    pub initial_window_size: u32,
+    #[field(parser = be_u32)]
+    pub max_pkt_size: u32,
+    #[field(parser = nom::combinator::rest)]
+    pub channel_specific_data: &'a [u8],
+}
+
+#[repr(u32)]
+#[derive(Copy, Clone)]
+pub enum ChannelOpenFailureReason {
+    ConnectFailed = 2,
+    UnknownChannelType = 3,
+}
+
+impl SerializePacket for ChannelOpenFailureReason {
+    fn get_size(&self) -> usize {
+        (*self as u32).get_size()
+    }
+
+    fn serialize<W: Write>(&self, output: W) -> Result<(), std::io::Error> {
+        (*self as u32).serialize(output)
+    }
+}
+
+#[gen_serialize_impl]
+pub struct MessageChannelOpenFailure<'a> {
+    recipient_channel: u32,
+    reason: ChannelOpenFailureReason,
+    description: &'a str,
+    language: &'a str,
+}
+
+impl<'a> Message<'a> for MessageChannelOpenFailure<'a> {
+    fn get_message_type() -> MessageType {
+        MessageType::ChannelOpenFailure
+    }
+}
+
+impl<'a> MessageChannelOpenFailure<'a> {
+    pub fn new(
+        recipient_channel: u32,
+        reason: ChannelOpenFailureReason,
+    ) -> MessageChannelOpenFailure<'static> {
+        MessageChannelOpenFailure {
+            recipient_channel,
+            reason,
+            description: "",
+            language: "",
+        }
+    }
+}
+
+#[gen_serialize_impl]
+pub struct MessageChannelOpenConfirmation {
+    pub recipient_channel: u32,
+    pub sender_channel: u32,
+    pub initial_window_size: u32,
+    pub max_pkt_size: u32,
+}
+
+impl<'a> Message<'a> for MessageChannelOpenConfirmation {
+    fn get_message_type() -> MessageType {
+        MessageType::ChannelOpenConfirmation
+    }
+}
+
+#[declare_deserializable_struct]
+pub struct MessageChannelRequest<'a> {
+    #[field(parser = be_u32)]
+    pub recipient_channel: u32,
+    #[field(parser = parse_utf8_slice)]
+    pub requested_mode: &'a str,
+    #[field(parser = parse_boolean)]
+    pub want_reply: bool,
+    #[field(parser = nom::combinator::rest)]
+    pub channel_specific_data: &'a [u8],
+}
+
+#[gen_serialize_impl]
+pub struct MessageChannelData<'a> {
+    pub recipient_channel: u32,
+    pub data: SharedSSHSlice<'a, u8>,
+}
+
+impl<'a> Message<'a> for MessageChannelData<'a> {
+    fn get_message_type() -> MessageType {
+        MessageType::ChannelData
+    }
 }

@@ -7,6 +7,7 @@ pub enum MessageType {
     Ignore = 2,
     Unimplemented = 3,
     Debug = 4,
+
     ServiceRequest = 5,
     ServiceAccept = 6,
 
@@ -23,6 +24,10 @@ pub enum MessageType {
     UserAuthPublickKeyOk = 60,
 
     ChannelOpen = 90,
+    ChannelOpenConfirmation = 91,
+    ChannelOpenFailure = 92,
+    ChannelData = 94,
+    ChannelRequest = 98,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
