@@ -9,7 +9,7 @@ use log::{debug, error, info, trace, LevelFilter};
 use packet::MAX_PKT_SIZE;
 use syslog::{BasicLogger, Facility, Formatter3164};
 
-use smicro_common::create_read_buffer;
+use smicro_common::LoopingBuffer;
 use smicro_types::{
     deserialize::DeserializePacket,
     ssh::{deserialize::parse_message_type, types::MessageType},
@@ -32,9 +32,7 @@ use crate::{
 };
 
 fn handle_packet(mut stream: TcpStream) -> Result<(), Error> {
-    let buf = create_read_buffer(MAX_PKT_SIZE)?;
-    let mut data_start = 0;
-    let mut cur_pos = 0;
+    let mut buf = <LoopingBuffer<MAX_PKT_SIZE>>::new()?;
 
     let mut host_keys = Vec::new();
     let test_hostkey = State::load_hostkey(&Path::new("/home/sthoby/dev-fast/smicro/host_key"))?;
@@ -43,24 +41,21 @@ fn handle_packet(mut stream: TcpStream) -> Result<(), Error> {
     let mut state = SessionStates::UninitializedSession(UninitializedSession {});
 
     loop {
-        let res = state.process(
-            &mut global_state,
-            &mut stream,
-            &mut buf[data_start..cur_pos],
-        );
+        let available_data = buf.get_readable_data();
+        let available_data_len = available_data.len();
+        let res = state.process(&mut global_state, &mut stream, available_data);
         match res {
             Err(Error::ParsingError(nom::Err::Incomplete(_))) => {
                 trace!("Not enough data, trying to read more");
                 // Read enough data to hold *at least* a packet, but without overwriting previous
                 // data
-                let written =
-                    stream.read(&mut buf[cur_pos..cur_pos + MAX_PKT_SIZE - data_start])?;
+                let written = stream.read(buf.get_writable_buffer())?;
                 trace!("Read {written} bytes");
                 if written == 0 {
                     info!("The client closed the connection, shutting down the thread");
                     return Ok(());
                 }
-                cur_pos += written;
+                buf.advance_writer_pos(written);
             }
             Err(Error::ParsingError(e)) => {
                 error!("Got an error while trying to parse the packet: {:?}", e);
@@ -89,14 +84,8 @@ fn handle_packet(mut stream: TcpStream) -> Result<(), Error> {
             Ok((next_data, new_state)) => {
                 state = new_state;
 
-                // The start of the next packet is at the beginning of the data we haven't read yet
-                data_start = cur_pos - next_data.len();
-
-                // Thanks to the properties of our doubly-mapped buffer, we can loop like this
-                if data_start >= MAX_PKT_SIZE {
-                    data_start %= MAX_PKT_SIZE;
-                    cur_pos %= MAX_PKT_SIZE;
-                }
+                let read_data = available_data_len - next_data.len();
+                buf.advance_reader_pos(read_data);
             }
         }
     }

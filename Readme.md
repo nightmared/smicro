@@ -7,8 +7,8 @@ A small, monothreaded, mostly safe, executable helper that provides SFTP support
 ## Why
 
 * Learning about the SFTP protocol
-* Writing some Rust the easy way (no concurrency, no async/await scheduling with `Pin<Box<dyn Future<Output= ...>>>` or `Send/Sync` obsctacles, hence no unexpected hair loss)
-* Settling an argument we had at work about the number of lines needed to write a new SFTP helper binary in Rust (the argument was pointless anyway, because we rightly choose not to do that, but that sparked this small project)
+* Writing some Rust the easy way (no concurrency, no async/await scheduling with `Pin<Box<dyn Future<Output= ...>>>` or `Send/Sync` obstacles, hence no unexpected hair loss)
+* Settling an argument we had at work about the number of lines needed to write a new SFTP helper binary in Rust (the argument was pointless anyway, because we rightly chose not to do that, but that sparked this small project)
 * Why not?
 
 ## How do I use it?
