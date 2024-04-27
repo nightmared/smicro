@@ -1,3 +1,5 @@
+use std::net::AddrParseError;
+
 use smicro_types::{error::ParsingError, ssh::types::MessageType};
 
 #[derive(thiserror::Error, Debug)]
@@ -10,6 +12,8 @@ pub enum Error {
     SetLoggerFailed(#[from] log::SetLoggerError),
     #[error("An error occured during an IO operation")]
     IoError(#[from] std::io::Error),
+    #[error("Invalid listener address")]
+    InvalidListenerAddress(#[from] AddrParseError),
     #[error("Received an invalid packet")]
     InvalidPacket,
     #[error("No common MAC algorithm was found")]

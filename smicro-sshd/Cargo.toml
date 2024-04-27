@@ -28,4 +28,4 @@ chacha20 = "0.9"
 cipher = "0.4"
 poly1305 = "0.9.0-pre"
 universal-hash = "0.6.0-pre.0"
-mio = "1.0.0"
+mio = { version = "1.0.0", features = ["os-ext", "net"] }

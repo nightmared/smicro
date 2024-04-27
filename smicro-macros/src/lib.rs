@@ -552,7 +552,7 @@ pub fn declare_session_state_with_allowed_message_types(
             fn process<'a>(
                 &mut self,
                 state: &mut crate::state::State,
-                stream: &mut ::std::net::TcpStream,
+                stream: &mut ::mio::net::TcpStream,
                 input: &'a mut [u8],
             ) -> Result<(&'a [u8], crate::session::SessionStates), crate::error::Error> {
                 use ::smicro_types::{

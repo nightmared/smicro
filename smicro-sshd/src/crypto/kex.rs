@@ -1,4 +1,3 @@
-use std::net::TcpStream;
 use std::ops::Mul;
 
 use digest::Digest;
@@ -6,6 +5,7 @@ use elliptic_curve::{
     ecdh::EphemeralSecret as EcEphemeralSecret, scalar::FromUintUnchecked, Curve,
     PublicKey as EcPublicKey,
 };
+use mio::net::TcpStream;
 use nom::AsBytes;
 use p521::NistP521;
 use sha2::Sha512;

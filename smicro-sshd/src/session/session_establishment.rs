@@ -1,7 +1,7 @@
 use std::io::Write;
-use std::net::TcpStream;
 
 use log::{debug, trace};
+use mio::net::TcpStream;
 use nom::{
     bytes::streaming::{tag, take_until, take_while1},
     combinator::{opt, peek},

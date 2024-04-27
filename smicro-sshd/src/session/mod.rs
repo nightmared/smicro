@@ -1,4 +1,4 @@
-use std::net::TcpStream;
+use mio::net::TcpStream;
 
 use crate::{error::Error, state::State};
 
