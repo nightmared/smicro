@@ -18,106 +18,11 @@ use smicro_macros::declare_deserializable_struct;
 use smicro_types::sftp::deserialize::{parse_slice, parse_utf8_string};
 
 use crate::{
+    crypto::{Cipher, CryptoAlg, ICryptoAlgs, Signer, SignerIdentifier, MAC},
     error::KeyLoadingError,
-    messages::{
-        negotiate_alg_host_key_algorithms, CipherAlgorithm, CryptoAlg, DynCipher,
-        DynCipherAlgorithm, DynMAC, DynMACAlgorithm, IKeySigningAlgorithm, ISigningKey,
-        KeyExchangeAlgorithm, KeyExchangeMethods, MACAlgorithm,
-    },
+    messages::negotiate_alg_host_key_algorithms,
     DeserializePacket,
 };
-
-pub trait ICryptoAlgs: Debug {
-    fn kex(&self) -> &dyn KeyExchangeMethods;
-
-    fn host_key_name(&self) -> &'static str;
-
-    fn key_max_length(&self) -> usize;
-
-    fn client_cipher(&self) -> &dyn DynCipherAlgorithm;
-
-    fn server_cipher(&self) -> &dyn DynCipherAlgorithm;
-
-    fn client_mac(&self) -> &dyn DynMACAlgorithm;
-
-    fn server_mac(&self) -> &dyn DynMACAlgorithm;
-}
-
-pub struct CryptoAlgs<
-    Kex: KeyExchangeAlgorithm,
-    HostKey: IKeySigningAlgorithm,
-    C2SCipher: CipherAlgorithm,
-    S2CCipher: CipherAlgorithm,
-    C2SMac: MACAlgorithm,
-    S2CMac: MACAlgorithm,
-> {
-    pub kex: Kex,
-    pub host_key_alg: HostKey,
-    pub client_to_server_cipher: C2SCipher,
-    pub server_to_client_cipher: S2CCipher,
-    pub client_to_server_mac: C2SMac,
-    pub server_to_client_mac: S2CMac,
-    pub key_max_length: usize,
-}
-
-impl<
-        Kex: KeyExchangeAlgorithm,
-        HostKey: IKeySigningAlgorithm,
-        C2SCipher: CipherAlgorithm,
-        S2CCipher: CipherAlgorithm,
-        C2SMac: MACAlgorithm,
-        S2CMac: MACAlgorithm,
-    > ICryptoAlgs for CryptoAlgs<Kex, HostKey, C2SCipher, S2CCipher, C2SMac, S2CMac>
-{
-    fn kex(&self) -> &dyn KeyExchangeMethods {
-        &self.kex
-    }
-
-    fn host_key_name(&self) -> &'static str {
-        self.host_key_alg.name()
-    }
-
-    fn key_max_length(&self) -> usize {
-        self.key_max_length
-    }
-
-    fn client_cipher(&self) -> &dyn DynCipherAlgorithm {
-        &self.client_to_server_cipher
-    }
-
-    fn server_cipher(&self) -> &dyn DynCipherAlgorithm {
-        &self.server_to_client_cipher
-    }
-
-    fn client_mac(&self) -> &dyn DynMACAlgorithm {
-        &self.client_to_server_mac
-    }
-
-    fn server_mac(&self) -> &dyn DynMACAlgorithm {
-        &self.server_to_client_mac
-    }
-}
-
-impl<
-        Kex: KeyExchangeAlgorithm,
-        HostKey: IKeySigningAlgorithm,
-        C2SCipher: CipherAlgorithm,
-        S2CCipher: CipherAlgorithm,
-        C2SMac: MACAlgorithm,
-        S2CMac: MACAlgorithm,
-    > Debug for CryptoAlgs<Kex, HostKey, C2SCipher, S2CCipher, C2SMac, S2CMac>
-{
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CryptoAlgs")
-            .field("kex", &Kex::NAME)
-            .field("host_key_alg", &HostKey::NAME)
-            .field("client_to_server_cipher", &C2SCipher::NAME)
-            .field("client_to_server_mac", &C2SMac::NAME)
-            .field("server_to_client_cipher", &S2CCipher::NAME)
-            .field("server_to_client_mac", &S2CMac::NAME)
-            .finish()
-    }
-}
 
 #[declare_deserializable_struct]
 pub struct OpenSSHKeySerialized<'a> {
@@ -141,7 +46,7 @@ pub struct Channel {
 
 pub struct State<'a> {
     pub rng: ThreadRng,
-    pub host_keys: &'a [&'a dyn ISigningKey],
+    pub host_keys: &'a [&'a dyn Signer],
     pub my_identifier_string: &'static str,
     pub peer_identifier_string: Option<Vec<u8>>,
     pub crypto_algs: Option<Arc<Box<dyn ICryptoAlgs>>>,
@@ -155,10 +60,10 @@ pub struct State<'a> {
 }
 
 pub struct SessionCryptoMaterials {
-    pub client_mac: Box<dyn DynMAC>,
-    pub server_mac: Box<dyn DynMAC>,
-    pub client_cipher: Box<dyn DynCipher>,
-    pub server_cipher: Box<dyn DynCipher>,
+    pub client_mac: Box<dyn MAC>,
+    pub server_mac: Box<dyn MAC>,
+    pub client_cipher: Box<dyn Cipher>,
+    pub server_cipher: Box<dyn Cipher>,
 }
 
 impl std::fmt::Debug for SessionCryptoMaterials {
@@ -168,7 +73,7 @@ impl std::fmt::Debug for SessionCryptoMaterials {
 }
 
 impl<'a> State<'a> {
-    pub fn new(host_keys: &'a [&'a dyn ISigningKey]) -> Self {
+    pub fn new(host_keys: &'a [&'a dyn Signer]) -> Self {
         Self {
             rng: thread_rng(),
             host_keys,
@@ -185,7 +90,7 @@ impl<'a> State<'a> {
         }
     }
 
-    pub fn load_hostkey(hostkey_file: &Path) -> Result<Box<dyn ISigningKey>, KeyLoadingError> {
+    pub fn load_hostkey(hostkey_file: &Path) -> Result<Box<dyn Signer>, KeyLoadingError> {
         let mut f = File::open(hostkey_file)?;
         let mut file_content = Vec::with_capacity(4096);
         f.read_to_end(&mut file_content)?;

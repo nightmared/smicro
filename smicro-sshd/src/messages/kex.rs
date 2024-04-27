@@ -1,0 +1,221 @@
+use std::cmp::max;
+
+use log::{debug, error};
+use nom::number::complete::be_u32;
+use nom::Parser;
+use rand::Rng;
+
+use smicro_macros::{declare_crypto_algs_list, declare_deserializable_struct, gen_serialize_impl};
+use smicro_types::deserialize::DeserializePacket;
+use smicro_types::serialize::SerializePacket;
+use smicro_types::sftp::deserialize::parse_slice;
+use smicro_types::ssh::types::{MessageType, SSHSlice};
+use smicro_types::ssh::{
+    deserialize::{const_take, parse_boolean, parse_name_list},
+    types::NameList,
+};
+
+use crate::{
+    crypto::{
+        Chacha20Poly1305, CipherAllocator, CipherIdentifier, CryptoAlg, CryptoAlgs,
+        EcdhSha2Nistp521, EcdsaSha2Nistp521, HmacSha2512, ICryptoAlgs, KEXIdentifier, MACAllocator,
+        MACIdentifier, SignerIdentifier,
+    },
+    error::Error,
+    messages::Message,
+    state::State,
+};
+
+pub fn gen_kex_initial_list(state: &mut State) -> MessageKeyExchangeInit {
+    let cookie: [u8; 16] = state.rng.gen();
+
+    // suboptimal, but only done once per session opening, so let's ignore it for now
+    let kex_algorithms = NameList {
+        entries: KEX_ALGORITHMS_NAMES.iter().map(|x| x.to_string()).collect(),
+    };
+
+    let server_host_key_algorithms = NameList {
+        entries: HOST_KEY_ALGORITHMS_NAMES
+            .iter()
+            .map(|x| x.to_string())
+            .collect(),
+    };
+
+    let encryption_algorithms_client_to_server = NameList {
+        entries: CIPHER_ALGORITHMS_NAMES
+            .iter()
+            .map(|x| x.to_string())
+            .collect(),
+    };
+    let encryption_algorithms_server_to_client = encryption_algorithms_client_to_server.clone();
+
+    let mac_algorithms_client_to_server = NameList {
+        entries: MAC_ALGORITHMS_NAMES.iter().map(|x| x.to_string()).collect(),
+    };
+    let mac_algorithms_server_to_client = mac_algorithms_client_to_server.clone();
+
+    let compression_algorithms_client_to_server = NameList {
+        entries: vec![String::from("none")],
+    };
+    let compression_algorithms_server_to_client = compression_algorithms_client_to_server.clone();
+
+    let languages_client_to_server = NameList {
+        entries: Vec::new(),
+    };
+    let languages_server_to_client = languages_client_to_server.clone();
+
+    MessageKeyExchangeInit {
+        cookie,
+        kex_algorithms,
+        server_host_key_algorithms,
+        encryption_algorithms_server_to_client,
+        encryption_algorithms_client_to_server,
+        mac_algorithms_client_to_server,
+        mac_algorithms_server_to_client,
+        compression_algorithms_client_to_server,
+        compression_algorithms_server_to_client,
+        languages_client_to_server,
+        languages_server_to_client,
+        first_kex_packet_follows: false,
+        reserved: 0,
+    }
+}
+
+#[gen_serialize_impl]
+#[declare_deserializable_struct]
+#[derive(Clone)]
+pub struct MessageKeyExchangeInit {
+    #[field(parser = const_take::<16>)]
+    cookie: [u8; 16],
+    #[field(parser = parse_name_list)]
+    kex_algorithms: NameList,
+    #[field(parser = parse_name_list)]
+    server_host_key_algorithms: NameList,
+    #[field(parser = parse_name_list)]
+    encryption_algorithms_client_to_server: NameList,
+    #[field(parser = parse_name_list)]
+    encryption_algorithms_server_to_client: NameList,
+    #[field(parser = parse_name_list)]
+    mac_algorithms_client_to_server: NameList,
+    #[field(parser = parse_name_list)]
+    mac_algorithms_server_to_client: NameList,
+    #[field(parser = parse_name_list)]
+    compression_algorithms_client_to_server: NameList,
+    #[field(parser = parse_name_list)]
+    compression_algorithms_server_to_client: NameList,
+    #[field(parser = parse_name_list)]
+    languages_client_to_server: NameList,
+    #[field(parser = parse_name_list)]
+    languages_server_to_client: NameList,
+    #[field(parser = parse_boolean)]
+    first_kex_packet_follows: bool,
+    #[field(parser = be_u32)]
+    reserved: u32,
+}
+
+#[declare_crypto_algs_list]
+const HOST_KEY_ALGORITHMS: IKeySigningAlgorithm = [EcdsaSha2Nistp521];
+
+#[declare_crypto_algs_list]
+const KEX_ALGORITHMS: IKeyExchangeAlgorithm = [EcdhSha2Nistp521];
+
+// TODO: add aes256-gcm@openssh.com
+#[declare_crypto_algs_list]
+const CIPHER_ALGORITHMS: ICipherAlgorithm = [Chacha20Poly1305];
+
+#[declare_crypto_algs_list]
+pub const MAC_ALGORITHMS: IMACAlgorithm = [HmacSha2512];
+
+impl MessageKeyExchangeInit {
+    pub fn compute_crypto_algs(&self) -> Result<Box<dyn ICryptoAlgs>, Error> {
+        if self.first_kex_packet_follows {
+            error!("first_kex_packet_follows is not supported");
+            return Err(Error::Unsupported);
+        }
+
+        let kex = negotiate_alg_kex_algorithms!(self.kex_algorithms.entries, Error::NoCommonKexAlg);
+        let host_key_alg = negotiate_alg_host_key_algorithms!(
+            self.server_host_key_algorithms.entries,
+            Error::NoCommonHostKeyAlg
+        );
+        let client_to_server_cipher = negotiate_alg_cipher_algorithms!(
+            self.encryption_algorithms_client_to_server.entries,
+            Error::NoCommonCipher
+        );
+        let server_to_client_cipher = negotiate_alg_cipher_algorithms!(
+            self.encryption_algorithms_server_to_client.entries,
+            Error::NoCommonCipher
+        );
+        let client_to_server_mac = negotiate_alg_mac_algorithms!(
+            self.mac_algorithms_client_to_server.entries,
+            Error::NoCommonMAC
+        );
+        let server_to_client_mac = negotiate_alg_mac_algorithms!(
+            self.mac_algorithms_server_to_client.entries,
+            Error::NoCommonMAC
+        );
+
+        let cipher_max_length = |cipher: &dyn CipherAllocator| -> usize {
+            max(
+                cipher.iv_size_bits(),
+                max(cipher.block_size_bits(), cipher.key_size_bits()),
+            )
+        };
+        let key_max_length = max(
+            max(
+                client_to_server_mac.key_size_bites(),
+                cipher_max_length(&client_to_server_cipher),
+            ),
+            max(
+                server_to_client_mac.key_size_bites(),
+                cipher_max_length(&server_to_client_cipher),
+            ),
+        );
+
+        let crypto_algs = CryptoAlgs {
+            kex,
+            host_key_alg,
+            client_to_server_cipher,
+            server_to_client_cipher,
+            client_to_server_mac,
+            server_to_client_mac,
+            key_max_length,
+        };
+
+        debug!("Cryptographic parameters negotiated: {:?}", crypto_algs);
+
+        Ok(Box::new(crypto_algs))
+    }
+}
+
+impl<'a> Message<'a> for MessageKeyExchangeInit {
+    fn get_message_type() -> MessageType {
+        MessageType::KexInit
+    }
+}
+
+#[gen_serialize_impl]
+#[declare_deserializable_struct]
+pub struct MessageKexEcdhInit<'a> {
+    #[field(parser = parse_slice)]
+    q_client: &'a [u8],
+}
+
+impl<'a> Message<'a> for MessageKexEcdhInit<'a> {
+    fn get_message_type() -> MessageType {
+        MessageType::KexEcdhInit
+    }
+}
+
+#[gen_serialize_impl]
+pub struct MessageKexEcdhReply {
+    pub k_server: SSHSlice<u8>,
+    pub q_server: SSHSlice<u8>,
+    pub signature: SSHSlice<u8>,
+}
+
+impl<'a> Message<'_> for MessageKexEcdhReply {
+    fn get_message_type() -> MessageType {
+        MessageType::KexEcdhReply
+    }
+}

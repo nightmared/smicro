@@ -5,7 +5,7 @@ use quote::{quote, quote_spanned, ToTokens};
 
 use syn::{
     parse, parse::Parser, punctuated::Punctuated, spanned::Spanned, token::Comma, Attribute, Expr,
-    ExprArray, ExprLit, ExprPath, Fields, GenericParam, ItemConst, ItemEnum, ItemFn, ItemStruct,
+    ExprLit, ExprPath, Fields, GenericParam, ItemConst, ItemEnum, ItemFn, ItemStruct,
     LifetimeParam, Lit, Meta, MetaNameValue, Token, Type,
 };
 
@@ -461,8 +461,8 @@ pub fn declare_crypto_algs_list(_attrs: TokenStream, item: TokenStream) -> Token
     for e in elems {
         match_list = quote! {
             #match_list
-            if client_alg == <$crate::messages::#e>::NAME {
-                out_variable = Some(<$crate::messages::#e>::new());
+            if client_alg == <$crate::crypto::#e>::NAME {
+                out_variable = Some(<$crate::crypto::#e>::new());
                 break 'out;
             }
         };
@@ -548,19 +548,24 @@ pub fn declare_session_state_with_allowed_message_types(
     let fun_content = ast.block.stmts;
 
     quote! {
-        impl SessionState for #struct_name {
+        impl crate::session::SessionState for #struct_name {
             fn process<'a>(
                 &mut self,
-                state: &mut State,
-                stream: &mut TcpStream,
+                state: &mut crate::state::State,
+                stream: &mut ::std::net::TcpStream,
                 input: &'a mut [u8],
-            ) -> Result<(&'a [u8], SessionStates), Error> {
-                let (next, packet_payload) = parse_packet(input, state)?;
+            ) -> Result<(&'a [u8], crate::session::SessionStates), crate::error::Error> {
+                use ::smicro_types::{
+                    deserialize::DeserializePacket,
+                    ssh::types::MessageType
+                };
+                use crate::session::SessionStates;
+                let (next, packet_payload) = crate::packet::parse_packet(input, state)?;
 
-                let (message_data, message_type) = match parse_message_type(packet_payload) {
+                let (message_data, message_type) = match crate::parse_message_type(packet_payload) {
                     Ok(x) => x,
                     Err(_) => {
-                        crate::write_message(state, stream, &crate::messages::MessageUnimplemented { sequence_number: state.sequence_number_c2s.0 })?;
+                        crate::packet::write_message(state, stream, &crate::messages::MessageUnimplemented { sequence_number: state.sequence_number_c2s.0 })?;
                         return Ok((next, SessionStates::#struct_name(self.clone())));
                     }
                 };
@@ -570,7 +575,7 @@ pub fn declare_session_state_with_allowed_message_types(
                 }
 
                 if !#allowed_types.contains(&message_type) {
-                    return Err(Error::DisallowedMessageType(message_type));
+                    return Err(crate::error::Error::DisallowedMessageType(message_type));
                 }
 
                 #(#fun_content)*
