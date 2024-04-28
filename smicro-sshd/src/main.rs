@@ -1,5 +1,5 @@
 use std::{
-    io::{ErrorKind, Read},
+    io::{ErrorKind, Read, Write},
     net::SocketAddr,
     path::Path,
     str::FromStr,
@@ -45,41 +45,34 @@ fn handle_packet<const SIZE: usize>(
     let available_data_len = available_data.len();
     let res = session.process(state, stream, available_data);
     match res {
-        Err(Error::ParsingError(nom::Err::Incomplete(_))) => {
-            trace!("Not enough data, trying to read more");
-            // Read enough data to hold *at least* a packet, but without overwriting previous
-            // data
-            let written = stream.read(buf.get_writable_buffer())?;
-            trace!("Read {written} bytes");
-            if written == 0 {
-                info!("The client closed the connection, shutting down the thread");
-                return Ok(());
+        Err(e) => match e {
+            Error::ParsingError(nom::Err::Incomplete(_)) => {
+                return Err(e);
             }
-            buf.advance_writer_pos(written);
-        }
-        Err(Error::ParsingError(e)) => {
-            error!("Got an error while trying to parse the packet: {:?}", e);
-            debug!("The data that triggered the error was: {:?}", buf);
+            Error::ParsingError(e) => {
+                error!("Got an error while trying to parse the packet: {:?}", e);
+                debug!("The data that triggered the error was: {:?}", buf);
 
-            let _ = write_message(
-                state,
-                stream,
-                &MessageDisconnect::new(DisconnectReason::ProtocolError),
-            );
-            return Err(Error::InvalidPacket);
-        }
-        Err(Error::DisallowedMessageType(MessageType::Ignore | MessageType::Debug)) => {}
-        Err(e) => {
-            error!("Got an error while processing the packet: {:?}", e);
-            debug!("The data that triggered the error was: {:?}", buf);
-            let _ = write_message(
-                state,
-                stream,
-                &MessageDisconnect::new(DisconnectReason::ProtocolError),
-            );
+                let _ = write_message(
+                    state,
+                    stream,
+                    &MessageDisconnect::new(DisconnectReason::ProtocolError),
+                );
+                return Err(Error::InvalidPacket);
+            }
+            Error::DisallowedMessageType(MessageType::Ignore | MessageType::Debug) => {}
+            e => {
+                error!("Got an error while processing the packet: {:?}", e);
+                debug!("The data that triggered the error was: {:?}", buf);
+                let _ = write_message(
+                    state,
+                    stream,
+                    &MessageDisconnect::new(DisconnectReason::ProtocolError),
+                );
 
-            return Err(Error::ProcessingFailed);
-        }
+                return Err(Error::ProcessingFailed);
+            }
+        },
         Ok((next_data, new_session)) => {
             *session = new_session;
 
@@ -91,8 +84,81 @@ fn handle_packet<const SIZE: usize>(
     Ok(())
 }
 
+fn process_read<const SIZE: usize>(
+    reader_buf: &mut LoopingBuffer<SIZE>,
+    stream: &mut TcpStream,
+    session: &mut SessionStates,
+    state: &mut State,
+) -> Result<(), Error> {
+    loop {
+        // Read enough data to hold *at least* a packet, but without overwriting previous
+        // data
+        let writeable_buffer = reader_buf.get_writable_buffer();
+        match stream.read(writeable_buffer) {
+            Ok(written) => {
+                trace!("Read {written} bytes");
+                if written == 0 {
+                    info!("The client closed the connection, shutting down the thread");
+                    return Ok(());
+                }
+                reader_buf.advance_writer_pos(written);
+            }
+            Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                break;
+            }
+            Err(e) => return Err(Error::from(e)),
+        }
+    }
+
+    loop {
+        match handle_packet(reader_buf, stream, session, state) {
+            Ok(_) => {}
+            Err(Error::ParsingError(nom::Err::Incomplete(_))) => {
+                trace!("Not enough data to parse the packet, trying to read more");
+                break;
+            }
+            Err(Error::IoError(e)) if e.kind() == ErrorKind::WouldBlock => {
+                break;
+            }
+            Err(e) => {
+                return Err(e);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn process_write<const SIZE: usize>(
+    sender_buf: &mut LoopingBuffer<SIZE>,
+    stream: &mut TcpStream,
+) -> Result<(), Error> {
+    loop {
+        let read_buffer = sender_buf.get_readable_data();
+        match stream.write(read_buffer) {
+            Ok(written) => {
+                trace!("Written {written} bytes");
+                if written == 0 {
+                    info!("The client closed the connection, shutting down the thread");
+                    return Ok(());
+                }
+                sender_buf.advance_reader_pos(written);
+            }
+            Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                break;
+            }
+            Err(e) => return Err(Error::from(e)),
+        }
+    }
+
+    Ok(())
+}
+
 fn handle_stream(mut stream: TcpStream) -> Result<(), Error> {
-    let mut buf = <LoopingBuffer<MAX_PKT_SIZE>>::new()?;
+    // TODO: needed to test the outgoing writes, to remove
+
+    let mut reader_buf = <LoopingBuffer<MAX_PKT_SIZE>>::new()?;
+    let mut sender_buf = <LoopingBuffer<MAX_PKT_SIZE>>::new()?;
 
     let mut host_keys = Vec::new();
     let test_hostkey = State::load_hostkey(&Path::new("/home/sthoby/dev-fast/smicro/host_key"))?;
@@ -103,25 +169,26 @@ fn handle_stream(mut stream: TcpStream) -> Result<(), Error> {
     let mut poll = Poll::new()?;
     let mut events = Events::with_capacity(128);
 
-    let main_connection_token = Token(0);
-    poll.registry()
-        .register(&mut stream, main_connection_token, Interest::READABLE)?;
+    let stream_token = Token(0);
+    let registry = poll.registry();
+    registry.register(
+        &mut stream,
+        stream_token,
+        Interest::READABLE | Interest::WRITABLE,
+    )?;
 
     loop {
         poll.poll(&mut events, None)?;
 
         for ev in &events {
-            if ev.token() == main_connection_token {
-                loop {
-                    let res = handle_packet(&mut buf, &mut stream, &mut session, &mut state);
-                    if let Err(e) = res {
-                        if let Error::IoError(ref e) = e {
-                            if e.kind() == ErrorKind::WouldBlock {
-                                break;
-                            }
-                        }
-                        return Err(e);
-                    }
+            let event_token = ev.token();
+            // Receive then processes messages from the client
+            if event_token == stream_token {
+                if ev.is_readable() {
+                    process_read(&mut reader_buf, &mut stream, &mut session, &mut state)?;
+                }
+                if ev.is_writable() {
+                    process_write(&mut sender_buf, &mut stream)?;
                 }
             }
         }

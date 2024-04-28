@@ -1,3 +1,5 @@
+use std::fmt::Display;
+
 #[derive(thiserror::Error, Debug)]
 pub enum BufferCreationError {
     #[error("A memory allocation failed")]
@@ -8,7 +10,9 @@ pub enum BufferCreationError {
     VirtualFileTruncationFailed(std::io::Error),
 }
 
-pub fn create_read_buffer(max_pkt_size: usize) -> Result<&'static mut [u8], BufferCreationError> {
+pub fn create_circular_buffer(
+    max_pkt_size: usize,
+) -> Result<&'static mut [u8], BufferCreationError> {
     unsafe {
         // reserve a memory map where we map twice our memory mapping, so that there is no risk of
         // overwriting an existing memory map
@@ -98,6 +102,19 @@ pub fn create_read_buffer(max_pkt_size: usize) -> Result<&'static mut [u8], Buff
     }
 }
 
+#[derive(thiserror::Error, Debug)]
+pub struct WriteInBufferError {
+    buffer_size: usize,
+    used_size: usize,
+    requested_size: usize,
+}
+
+impl Display for WriteInBufferError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_fmt(format_args!("{:?}", self))
+    }
+}
+
 /// A mutable circular buffer
 // The internal invariants at any point are:
 // - end_pos >= start_pos
@@ -117,7 +134,7 @@ pub struct LoopingBuffer<const SIZE: usize> {
 
 impl<const SIZE: usize> LoopingBuffer<SIZE> {
     pub fn new() -> Result<Self, BufferCreationError> {
-        let buf = create_read_buffer(SIZE)?;
+        let buf = create_circular_buffer(SIZE)?;
         Ok(Self {
             buf,
             start_pos: 0,
@@ -142,6 +159,22 @@ impl<const SIZE: usize> LoopingBuffer<SIZE> {
             panic!("An impossible number of bytes were written in the buffer, possible attack?");
         }
         self.end_pos += offset;
+    }
+
+    /// Write data directly in the buffer
+    pub fn write(&mut self, buf: &[u8]) -> Result<(), WriteInBufferError> {
+        let write_len = buf.len();
+        if write_len > SIZE - self.start_pos {
+            return Err(WriteInBufferError {
+                buffer_size: SIZE,
+                used_size: self.end_pos - self.start_pos,
+                requested_size: write_len,
+            });
+        }
+
+        self.buf[self.end_pos..self.end_pos + write_len].copy_from_slice(buf);
+        self.end_pos += write_len;
+        Ok(())
     }
 
     /// Decrease the buffer length by `offset` bytes (`offset` being

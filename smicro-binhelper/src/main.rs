@@ -6,7 +6,7 @@ use std::{
 
 use log::{debug, error, info, trace, LevelFilter};
 use nom::{Err, IResult};
-use smicro_common::create_read_buffer;
+use smicro_common::create_circular_buffer;
 use syslog::{BasicLogger, Facility, Formatter3164};
 
 use smicro_types::{
@@ -128,7 +128,7 @@ fn main() -> Result<(), Error> {
     // searching for newlines
     let mut output = unsafe { File::from_raw_fd(libc::STDOUT_FILENO) };
 
-    let buf = create_read_buffer(MAX_PKT_SIZE)?;
+    let buf = create_circular_buffer(MAX_PKT_SIZE)?;
     let mut data_start = 0;
     let mut cur_pos = 0;
 
