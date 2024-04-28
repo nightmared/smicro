@@ -2,6 +2,8 @@ use std::net::AddrParseError;
 
 use smicro_types::{error::ParsingError, ssh::types::MessageType};
 
+use crate::state::ChannelAllocationError;
+
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     #[error("Unsupported feature")]
@@ -70,12 +72,16 @@ pub enum Error {
     MissingSessionIdentifier,
     #[error("This signature is not properly encoded")]
     InvalidSignature,
-    #[error("Maximum number of channels reached")]
-    MaxChannelNumberReached,
+    #[error("Cannot allocate a new channel")]
+    ChannelAllocationError(#[from] ChannelAllocationError),
     #[error("Invalid channel message")]
     InvalidChannelMessage,
     #[error("Could not retrieve the handle of a stdin/stdout/stderr process")]
     InvalidStdioHandle,
+    #[error("The client closed the connection")]
+    ConnectionClosed,
+    #[error("The peer sent a disconnect message")]
+    PeerTriggeredDisconnection,
 }
 
 #[derive(thiserror::Error, Debug)]

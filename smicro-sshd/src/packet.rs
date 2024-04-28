@@ -11,7 +11,7 @@ use crate::{crypto::Cipher, error::Error, messages::Message, state::State};
 // Besides, this is the same constant as OpenSSH
 pub const MAX_PKT_SIZE: usize = 4096 * 64;
 
-pub fn write_message<'a, T: SerializePacket + Message<'a>, W: Write>(
+pub fn write_message<'a, T: SerializePacket + Message<'a>, W: Write + ?Sized>(
     state: &mut State,
     mut stream: &mut W,
     payload: &T,

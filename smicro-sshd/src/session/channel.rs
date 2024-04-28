@@ -4,6 +4,7 @@ use std::process::{Command, Stdio};
 use smicro_macros::declare_session_state_with_allowed_message_types;
 use smicro_types::{sftp::deserialize::parse_utf8_slice, ssh::types::SharedSSHSlice};
 
+use crate::state::ChannelAllocationError;
 use crate::{
     error::Error,
     messages::{
@@ -23,7 +24,7 @@ fn process(message_data: &[u8]) {
     if msg.channel_type != "session" {
         write_message(
             state,
-            stream,
+            writer,
             &MessageChannelOpenFailure::new(
                 msg.sender_channel,
                 ChannelOpenFailureReason::UnknownChannelType,
@@ -33,32 +34,33 @@ fn process(message_data: &[u8]) {
         return Err(Error::InvalidChannelMessage);
     }
 
-    if state.num_channels == u32::MAX {
-        write_message(
-            state,
-            stream,
-            &MessageChannelOpenFailure::new(
-                msg.sender_channel,
-                ChannelOpenFailureReason::ConnectFailed,
-            ),
-        )?;
+    let chan = match state.channels.allocate_channel(
+        msg.sender_channel,
+        msg.max_pkt_size,
+        msg.initial_window_size,
+    ) {
+        Ok(chan) => chan,
+        Err(e) => {
+            write_message(
+                state,
+                writer,
+                &MessageChannelOpenFailure::new(
+                    msg.sender_channel,
+                    ChannelOpenFailureReason::ConnectFailed,
+                ),
+            )?;
 
-        return Err(Error::MaxChannelNumberReached);
-    }
+            return Err(Error::from(e));
+        }
+    };
 
-    let channel_num = state.num_channels;
-    state.num_channels += 1;
-
-    write_message(
-        state,
-        stream,
-        &MessageChannelOpenConfirmation {
-            recipient_channel: msg.sender_channel,
-            sender_channel: channel_num,
-            initial_window_size: msg.initial_window_size,
-            max_pkt_size: msg.max_pkt_size,
-        },
-    )?;
+    let confirmation = MessageChannelOpenConfirmation {
+        recipient_channel: msg.sender_channel,
+        sender_channel: chan.remote_channel_number,
+        initial_window_size: msg.initial_window_size,
+        max_pkt_size: msg.max_pkt_size,
+    };
+    write_message(state, writer, &confirmation)?;
 
     Ok((
         next,
@@ -72,6 +74,9 @@ pub struct AcceptsChannelMessages {}
 #[declare_session_state_with_allowed_message_types(structure = AcceptsChannelMessages, msg_type = [MessageType::ChannelRequest])]
 fn process(message_data: &[u8]) {
     let (_, msg) = MessageChannelRequest::deserialize(message_data)?;
+
+    println!("{:?}", msg.recipient_channel);
+    let chan = state.channels.channels.get(&msg.recipient_channel);
 
     if msg.requested_mode == "exec" {
         let (_, command) = parse_utf8_slice(msg.channel_specific_data)?;
@@ -102,12 +107,12 @@ fn process(message_data: &[u8]) {
 
         write_message(
             state,
-            stream,
+            writer,
             &MessageChannelData {
                 recipient_channel: msg.recipient_channel,
                 data: SharedSSHSlice(buf.as_slice()),
             },
         )?;
     }
-    unimplemented!()
+    Ok((next, SessionStates::AcceptsChannelMessages(self.clone())))
 }

@@ -1,7 +1,6 @@
 use std::io::Write;
 
 use log::{debug, trace};
-use mio::net::TcpStream;
 use nom::{
     bytes::streaming::{tag, take_until, take_while1},
     combinator::{opt, peek},
@@ -22,15 +21,15 @@ use crate::{
 pub struct UninitializedSession {}
 
 impl SessionState for UninitializedSession {
-    fn process<'a>(
+    fn process<'a, W: Write>(
         &mut self,
         state: &mut State,
-        stream: &mut TcpStream,
+        writer: &mut W,
         input: &'a mut [u8],
     ) -> Result<(&'a [u8], SessionStates), Error> {
         // Write the identification string
-        stream.write_all(state.my_identifier_string.as_bytes())?;
-        stream.write_all(b"\r\n")?;
+        writer.write_all(state.my_identifier_string.as_bytes())?;
+        writer.write_all(b"\r\n")?;
         Ok((
             input,
             SessionStates::IdentifierStringSent(IdentifierStringSent {}),
@@ -42,10 +41,10 @@ impl SessionState for UninitializedSession {
 pub struct IdentifierStringSent {}
 
 impl SessionState for IdentifierStringSent {
-    fn process<'a>(
+    fn process<'a, W: Write>(
         &mut self,
         state: &mut State,
-        _stream: &mut TcpStream,
+        _writer: &mut W,
         input: &'a mut [u8],
     ) -> Result<(&'a [u8], SessionStates), Error> {
         let input = input as &[u8];
@@ -93,15 +92,15 @@ impl SessionState for IdentifierStringSent {
 pub struct IdentifierStringReceived {}
 
 impl SessionState for IdentifierStringReceived {
-    fn process<'a>(
+    fn process<'a, W: Write>(
         &mut self,
         state: &mut State,
-        stream: &mut TcpStream,
+        writer: &mut W,
         input: &'a mut [u8],
     ) -> Result<(&'a [u8], SessionStates), Error> {
         debug!("Sending the MessageKeyExchangeInit packet");
         let kex_init_msg = gen_kex_initial_list(state);
-        write_message(state, stream, &kex_init_msg)?;
+        write_message(state, writer, &kex_init_msg)?;
 
         Ok((
             input,

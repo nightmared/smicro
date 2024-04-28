@@ -31,7 +31,7 @@ fn process(message_data: &[u8]) {
 
     write_message(
         state,
-        stream,
+        writer,
         &MessageServiceAccept {
             service_name: msg.service_name,
         },
@@ -75,7 +75,7 @@ fn process(message_data: &[u8]) {
                     SharedSSHSlice(pk.public_key_blob).serialize(&mut message)?;
 
                     if verifier.signature_is_valid(pk.public_key_blob, &message, sig)? {
-                        write_message(state, stream, &MessageUserAuthSuccess {})?;
+                        write_message(state, writer, &MessageUserAuthSuccess {})?;
 
                         state.authentified_user = Some(msg.user_name.to_string());
 
@@ -87,7 +87,7 @@ fn process(message_data: &[u8]) {
                 } else {
                     write_message(
                         state,
-                        stream,
+                        writer,
                         &MessageUserAuthPublicKeyOk {
                             public_key_alg_name: pk.public_key_alg_name,
                             public_key_blob: SharedSSHSlice(pk.public_key_blob),
@@ -101,7 +101,7 @@ fn process(message_data: &[u8]) {
     }
     write_message(
         state,
-        stream,
+        writer,
         &MessageUserAuthFailure {
             allowed_auth_methods: NameList {
                 entries: vec![String::from("publickey")],
@@ -112,5 +112,3 @@ fn process(message_data: &[u8]) {
 
     Ok((next, SessionStates::ExpectsUserAuthRequest(self.clone())))
 }
-
-

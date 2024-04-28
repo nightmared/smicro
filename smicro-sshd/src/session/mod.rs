@@ -1,4 +1,4 @@
-use mio::net::TcpStream;
+use std::io::Write;
 
 use crate::{error::Error, state::State};
 
@@ -7,10 +7,10 @@ mod kex;
 mod service;
 mod session_establishment;
 
-pub use channel::{AcceptsChannelMessages, ExpectsChannelOpen};
-pub use kex::{KexReceived, KexReplySent, KexSent};
-pub use service::{ExpectsServiceRequest, ExpectsUserAuthRequest};
-pub use session_establishment::{
+pub use self::channel::{AcceptsChannelMessages, ExpectsChannelOpen};
+pub use self::kex::{KexReceived, KexReplySent, KexSent};
+pub use self::service::{ExpectsServiceRequest, ExpectsUserAuthRequest};
+pub use self::session_establishment::{
     IdentifierStringReceived, IdentifierStringSent, UninitializedSession,
 };
 
@@ -22,14 +22,14 @@ macro_rules! define_state_list {
         }
 
         impl SessionState for SessionStates {
-            fn process<'a>(
+            fn process<'a, W: Write>(
                 &mut self,
                 state: &mut State,
-                stream: &mut TcpStream,
+                writer: &mut W,
                 input: &'a mut [u8],
             ) -> Result<(&'a [u8], SessionStates), Error> {
                 match self {
-                    $(SessionStates::$name(val) => val.process(state, stream, input),)*
+                    $(SessionStates::$name(val) => val.process(state, writer, input),)*
                 }
             }
         }
@@ -49,10 +49,10 @@ define_state_list!(
 );
 
 pub trait SessionState {
-    fn process<'a>(
+    fn process<'a, W: Write>(
         &mut self,
         state: &mut State,
-        stream: &mut TcpStream,
+        writer: &mut W,
         input: &'a mut [u8],
     ) -> Result<(&'a [u8], SessionStates), Error>;
 }

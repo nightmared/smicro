@@ -1,4 +1,5 @@
 use std::fmt::Display;
+use std::io::Write;
 
 #[derive(thiserror::Error, Debug)]
 pub enum BufferCreationError {
@@ -191,5 +192,18 @@ impl<const SIZE: usize> LoopingBuffer<SIZE> {
             self.start_pos %= SIZE;
             self.end_pos %= SIZE;
         }
+    }
+}
+
+impl<const SIZE: usize> Write for LoopingBuffer<SIZE> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.write(buf).map(|_| buf.len()).map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::WouldBlock, "Trying to write too much")
+        })
+    }
+
+    // No-op, as we don't want to implement the capability to flush to the underlying TCP stream
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
     }
 }

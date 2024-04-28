@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     io::{ErrorKind, Read, Write},
     net::SocketAddr,
     path::Path,
@@ -35,18 +36,19 @@ use crate::{
     state::State,
 };
 
-fn handle_packet<const SIZE: usize>(
+fn handle_packet<const SIZE: usize, W: Write>(
     buf: &mut LoopingBuffer<SIZE>,
-    stream: &mut TcpStream,
+    writer: &mut W,
     session: &mut SessionStates,
     state: &mut State,
 ) -> Result<(), Error> {
     let available_data = buf.get_readable_data();
     let available_data_len = available_data.len();
-    let res = session.process(state, stream, available_data);
+    let res = session.process(state, writer, available_data);
     match res {
         Err(e) => match e {
-            Error::ParsingError(nom::Err::Incomplete(_)) => {
+            Error::ParsingError(nom::Err::Incomplete(_)) | Error::PeerTriggeredDisconnection => {
+                // forward to our caller
                 return Err(e);
             }
             Error::ParsingError(e) => {
@@ -55,7 +57,7 @@ fn handle_packet<const SIZE: usize>(
 
                 let _ = write_message(
                     state,
-                    stream,
+                    writer,
                     &MessageDisconnect::new(DisconnectReason::ProtocolError),
                 );
                 return Err(Error::InvalidPacket);
@@ -66,7 +68,7 @@ fn handle_packet<const SIZE: usize>(
                 debug!("The data that triggered the error was: {:?}", buf);
                 let _ = write_message(
                     state,
-                    stream,
+                    writer,
                     &MessageDisconnect::new(DisconnectReason::ProtocolError),
                 );
 
@@ -87,19 +89,20 @@ fn handle_packet<const SIZE: usize>(
 fn process_read<const SIZE: usize>(
     reader_buf: &mut LoopingBuffer<SIZE>,
     stream: &mut TcpStream,
-    session: &mut SessionStates,
-    state: &mut State,
 ) -> Result<(), Error> {
     loop {
         // Read enough data to hold *at least* a packet, but without overwriting previous
         // data
         let writeable_buffer = reader_buf.get_writable_buffer();
+        if writeable_buffer.len() == 0 {
+            break;
+        }
         match stream.read(writeable_buffer) {
             Ok(written) => {
                 trace!("Read {written} bytes");
                 if written == 0 {
                     info!("The client closed the connection, shutting down the thread");
-                    return Ok(());
+                    return Err(Error::ConnectionClosed);
                 }
                 reader_buf.advance_writer_pos(written);
             }
@@ -110,8 +113,17 @@ fn process_read<const SIZE: usize>(
         }
     }
 
+    Ok(())
+}
+
+fn handle_packets<const SIZE: usize>(
+    reader_buf: &mut LoopingBuffer<SIZE>,
+    sender_buf: &mut LoopingBuffer<SIZE>,
+    session: &mut SessionStates,
+    state: &mut State,
+) -> Result<(), Error> {
     loop {
-        match handle_packet(reader_buf, stream, session, state) {
+        match handle_packet(reader_buf, sender_buf, session, state) {
             Ok(_) => {}
             Err(Error::ParsingError(nom::Err::Incomplete(_))) => {
                 trace!("Not enough data to parse the packet, trying to read more");
@@ -135,12 +147,15 @@ fn process_write<const SIZE: usize>(
 ) -> Result<(), Error> {
     loop {
         let read_buffer = sender_buf.get_readable_data();
+        if read_buffer.len() == 0 {
+            break;
+        }
         match stream.write(read_buffer) {
             Ok(written) => {
                 trace!("Written {written} bytes");
                 if written == 0 {
                     info!("The client closed the connection, shutting down the thread");
-                    return Ok(());
+                    return Err(Error::ConnectionClosed);
                 }
                 sender_buf.advance_reader_pos(written);
             }
@@ -155,8 +170,6 @@ fn process_write<const SIZE: usize>(
 }
 
 fn handle_stream(mut stream: TcpStream) -> Result<(), Error> {
-    // TODO: needed to test the outgoing writes, to remove
-
     let mut reader_buf = <LoopingBuffer<MAX_PKT_SIZE>>::new()?;
     let mut sender_buf = <LoopingBuffer<MAX_PKT_SIZE>>::new()?;
 
@@ -177,6 +190,8 @@ fn handle_stream(mut stream: TcpStream) -> Result<(), Error> {
         Interest::READABLE | Interest::WRITABLE,
     )?;
 
+    let mut registered_channels = HashSet::new();
+
     loop {
         poll.poll(&mut events, None)?;
 
@@ -184,12 +199,28 @@ fn handle_stream(mut stream: TcpStream) -> Result<(), Error> {
             let event_token = ev.token();
             // Receive then processes messages from the client
             if event_token == stream_token {
+                if ev.is_writable() {
+                    process_write(&mut sender_buf, &mut stream)?;
+                }
                 if ev.is_readable() {
-                    process_read(&mut reader_buf, &mut stream, &mut session, &mut state)?;
+                    process_read(&mut reader_buf, &mut stream)?;
+                    handle_packets(&mut reader_buf, &mut sender_buf, &mut session, &mut state)?;
                 }
                 if ev.is_writable() {
                     process_write(&mut sender_buf, &mut stream)?;
                 }
+            }
+        }
+
+        if state.channels.channels_changed {
+            for (chan_number, chan) in state.channels.channels.iter() {
+                if !registered_channels.contains(chan_number) {
+                    //registry.register(&mut source, token, interests)
+                }
+            }
+            // TODO: deregister channels for future reuse
+            for chan in registered_channels.iter() {
+                if !state.channels.channels.contains_key(chan) {}
             }
         }
     }
@@ -225,10 +256,11 @@ fn main() -> Result<(), Error> {
                 match listener.accept() {
                     Ok((stream, _address)) => {
                         info!("Received a new connection");
-                        thread::spawn(move || {
-                            if let Err(e) = handle_stream(stream) {
-                                error!("Got an error while handling a stream: {:?}", e);
+                        thread::spawn(move || match handle_stream(stream) {
+                            Ok(()) | Err(Error::PeerTriggeredDisconnection) => {
+                                info!("Connection terminated");
                             }
+                            Err(e) => error!("Got an error while handling a stream: {:?}", e),
                         });
                     }
                     Err(ref e) if e.kind() == ErrorKind::WouldBlock => break,

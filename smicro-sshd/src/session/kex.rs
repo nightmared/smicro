@@ -47,13 +47,13 @@ fn process(message_data: &[u8]) {
         .clone();
     let next_state = crypto_algs.kex().perform_key_exchange(
         state,
-        stream,
+        writer,
         &msg,
         &self.my_kex_message,
         &self.peer_kex_message,
     )?;
 
-    write_message(state, stream, &MessageNewKeys {})?;
+    write_message(state, writer, &MessageNewKeys {})?;
 
     Ok((next, next_state))
 }

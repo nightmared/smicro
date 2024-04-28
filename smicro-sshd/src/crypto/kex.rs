@@ -1,3 +1,4 @@
+use std::io::Write;
 use std::ops::Mul;
 
 use digest::Digest;
@@ -5,7 +6,6 @@ use elliptic_curve::{
     ecdh::EphemeralSecret as EcEphemeralSecret, scalar::FromUintUnchecked, Curve,
     PublicKey as EcPublicKey,
 };
-use mio::net::TcpStream;
 use nom::AsBytes;
 use p521::NistP521;
 use sha2::Sha512;
@@ -30,7 +30,7 @@ pub trait KEX {
     fn perform_key_exchange(
         &self,
         state: &mut State,
-        stream: &mut TcpStream,
+        writer: &mut dyn Write,
         ecdh_init: &MessageKexEcdhInit,
         my_kex_message: &MessageKeyExchangeInit,
         peer_kex_message: &MessageKeyExchangeInit,
@@ -54,7 +54,7 @@ impl KEX for EcdhSha2Nistp521 {
     fn perform_key_exchange(
         &self,
         state: &mut State,
-        stream: &mut TcpStream,
+        writer: &mut dyn Write,
         ecdh_init: &MessageKexEcdhInit,
         my_kex_message: &MessageKeyExchangeInit,
         peer_kex_message: &MessageKeyExchangeInit,
@@ -139,7 +139,7 @@ impl KEX for EcdhSha2Nistp521 {
             signature: kex_signature,
         };
 
-        write_message(state, stream, &res)?;
+        write_message(state, writer, &res)?;
 
         let derive_key = |c: u8| -> Result<Vec<u8>, Error> {
             derive_encryption_key(

@@ -1,6 +1,4 @@
-use std::{
-    collections::HashMap, fmt::Debug, fs::File, io::Read, num::Wrapping, path::Path, sync::Arc,
-};
+use std::{fmt::Debug, fs::File, io::Read, num::Wrapping, path::Path, sync::Arc};
 
 use base64::engine::{general_purpose::STANDARD, Engine as _};
 use log::info;
@@ -24,6 +22,10 @@ use crate::{
     DeserializePacket,
 };
 
+mod channel;
+
+pub use self::channel::{ChannelAllocationError, ChannelManager};
+
 #[declare_deserializable_struct]
 pub struct OpenSSHKeySerialized<'a> {
     #[field(parser = parse_utf8_string)]
@@ -38,12 +40,6 @@ pub struct OpenSSHKeySerialized<'a> {
     key_data: &'a [u8],
 }
 
-pub struct Channel {
-    pub window_size: u32,
-    pub max_pkt_size: u32,
-    pub remote_channel_number: u32,
-}
-
 pub struct State<'a> {
     pub rng: ThreadRng,
     pub host_keys: &'a [&'a dyn Signer],
@@ -53,8 +49,7 @@ pub struct State<'a> {
     pub crypto_material: Option<SessionCryptoMaterials>,
     pub session_identifier: Option<Vec<u8>>,
     pub authentified_user: Option<String>,
-    pub channels: HashMap<u32, Channel>,
-    pub num_channels: u32,
+    pub channels: ChannelManager,
     pub sequence_number_c2s: Wrapping<u32>,
     pub sequence_number_s2c: Wrapping<u32>,
 }
@@ -83,8 +78,7 @@ impl<'a> State<'a> {
             crypto_material: None,
             session_identifier: None,
             authentified_user: None,
-            channels: HashMap::new(),
-            num_channels: 0,
+            channels: ChannelManager::new(),
             sequence_number_c2s: Wrapping(0),
             sequence_number_s2c: Wrapping(0),
         }

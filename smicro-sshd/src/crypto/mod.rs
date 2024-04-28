@@ -14,10 +14,10 @@ mod kex;
 mod mac;
 mod sign;
 
-pub use cipher::{Chacha20Poly1305, Cipher, CipherAllocator, CipherIdentifier};
-pub use kex::{EcdhSha2Nistp521, KEXIdentifier, KEX};
-pub use mac::{HmacSha2512, MACAllocator, MACIdentifier, MAC};
-pub use sign::{EcdsaSha2Nistp521, Signer, SignerIdentifier};
+pub use self::cipher::{Chacha20Poly1305, Cipher, CipherAllocator, CipherIdentifier};
+pub use self::kex::{EcdhSha2Nistp521, KEXIdentifier, KEX};
+pub use self::mac::{HmacSha2512, MACAllocator, MACIdentifier, MAC};
+pub use self::sign::{EcdsaSha2Nistp521, Signer, SignerIdentifier};
 
 pub trait CryptoAlg {
     fn new() -> Self;

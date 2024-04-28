@@ -16,7 +16,7 @@ use smicro_types::{
 
 mod kex;
 
-pub use kex::{
+pub use self::kex::{
     gen_kex_initial_list, negotiate_alg_host_key_algorithms, MessageKexEcdhInit,
     MessageKexEcdhReply, MessageKeyExchangeInit,
 };

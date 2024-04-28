@@ -549,10 +549,10 @@ pub fn declare_session_state_with_allowed_message_types(
 
     quote! {
         impl crate::session::SessionState for #struct_name {
-            fn process<'a>(
+            fn process<'a, W: ::std::io::Write>(
                 &mut self,
                 state: &mut crate::state::State,
-                stream: &mut ::mio::net::TcpStream,
+                writer: &mut W,
                 input: &'a mut [u8],
             ) -> Result<(&'a [u8], crate::session::SessionStates), crate::error::Error> {
                 use ::smicro_types::{
@@ -565,10 +565,15 @@ pub fn declare_session_state_with_allowed_message_types(
                 let (message_data, message_type) = match crate::parse_message_type(packet_payload) {
                     Ok(x) => x,
                     Err(_) => {
-                        crate::packet::write_message(state, stream, &crate::messages::MessageUnimplemented { sequence_number: state.sequence_number_c2s.0 })?;
+                        crate::packet::write_message(state, writer, &crate::messages::MessageUnimplemented { sequence_number: state.sequence_number_c2s.0 })?;
                         return Ok((next, SessionStates::#struct_name(self.clone())));
                     }
                 };
+
+                if message_type == MessageType::Disconnect {
+                    return Err(crate::error::Error::PeerTriggeredDisconnection);
+
+                }
 
                 if message_type == MessageType::Ignore || message_type == MessageType::Debug || message_type == MessageType::Unimplemented {
                     return Ok((next, SessionStates::#struct_name(self.clone())));
