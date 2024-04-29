@@ -22,9 +22,9 @@ use crate::{
     DeserializePacket,
 };
 
-mod channel;
+pub mod channel;
 
-pub use self::channel::{ChannelAllocationError, ChannelManager};
+use self::channel::ChannelManager;
 
 #[declare_deserializable_struct]
 pub struct OpenSSHKeySerialized<'a> {

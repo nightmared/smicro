@@ -1,7 +1,9 @@
 use std::{
+    cmp::min,
     collections::HashSet,
     io::{ErrorKind, Read, Write},
     net::SocketAddr,
+    os::fd::AsRawFd,
     path::Path,
     str::FromStr,
     thread,
@@ -10,6 +12,7 @@ use std::{
 use log::{debug, error, info, trace, LevelFilter};
 use mio::{
     net::{TcpListener, TcpStream},
+    unix::SourceFd,
     Events, Interest, Poll, Token,
 };
 use syslog::{BasicLogger, Facility, Formatter3164};
@@ -17,19 +20,22 @@ use syslog::{BasicLogger, Facility, Formatter3164};
 use smicro_common::LoopingBuffer;
 use smicro_types::{
     deserialize::DeserializePacket,
-    ssh::{deserialize::parse_message_type, types::MessageType},
+    ssh::{
+        deserialize::parse_message_type,
+        types::{MessageType, SharedSSHSlice},
+    },
 };
 
-mod crypto;
-mod error;
-mod messages;
-mod packet;
-mod session;
-mod state;
+pub mod crypto;
+pub mod error;
+pub mod messages;
+pub mod packet;
+pub mod session;
+pub mod state;
 
 use crate::{
     error::Error,
-    messages::{DisconnectReason, MessageDisconnect},
+    messages::{DisconnectReason, MessageChannelData, MessageDisconnect},
     packet::{write_message, MAX_PKT_SIZE},
     session::UninitializedSession,
     session::{SessionState, SessionStates},
@@ -86,9 +92,9 @@ fn handle_packet<const SIZE: usize, W: Write>(
     Ok(())
 }
 
-fn process_read<const SIZE: usize>(
+fn process_read<const SIZE: usize, R: Read + ?Sized>(
     reader_buf: &mut LoopingBuffer<SIZE>,
-    stream: &mut TcpStream,
+    stream: &mut R,
 ) -> Result<(), Error> {
     loop {
         // Read enough data to hold *at least* a packet, but without overwriting previous
@@ -105,6 +111,34 @@ fn process_read<const SIZE: usize>(
                     return Err(Error::ConnectionClosed);
                 }
                 reader_buf.advance_writer_pos(written);
+            }
+            Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                break;
+            }
+            Err(e) => return Err(Error::from(e)),
+        }
+    }
+
+    Ok(())
+}
+
+fn process_write<const SIZE: usize, W: Write + ?Sized>(
+    sender_buf: &mut LoopingBuffer<SIZE>,
+    stream: &mut W,
+) -> Result<(), Error> {
+    loop {
+        let read_buffer = sender_buf.get_readable_data();
+        if read_buffer.len() == 0 {
+            break;
+        }
+        match stream.write(read_buffer) {
+            Ok(written) => {
+                trace!("Written {written} bytes");
+                if written == 0 {
+                    info!("The client closed the connection, shutting down the thread");
+                    return Err(Error::ConnectionClosed);
+                }
+                sender_buf.advance_reader_pos(written);
             }
             Err(e) if e.kind() == ErrorKind::WouldBlock => {
                 break;
@@ -141,29 +175,48 @@ fn handle_packets<const SIZE: usize>(
     Ok(())
 }
 
-fn process_write<const SIZE: usize>(
+fn handle_channel_data<const SIZE: usize>(
     sender_buf: &mut LoopingBuffer<SIZE>,
-    stream: &mut TcpStream,
+    event_token: Token,
+    state: &mut State,
 ) -> Result<(), Error> {
-    loop {
-        let read_buffer = sender_buf.get_readable_data();
-        if read_buffer.len() == 0 {
-            break;
+    let channel_number = (event_token.0 / 4) as u32;
+    if let Some(chan) = state.channels.channels.get_mut(&channel_number) {
+        let cmd = chan
+            .command
+            .as_mut()
+            .ok_or(Error::MissingCommandInChannel)?;
+        if event_token.0 % 4 == 2 {
+            // stdin
+            process_write(&mut cmd.stdin_buffer, &mut cmd.stdin)?;
+        } else {
+            // stdout/stderr
+            let source: &mut dyn Read = if event_token.0 % 4 == 0 {
+                &mut cmd.stdout
+            } else {
+                &mut cmd.stderr
+            };
+            process_read(&mut cmd.output_buffer, source)?;
+            let readable_data =
+                unsafe { std::mem::transmute::<_, &[u8]>(cmd.output_buffer.get_readable_data()) };
+
+            // 32 is chosen arbitrarily to represent the packet overhe&d
+            let max_write_size = chan.max_pkt_size as usize - 32;
+            let channel_data = MessageChannelData {
+                recipient_channel: chan.remote_channel_number,
+                data: SharedSSHSlice(&readable_data[0..min(readable_data.len(), max_write_size)]),
+            };
+            // This is safe because the bump allocator does not clean memory, but we should
+            // avoid this as much as possible (bumping while still using a reference).
+            // Sadly, I had to do this to appease the borrow checker
+            cmd.output_buffer
+                .advance_reader_pos(channel_data.data.0.len());
+            write_message(state, sender_buf, &channel_data)?;
         }
-        match stream.write(read_buffer) {
-            Ok(written) => {
-                trace!("Written {written} bytes");
-                if written == 0 {
-                    info!("The client closed the connection, shutting down the thread");
-                    return Err(Error::ConnectionClosed);
-                }
-                sender_buf.advance_reader_pos(written);
-            }
-            Err(e) if e.kind() == ErrorKind::WouldBlock => {
-                break;
-            }
-            Err(e) => return Err(Error::from(e)),
-        }
+    } else {
+        // TODO: find out the message to send here
+        unimplemented!()
+        //write_message(&mut state, &mut sender_buf, unimplemented!())?;
     }
 
     Ok(())
@@ -183,14 +236,13 @@ fn handle_stream(mut stream: TcpStream) -> Result<(), Error> {
     let mut events = Events::with_capacity(128);
 
     let stream_token = Token(0);
-    let registry = poll.registry();
-    registry.register(
+    poll.registry().register(
         &mut stream,
         stream_token,
         Interest::READABLE | Interest::WRITABLE,
     )?;
 
-    let mut registered_channels = HashSet::new();
+    let mut registered_channels: HashSet<u32> = HashSet::new();
 
     loop {
         poll.poll(&mut events, None)?;
@@ -206,16 +258,38 @@ fn handle_stream(mut stream: TcpStream) -> Result<(), Error> {
                     process_read(&mut reader_buf, &mut stream)?;
                     handle_packets(&mut reader_buf, &mut sender_buf, &mut session, &mut state)?;
                 }
-                if ev.is_writable() {
-                    process_write(&mut sender_buf, &mut stream)?;
-                }
+            } else {
+                handle_channel_data(&mut sender_buf, event_token, &mut state)?;
+            }
+            if sender_buf.get_readable_data().len() > 0 {
+                process_write(&mut sender_buf, &mut stream)?;
             }
         }
 
         if state.channels.channels_changed {
-            for (chan_number, chan) in state.channels.channels.iter() {
-                if !registered_channels.contains(chan_number) {
-                    //registry.register(&mut source, token, interests)
+            for (&chan_number, chan) in state.channels.channels.iter() {
+                if let Some(cmd) = &chan.command {
+                    if registered_channels.insert(chan_number) {
+                        let token_base = chan_number as usize * 4;
+                        let stdout_fd = cmd.stdout.as_raw_fd();
+                        poll.registry().register(
+                            &mut SourceFd(&stdout_fd),
+                            Token(token_base),
+                            Interest::READABLE,
+                        )?;
+                        let stderr_fd = cmd.stderr.as_raw_fd();
+                        poll.registry().register(
+                            &mut SourceFd(&stderr_fd),
+                            Token(token_base + 1),
+                            Interest::READABLE,
+                        )?;
+                        let stdin_fd = cmd.stdin.as_raw_fd();
+                        poll.registry().register(
+                            &mut SourceFd(&stdin_fd),
+                            Token(token_base + 2),
+                            Interest::WRITABLE,
+                        )?;
+                    }
                 }
             }
             // TODO: deregister channels for future reuse

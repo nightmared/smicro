@@ -28,6 +28,8 @@ pub enum MessageType {
     ChannelOpenFailure = 92,
     ChannelData = 94,
     ChannelRequest = 98,
+    ChannelSuccess = 99,
+    ChannelFailure = 100,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]

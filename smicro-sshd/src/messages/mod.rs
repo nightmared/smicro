@@ -248,8 +248,33 @@ pub struct MessageChannelRequest<'a> {
 }
 
 #[gen_serialize_impl]
-pub struct MessageChannelData<'a> {
+pub struct MessageChannelFailure {
     pub recipient_channel: u32,
+}
+
+impl<'a> Message<'a> for MessageChannelFailure {
+    fn get_message_type() -> MessageType {
+        MessageType::ChannelFailure
+    }
+}
+
+#[gen_serialize_impl]
+pub struct MessageChannelSuccess {
+    pub recipient_channel: u32,
+}
+
+impl<'a> Message<'a> for MessageChannelSuccess {
+    fn get_message_type() -> MessageType {
+        MessageType::ChannelSuccess
+    }
+}
+
+#[gen_serialize_impl]
+#[declare_deserializable_struct]
+pub struct MessageChannelData<'a> {
+    #[field(parser = be_u32)]
+    pub recipient_channel: u32,
+    #[field(parser = parse_slice.map(SharedSSHSlice))]
     pub data: SharedSSHSlice<'a, u8>,
 }
 

@@ -2,7 +2,7 @@ use std::net::AddrParseError;
 
 use smicro_types::{error::ParsingError, ssh::types::MessageType};
 
-use crate::state::ChannelAllocationError;
+use crate::state::channel::ChannelAllocationError;
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
@@ -82,6 +82,8 @@ pub enum Error {
     ConnectionClosed,
     #[error("The peer sent a disconnect message")]
     PeerTriggeredDisconnection,
+    #[error("Invalid channel: no command is registered for that channel")]
+    MissingCommandInChannel,
 }
 
 #[derive(thiserror::Error, Debug)]
