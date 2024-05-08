@@ -54,7 +54,6 @@ pub fn write_message<'a, T: SerializePacket + Message<'a>, const SIZE: usize>(
             "missing space in the buffer to write the packet",
         )));
     }
-    println!("{} {}", required_space, real_packet_length);
 
     let mut output_buffer = &mut output_buffer[0..required_space];
 

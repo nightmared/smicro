@@ -6,7 +6,6 @@ use cipher::{Iv, KeyIvInit};
 use elliptic_curve::subtle::ConstantTimeEq;
 use nom::{bytes::streaming::take, IResult};
 use poly1305::Poly1305;
-use smicro_types::serialize::SerializePacket;
 use smicro_types::{
     error::ParsingError,
     ssh::deserialize::{const_take, streaming_const_take},

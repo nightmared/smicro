@@ -14,7 +14,8 @@ pub struct ChannelCommand {
     pub stdout: ChildStdout,
     pub stderr: ChildStderr,
     pub stdin_buffer: LoopingBuffer<MAX_PKT_SIZE>,
-    pub output_buffer: LoopingBuffer<MAX_PKT_SIZE>,
+    pub stdout_buffer: LoopingBuffer<MAX_PKT_SIZE>,
+    pub stderr_buffer: LoopingBuffer<MAX_PKT_SIZE>,
 }
 
 #[derive(Debug)]

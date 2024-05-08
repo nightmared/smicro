@@ -9,13 +9,12 @@ use std::{
     thread,
 };
 
-use log::{debug, error, info, trace, LevelFilter};
+use log::{debug, error, info, trace, warn, LevelFilter};
 use mio::{
     net::{TcpListener, TcpStream},
     unix::SourceFd,
     Events, Interest, Poll, Token,
 };
-use state::{channel::ChannelCommand, SenderState};
 use syslog::{BasicLogger, Facility, Formatter3164};
 
 use smicro_common::LoopingBuffer;
@@ -36,11 +35,13 @@ pub mod state;
 
 use crate::{
     error::Error,
-    messages::{DisconnectReason, MessageChannelData, MessageDisconnect},
+    messages::{
+        ChannelExtendedDataCode, DisconnectReason, MessageChannelData, MessageChannelExtendedData,
+        MessageDisconnect,
+    },
     packet::{write_message, MAX_PKT_SIZE},
-    session::UninitializedSession,
-    session::{SessionState, SessionStates},
-    state::State,
+    session::{SessionState, SessionStates, UninitializedSession},
+    state::{SenderState, State},
 };
 
 fn handle_packet<const SIZE: usize>(
@@ -177,29 +178,43 @@ fn handle_packets<const SIZE: usize>(
     }
 }
 
-fn flush_data_to_channel<const SIZE: usize>(
+fn flush_data_to_channel<const INPUT_SIZE: usize, const SIZE: usize>(
     sender_buf: &mut LoopingBuffer<SIZE>,
+    input_buf: &mut LoopingBuffer<INPUT_SIZE>,
     recipient_channel: u32,
     max_pkt_size: u32,
-    cmd: &mut ChannelCommand,
     sender: &mut SenderState,
+    is_stderr: bool,
 ) -> Result<(), Error> {
-    let readable_data = cmd.output_buffer.get_readable_data();
+    let readable_data = input_buf.get_readable_data();
 
     // 32 is chosen arbitrarily to represent the packet overhead
     let max_write_size = max_pkt_size as usize - 32;
     let data = &readable_data[0..min(readable_data.len(), max_write_size)];
     let data_len = data.len();
-    let channel_data = MessageChannelData {
-        recipient_channel,
-        data: SharedSSHSlice(data),
+    let data = SharedSSHSlice(data);
+    let res = if is_stderr {
+        let channel_data = MessageChannelExtendedData {
+            recipient_channel,
+            data_type: ChannelExtendedDataCode::Stderr,
+            data,
+        };
+        write_message(sender, sender_buf, &channel_data)
+    } else {
+        let channel_data = MessageChannelData {
+            recipient_channel,
+            data,
+        };
+        write_message(sender, sender_buf, &channel_data)
     };
-
-    write_message(sender, sender_buf, &channel_data)?;
-
-    cmd.output_buffer.advance_reader_pos(data_len);
-
-    Ok(())
+    match res {
+        Ok(()) => {
+            input_buf.advance_reader_pos(data_len);
+            Ok(())
+        }
+        Err(Error::IoError(e)) if e.kind() == ErrorKind::WouldBlock => Ok(()),
+        Err(e) => Err(e),
+    }
 }
 
 fn handle_channel_data<const SIZE: usize>(
@@ -216,27 +231,36 @@ fn handle_channel_data<const SIZE: usize>(
         if event_token.0 % 4 == 0 {
             // stdin
             process_write(&mut cmd.stdin_buffer, &mut cmd.stdin)?;
+        } else if event_token.0 % 4 == 1 {
+            // stdout
+            process_read(&mut cmd.stdout_buffer, &mut cmd.stdout)?;
+        } else if event_token.0 % 4 == 2 {
+            // stderr
+            process_read(&mut cmd.stderr_buffer, &mut cmd.stderr)?;
         } else {
-            // stdout/stderr
-            let source: &mut dyn Read = if event_token.0 % 4 == 1 {
-                &mut cmd.stdout
-            } else {
-                &mut cmd.stderr
-            };
-            process_read(&mut cmd.output_buffer, source)?;
-
-            flush_data_to_channel(
-                sender_buf,
-                chan.remote_channel_number,
-                chan.max_pkt_size,
-                cmd,
-                &mut state.sender,
-            )?;
         }
+
+        flush_data_to_channel(
+            sender_buf,
+            &mut cmd.stderr_buffer,
+            chan.remote_channel_number,
+            chan.max_pkt_size,
+            &mut state.sender,
+            true,
+        )?;
+        flush_data_to_channel(
+            sender_buf,
+            &mut cmd.stdout_buffer,
+            chan.remote_channel_number,
+            chan.max_pkt_size,
+            &mut state.sender,
+            false,
+        )?;
     } else {
-        // TODO: find out the message to send here
-        unimplemented!()
-        //write_message(&mut state, &mut sender_buf, unimplemented!())?;
+        warn!(
+            "Got data for a channel ({}) that does not exist",
+            channel_number
+        );
     }
 
     Ok(())
@@ -338,7 +362,7 @@ fn main() -> Result<(), Error> {
 
     let logger = syslog::unix(formatter)?;
     log::set_boxed_logger(Box::new(BasicLogger::new(logger)))
-        .map(|()| log::set_max_level(LevelFilter::Trace))?;
+        .map(|()| log::set_max_level(LevelFilter::Info))?;
 
     let mut listener = TcpListener::bind(SocketAddr::from_str("127.0.0.1:2222")?)?;
 

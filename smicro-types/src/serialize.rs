@@ -2,7 +2,7 @@ use std::{io::Write, os::unix::prelude::OsStrExt};
 
 use crate::ssh::types::{SSHSlice, SharedSSHSlice};
 
-pub trait SerializePacket: Sized {
+pub trait SerializePacket {
     fn get_size(&self) -> usize;
 
     fn serialize<W: Write>(&self, output: W) -> Result<(), std::io::Error>;

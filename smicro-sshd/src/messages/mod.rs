@@ -212,6 +212,29 @@ pub struct MessageChannelData<'a> {
     pub data: SharedSSHSlice<'a, u8>,
 }
 
+#[repr(u32)]
+#[derive(Copy, Clone)]
+pub enum ChannelExtendedDataCode {
+    Stderr = 1,
+}
+
+impl SerializePacket for ChannelExtendedDataCode {
+    fn get_size(&self) -> usize {
+        (*self as u32).get_size()
+    }
+
+    fn serialize<W: Write>(&self, output: W) -> Result<(), std::io::Error> {
+        (*self as u32).serialize(output)
+    }
+}
+
+#[declare_message(ChannelExtendedData)]
+pub struct MessageChannelExtendedData<'a> {
+    pub recipient_channel: u32,
+    pub data_type: ChannelExtendedDataCode,
+    pub data: SharedSSHSlice<'a, u8>,
+}
+
 #[declare_message(ChannelWindowAdjust)]
 #[declare_deserializable_struct]
 pub struct MessageChannelWindowAdjust {

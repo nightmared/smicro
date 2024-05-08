@@ -118,7 +118,8 @@ fn process(message_data: &[u8]) {
                 stdout,
                 stderr,
                 stdin_buffer: LoopingBuffer::new()?,
-                output_buffer: LoopingBuffer::new()?,
+                stdout_buffer: LoopingBuffer::new()?,
+                stderr_buffer: LoopingBuffer::new()?,
             });
 
             if msg.want_reply {
