@@ -2,7 +2,7 @@ use std::io::Write;
 
 use nom::{number::complete::be_u32, Parser};
 
-use smicro_macros::{declare_deserializable_struct, gen_serialize_impl};
+use smicro_macros::{declare_deserializable_struct, declare_message};
 use smicro_types::sftp::deserialize::parse_utf8_slice;
 use smicro_types::{
     deserialize::DeserializePacket,
@@ -25,15 +25,9 @@ pub trait Message<'a>: Sized {
     fn get_message_type() -> MessageType;
 }
 
-#[gen_serialize_impl]
+#[declare_message(NewKeys)]
 #[declare_deserializable_struct]
 pub struct MessageNewKeys {}
-
-impl<'a> Message<'a> for MessageNewKeys {
-    fn get_message_type() -> MessageType {
-        MessageType::NewKeys
-    }
-}
 
 #[declare_deserializable_struct]
 pub struct MessageServiceRequest<'a> {
@@ -41,15 +35,9 @@ pub struct MessageServiceRequest<'a> {
     service_name: &'a str,
 }
 
-#[gen_serialize_impl]
+#[declare_message(ServiceAccept)]
 pub struct MessageServiceAccept<'a> {
     pub service_name: &'a str,
-}
-
-impl<'a> Message<'a> for MessageServiceAccept<'a> {
-    fn get_message_type() -> MessageType {
-        MessageType::ServiceAccept
-    }
 }
 
 #[repr(u32)]
@@ -71,17 +59,11 @@ impl SerializePacket for DisconnectReason {
     }
 }
 
-#[gen_serialize_impl]
+#[declare_message(Disconnect)]
 pub struct MessageDisconnect<'a> {
     reason: DisconnectReason,
     description: &'a str,
     language: &'a str,
-}
-
-impl<'a> Message<'a> for MessageDisconnect<'a> {
-    fn get_message_type() -> MessageType {
-        MessageType::Disconnect
-    }
 }
 
 impl<'a> MessageDisconnect<'a> {
@@ -94,15 +76,9 @@ impl<'a> MessageDisconnect<'a> {
     }
 }
 
-#[gen_serialize_impl]
+#[declare_message(Unimplemented)]
 pub struct MessageUnimplemented {
     pub sequence_number: u32,
-}
-
-impl<'a> Message<'a> for MessageUnimplemented {
-    fn get_message_type() -> MessageType {
-        MessageType::Unimplemented
-    }
 }
 
 #[declare_deserializable_struct]
@@ -117,26 +93,14 @@ pub struct MessageUserAuthRequest<'a> {
     pub method_data: &'a [u8],
 }
 
-#[gen_serialize_impl]
+#[declare_message(UserAuthFailure)]
 pub struct MessageUserAuthFailure {
     pub allowed_auth_methods: NameList,
     pub partial_success: bool,
 }
 
-impl<'a> Message<'a> for MessageUserAuthFailure {
-    fn get_message_type() -> MessageType {
-        MessageType::UserAuthFailure
-    }
-}
-
-#[gen_serialize_impl]
+#[declare_message(UserAuthSuccess)]
 pub struct MessageUserAuthSuccess {}
-
-impl<'a> Message<'a> for MessageUserAuthSuccess {
-    fn get_message_type() -> MessageType {
-        MessageType::UserAuthSuccess
-    }
-}
 
 #[declare_deserializable_struct]
 pub struct UserAuthPublickey<'a> {
@@ -150,16 +114,10 @@ pub struct UserAuthPublickey<'a> {
     pub signature: &'a [u8],
 }
 
-#[gen_serialize_impl]
+#[declare_message(UserAuthPublickKeyOk)]
 pub struct MessageUserAuthPublicKeyOk<'a> {
     pub public_key_alg_name: &'a str,
     pub public_key_blob: SharedSSHSlice<'a, u8>,
-}
-
-impl<'a> Message<'a> for MessageUserAuthPublicKeyOk<'a> {
-    fn get_message_type() -> MessageType {
-        MessageType::UserAuthPublickKeyOk
-    }
 }
 
 #[declare_deserializable_struct]
@@ -193,18 +151,12 @@ impl SerializePacket for ChannelOpenFailureReason {
     }
 }
 
-#[gen_serialize_impl]
+#[declare_message(ChannelOpenFailure)]
 pub struct MessageChannelOpenFailure<'a> {
     recipient_channel: u32,
     reason: ChannelOpenFailureReason,
     description: &'a str,
     language: &'a str,
-}
-
-impl<'a> Message<'a> for MessageChannelOpenFailure<'a> {
-    fn get_message_type() -> MessageType {
-        MessageType::ChannelOpenFailure
-    }
 }
 
 impl<'a> MessageChannelOpenFailure<'a> {
@@ -221,18 +173,12 @@ impl<'a> MessageChannelOpenFailure<'a> {
     }
 }
 
-#[gen_serialize_impl]
+#[declare_message(ChannelOpenConfirmation)]
 pub struct MessageChannelOpenConfirmation {
     pub recipient_channel: u32,
     pub sender_channel: u32,
     pub initial_window_size: u32,
     pub max_pkt_size: u32,
-}
-
-impl<'a> Message<'a> for MessageChannelOpenConfirmation {
-    fn get_message_type() -> MessageType {
-        MessageType::ChannelOpenConfirmation
-    }
 }
 
 #[declare_deserializable_struct]
@@ -247,29 +193,17 @@ pub struct MessageChannelRequest<'a> {
     pub channel_specific_data: &'a [u8],
 }
 
-#[gen_serialize_impl]
+#[declare_message(ChannelFailure)]
 pub struct MessageChannelFailure {
     pub recipient_channel: u32,
 }
 
-impl<'a> Message<'a> for MessageChannelFailure {
-    fn get_message_type() -> MessageType {
-        MessageType::ChannelFailure
-    }
-}
-
-#[gen_serialize_impl]
+#[declare_message(ChannelSuccess)]
 pub struct MessageChannelSuccess {
     pub recipient_channel: u32,
 }
 
-impl<'a> Message<'a> for MessageChannelSuccess {
-    fn get_message_type() -> MessageType {
-        MessageType::ChannelSuccess
-    }
-}
-
-#[gen_serialize_impl]
+#[declare_message(ChannelData)]
 #[declare_deserializable_struct]
 pub struct MessageChannelData<'a> {
     #[field(parser = be_u32)]
@@ -278,8 +212,11 @@ pub struct MessageChannelData<'a> {
     pub data: SharedSSHSlice<'a, u8>,
 }
 
-impl<'a> Message<'a> for MessageChannelData<'a> {
-    fn get_message_type() -> MessageType {
-        MessageType::ChannelData
-    }
+#[declare_message(ChannelWindowAdjust)]
+#[declare_deserializable_struct]
+pub struct MessageChannelWindowAdjust {
+    #[field(parser = be_u32)]
+    pub recipient_channel: u32,
+    #[field(parser = be_u32)]
+    pub bytes_to_add: u32,
 }

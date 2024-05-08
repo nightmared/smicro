@@ -15,6 +15,7 @@ use mio::{
     unix::SourceFd,
     Events, Interest, Poll, Token,
 };
+use state::{channel::ChannelCommand, SenderState};
 use syslog::{BasicLogger, Facility, Formatter3164};
 
 use smicro_common::LoopingBuffer;
@@ -42,9 +43,9 @@ use crate::{
     state::State,
 };
 
-fn handle_packet<const SIZE: usize, W: Write>(
+fn handle_packet<const SIZE: usize>(
     buf: &mut LoopingBuffer<SIZE>,
-    writer: &mut W,
+    writer: &mut LoopingBuffer<SIZE>,
     session: &mut SessionStates,
     state: &mut State,
 ) -> Result<(), Error> {
@@ -62,7 +63,7 @@ fn handle_packet<const SIZE: usize, W: Write>(
                 debug!("The data that triggered the error was: {:?}", buf);
 
                 let _ = write_message(
-                    state,
+                    &mut state.sender,
                     writer,
                     &MessageDisconnect::new(DisconnectReason::ProtocolError),
                 );
@@ -73,7 +74,7 @@ fn handle_packet<const SIZE: usize, W: Write>(
                 error!("Got an error while processing the packet: {:?}", e);
                 debug!("The data that triggered the error was: {:?}", buf);
                 let _ = write_message(
-                    state,
+                    &mut state.sender,
                     writer,
                     &MessageDisconnect::new(DisconnectReason::ProtocolError),
                 );
@@ -157,20 +158,46 @@ fn handle_packets<const SIZE: usize>(
     state: &mut State,
 ) -> Result<(), Error> {
     loop {
+        if reader_buf.get_readable_data().len() == 0 {
+            return Ok(());
+        }
         match handle_packet(reader_buf, sender_buf, session, state) {
             Ok(_) => {}
             Err(Error::ParsingError(nom::Err::Incomplete(_))) => {
                 trace!("Not enough data to parse the packet, trying to read more");
-                break;
+                return Ok(());
             }
             Err(Error::IoError(e)) if e.kind() == ErrorKind::WouldBlock => {
-                break;
+                return Ok(());
             }
             Err(e) => {
                 return Err(e);
             }
         }
     }
+}
+
+fn flush_data_to_channel<const SIZE: usize>(
+    sender_buf: &mut LoopingBuffer<SIZE>,
+    recipient_channel: u32,
+    max_pkt_size: u32,
+    cmd: &mut ChannelCommand,
+    sender: &mut SenderState,
+) -> Result<(), Error> {
+    let readable_data = cmd.output_buffer.get_readable_data();
+
+    // 32 is chosen arbitrarily to represent the packet overhead
+    let max_write_size = max_pkt_size as usize - 32;
+    let data = &readable_data[0..min(readable_data.len(), max_write_size)];
+    let data_len = data.len();
+    let channel_data = MessageChannelData {
+        recipient_channel,
+        data: SharedSSHSlice(data),
+    };
+
+    write_message(sender, sender_buf, &channel_data)?;
+
+    cmd.output_buffer.advance_reader_pos(data_len);
 
     Ok(())
 }
@@ -186,32 +213,25 @@ fn handle_channel_data<const SIZE: usize>(
             .command
             .as_mut()
             .ok_or(Error::MissingCommandInChannel)?;
-        if event_token.0 % 4 == 2 {
+        if event_token.0 % 4 == 0 {
             // stdin
             process_write(&mut cmd.stdin_buffer, &mut cmd.stdin)?;
         } else {
             // stdout/stderr
-            let source: &mut dyn Read = if event_token.0 % 4 == 0 {
+            let source: &mut dyn Read = if event_token.0 % 4 == 1 {
                 &mut cmd.stdout
             } else {
                 &mut cmd.stderr
             };
             process_read(&mut cmd.output_buffer, source)?;
-            let readable_data =
-                unsafe { std::mem::transmute::<_, &[u8]>(cmd.output_buffer.get_readable_data()) };
 
-            // 32 is chosen arbitrarily to represent the packet overhe&d
-            let max_write_size = chan.max_pkt_size as usize - 32;
-            let channel_data = MessageChannelData {
-                recipient_channel: chan.remote_channel_number,
-                data: SharedSSHSlice(&readable_data[0..min(readable_data.len(), max_write_size)]),
-            };
-            // This is safe because the bump allocator does not clean memory, but we should
-            // avoid this as much as possible (bumping while still using a reference).
-            // Sadly, I had to do this to appease the borrow checker
-            cmd.output_buffer
-                .advance_reader_pos(channel_data.data.0.len());
-            write_message(state, sender_buf, &channel_data)?;
+            flush_data_to_channel(
+                sender_buf,
+                chan.remote_channel_number,
+                chan.max_pkt_size,
+                cmd,
+                &mut state.sender,
+            )?;
         }
     } else {
         // TODO: find out the message to send here
@@ -251,6 +271,7 @@ fn handle_stream(mut stream: TcpStream) -> Result<(), Error> {
             let event_token = ev.token();
             // Receive then processes messages from the client
             if event_token == stream_token {
+                // flush whatever data we couldn't write previously
                 if ev.is_writable() {
                     process_write(&mut sender_buf, &mut stream)?;
                 }
@@ -270,31 +291,38 @@ fn handle_stream(mut stream: TcpStream) -> Result<(), Error> {
             for (&chan_number, chan) in state.channels.channels.iter() {
                 if let Some(cmd) = &chan.command {
                     if registered_channels.insert(chan_number) {
+                        debug!("Registering channel {}", chan_number);
                         let token_base = chan_number as usize * 4;
+                        let stdin_fd = cmd.stdin.as_raw_fd();
+                        poll.registry().register(
+                            &mut SourceFd(&stdin_fd),
+                            Token(token_base),
+                            Interest::WRITABLE,
+                        )?;
+
                         let stdout_fd = cmd.stdout.as_raw_fd();
                         poll.registry().register(
                             &mut SourceFd(&stdout_fd),
-                            Token(token_base),
+                            Token(token_base + 1),
                             Interest::READABLE,
                         )?;
                         let stderr_fd = cmd.stderr.as_raw_fd();
                         poll.registry().register(
                             &mut SourceFd(&stderr_fd),
-                            Token(token_base + 1),
-                            Interest::READABLE,
-                        )?;
-                        let stdin_fd = cmd.stdin.as_raw_fd();
-                        poll.registry().register(
-                            &mut SourceFd(&stdin_fd),
                             Token(token_base + 2),
-                            Interest::WRITABLE,
+                            Interest::READABLE,
                         )?;
                     }
                 }
             }
-            // TODO: deregister channels for future reuse
-            for chan in registered_channels.iter() {
-                if !state.channels.channels.contains_key(chan) {}
+            for chan_number in registered_channels.iter() {
+                if !state.channels.channels.contains_key(chan_number) {
+                    debug!("Unregistering channel {}", chan_number);
+                    let fd_base = *chan_number as i32 * 4;
+                    poll.registry().deregister(&mut SourceFd(&fd_base))?;
+                    poll.registry().deregister(&mut SourceFd(&(fd_base + 1)))?;
+                    poll.registry().deregister(&mut SourceFd(&(fd_base + 2)))?;
+                }
             }
         }
     }

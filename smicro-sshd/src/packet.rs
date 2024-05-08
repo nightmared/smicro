@@ -1,30 +1,34 @@
 use std::io::Write;
 
-use log::warn;
+use log::{trace, warn};
 use nom::{bytes::streaming::take, sequence::tuple, IResult};
 use rand::Rng;
+use smicro_common::LoopingBuffer;
 use smicro_types::{error::ParsingError, serialize::SerializePacket};
 
-use crate::{crypto::Cipher, error::Error, messages::Message, state::State};
+use crate::{
+    crypto::Cipher,
+    error::Error,
+    messages::Message,
+    state::{SenderState, State},
+};
 
 // A tad bit above the SFTP max packet size, so that we do not have too much fragmentation
 // Besides, this is the same constant as OpenSSH
 pub const MAX_PKT_SIZE: usize = 4096 * 64;
 
-pub fn write_message<'a, T: SerializePacket + Message<'a>, W: Write + ?Sized>(
-    state: &mut State,
-    mut stream: &mut W,
+pub fn write_message<'a, T: SerializePacket + Message<'a>, const SIZE: usize>(
+    sender: &mut SenderState,
+    stream: &mut LoopingBuffer<SIZE>,
     payload: &T,
 ) -> Result<(), Error> {
-    let mut tmp_out = Vec::new();
-
     let mut padding = [0u8; 256];
-    state.rng.fill(&mut padding);
+    sender.rng.fill(&mut padding);
 
-    let cipher = state
+    let cipher = sender
         .crypto_material
         .as_ref()
-        .map(|mat| mat.server_cipher.as_ref());
+        .map(|mat| mat.cipher.as_ref());
 
     let mut padding_length = 4;
     // length + padding_length + message_type + payload + random_padding, max not included
@@ -38,26 +42,41 @@ pub fn write_message<'a, T: SerializePacket + Message<'a>, W: Write + ?Sized>(
         real_packet_length += 1;
     }
 
+    let output_buffer = stream.get_writable_buffer();
+    let required_space = if let Some(cipher) = cipher {
+        cipher.required_space_to_encrypt(real_packet_length)
+    } else {
+        real_packet_length
+    };
+    if output_buffer.len() < required_space {
+        return Err(Error::IoError(std::io::Error::new(
+            std::io::ErrorKind::WouldBlock,
+            "missing space in the buffer to write the packet",
+        )));
+    }
+    println!("{} {}", required_space, real_packet_length);
+
+    let mut output_buffer = &mut output_buffer[0..required_space];
+
     // the packet_length field does not count in the packet size)
-    ((real_packet_length - 4) as u32).serialize(&mut tmp_out)?;
-    tmp_out.write_all(&[padding_length as u8, T::get_message_type() as u8])?;
-    payload.serialize(&mut tmp_out)?;
-    (&padding[0..padding_length]).serialize(&mut tmp_out)?;
+    ((real_packet_length - 4) as u32).serialize(&mut output_buffer)?;
+    output_buffer.write_all(&[padding_length as u8, T::get_message_type() as u8])?;
+    payload.serialize(&mut output_buffer)?;
+    (&padding[0..padding_length]).serialize(&mut output_buffer)?;
 
     if let Some(cipher) = cipher {
         cipher.encrypt(
-            tmp_out.as_mut_slice(),
-            state.sequence_number_s2c.0,
-            &mut stream,
+            &mut stream.get_writable_buffer()[0..required_space],
+            sender.sequence_number.0,
         )?;
-    } else {
-        tmp_out.as_slice().serialize(&mut stream)?;
-    };
+    }
+
+    stream.advance_writer_pos(required_space);
 
     // We only support the AEAD mode chacha20-poly1305, where MAC is disabled
 
-    state.sequence_number_s2c += 1;
-    if state.sequence_number_s2c.0 == 0 {
+    sender.sequence_number += 1;
+    if sender.sequence_number.0 == 0 {
         return Err(Error::SequenceNumberWrapped);
     }
 
@@ -123,12 +142,13 @@ pub fn parse_packet<'a>(
     state: &mut State,
 ) -> IResult<&'a [u8], &'a [u8], ParsingError> {
     let cipher = state
+        .receiver
         .crypto_material
         .as_ref()
-        .map(|mat| mat.client_cipher.as_ref());
+        .map(|mat| mat.cipher.as_ref());
 
     let (next_data, res) = if let Some(cipher) = cipher {
-        let (next_data, plaintext_pkt) = cipher.decrypt(input, state.sequence_number_c2s.0)?;
+        let (next_data, plaintext_pkt) = cipher.decrypt(input, state.receiver.sequence_number.0)?;
         let (should_be_empty, decrypted_pkt) = parse_plaintext_packet(plaintext_pkt, Some(cipher))?;
         if should_be_empty != [] {
             return Err(nom::Err::Failure(
@@ -159,8 +179,8 @@ pub fn parse_packet<'a>(
     } else {
     */
 
-    state.sequence_number_c2s += 1;
-    if state.sequence_number_c2s.0 == 0 {
+    state.receiver.sequence_number += 1;
+    if state.receiver.sequence_number.0 == 0 {
         return Err(nom::Err::Failure(ParsingError::SequenceNumberWrapped));
     }
 

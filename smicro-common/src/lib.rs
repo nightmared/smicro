@@ -1,4 +1,4 @@
-use std::fmt::Display;
+use std::fmt::{Debug, Display};
 use std::io::Write;
 
 #[derive(thiserror::Error, Debug)]
@@ -123,14 +123,24 @@ impl Display for WriteInBufferError {
 // - size >= start_pos (we always reduce start_pos
 // - the used space is end_pos - start_pos bytes long, starting at start_pos:
 //   [start_pos, end_pos[
-// - the free (not initialized yet) space is size - start_pos bytes long, starting at end_pos:
-//   [end_pos, end_pos + (size - start_pos)[
+// - the free (not initialized yet) space is size - used_space bytes long, that is size - (end_pos - start_pos),
+//   starting at end_pos:
+//   [end_pos, end_pos + (size - (end_pos - start_pos))[ = [end_pos, size + start_pos[
 // TODO: implement Drop to properly deallocate the memory mappings and the memfd
-#[derive(Debug)]
 pub struct LoopingBuffer<const SIZE: usize> {
     buf: &'static mut [u8],
     start_pos: usize,
     end_pos: usize,
+}
+
+impl<const SIZE: usize> Debug for LoopingBuffer<SIZE> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LoopingBuffer")
+            .field("buf", &"<REDACTED>")
+            .field("start_pos", &self.start_pos)
+            .field("end_pos", &self.end_pos)
+            .finish()
+    }
 }
 
 impl<const SIZE: usize> LoopingBuffer<SIZE> {
@@ -150,13 +160,14 @@ impl<const SIZE: usize> LoopingBuffer<SIZE> {
 
     /// Return a buffer to the part that is not initiliazed yet
     pub fn get_writable_buffer<'a>(&'a mut self) -> &'a mut [u8] {
-        &mut self.buf[self.end_pos..self.end_pos + SIZE - self.start_pos]
+        &mut self.buf[self.end_pos..SIZE + self.start_pos]
     }
 
     /// Bump the buffer length by `offset` bytes (`offset` being
     /// the number of bytes that were written in the buffer).
     pub fn advance_writer_pos(&mut self, offset: usize) {
-        if offset > SIZE - self.start_pos {
+        let new_size = self.end_pos + offset - self.start_pos;
+        if new_size > SIZE {
             panic!("An impossible number of bytes were written in the buffer, possible attack?");
         }
         self.end_pos += offset;
@@ -165,7 +176,8 @@ impl<const SIZE: usize> LoopingBuffer<SIZE> {
     /// Write data directly in the buffer
     pub fn write(&mut self, buf: &[u8]) -> Result<(), WriteInBufferError> {
         let write_len = buf.len();
-        if write_len > SIZE - self.start_pos {
+        let new_size = self.end_pos + write_len - self.start_pos;
+        if new_size > SIZE {
             return Err(WriteInBufferError {
                 buffer_size: SIZE,
                 used_size: self.end_pos - self.start_pos,

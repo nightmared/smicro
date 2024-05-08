@@ -3,7 +3,7 @@ use nom::{
     combinator::{all_consuming, map},
     multi::separated_list0,
     number::complete::{be_u32, be_u8},
-    AsChar, IResult,
+    IResult,
 };
 
 use crate::error::ParsingError;

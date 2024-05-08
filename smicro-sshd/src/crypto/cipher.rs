@@ -1,5 +1,3 @@
-use std::io::Write;
-
 use chacha20::cipher::generic_array::GenericArray;
 use chacha20::ChaCha20Legacy;
 use cipher::StreamCipher;
@@ -79,12 +77,9 @@ impl CipherAllocator for Chacha20Poly1305 {
 pub trait Cipher {
     fn block_size_bytes(&self) -> usize;
 
-    fn encrypt(
-        &self,
-        cleartext_data: &mut [u8],
-        sequence_number: u32,
-        ciphered_data: &mut dyn Write,
-    ) -> Result<(), Error>;
+    fn required_space_to_encrypt(&self, data_len: usize) -> usize;
+
+    fn encrypt(&self, data: &mut [u8], sequence_number: u32) -> Result<(), Error>;
 
     fn decrypt<'a>(
         &self,
@@ -104,26 +99,25 @@ impl Cipher for Chacha20Poly1305Impl {
         64
     }
 
-    fn encrypt(
-        &self,
-        cleartext_data: &mut [u8],
-        sequence_number: u32,
-        mut ciphered_data: &mut dyn Write,
-    ) -> Result<(), Error> {
+    fn required_space_to_encrypt(&self, data_len: usize) -> usize {
+        // size of the data itself + the poly1305 tag size
+        data_len + poly1305::BLOCK_SIZE
+    }
+
+    fn encrypt(&self, data: &mut [u8], sequence_number: u32) -> Result<(), Error> {
         // this is a cipher with authenticated encryptions, so we need to extract the packet length
         // beforehand
-        let (_, size_field) =
-            const_take::<4>(cleartext_data).map_err(|_| Error::EncryptionError)?;
+        let (_, size_field) = const_take::<4>(data).map_err(|_| Error::EncryptionError)?;
         let pkt_size = self.get_pkt_size(size_field, sequence_number);
-        cleartext_data[0..4].copy_from_slice(pkt_size.to_be_bytes().as_slice());
+        data[0..4].copy_from_slice(pkt_size.to_be_bytes().as_slice());
 
-        // decrypt in place
-        self.cipher_main_message(&mut cleartext_data[4..], sequence_number);
+        // encrypt in place
+        let cleartext_data_end = data.len() - poly1305::BLOCK_SIZE;
+        self.cipher_main_message(&mut data[4..cleartext_data_end], sequence_number);
 
-        let poly1305_tag = self.compute_poly1305_hash(cleartext_data, sequence_number);
+        let poly1305_tag = self.compute_poly1305_hash(&data[..cleartext_data_end], sequence_number);
 
-        (cleartext_data as &[u8]).serialize(&mut ciphered_data)?;
-        poly1305_tag.as_slice().serialize(&mut ciphered_data)?;
+        data[cleartext_data_end..].copy_from_slice(poly1305_tag.as_slice());
 
         Ok(())
     }

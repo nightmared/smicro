@@ -8,6 +8,7 @@ use nom::{
     sequence::preceded,
     AsChar,
 };
+use smicro_common::LoopingBuffer;
 
 use crate::{
     error::Error,
@@ -21,10 +22,10 @@ use crate::{
 pub struct UninitializedSession {}
 
 impl SessionState for UninitializedSession {
-    fn process<'a, W: Write>(
+    fn process<'a, const SIZE: usize>(
         &mut self,
         state: &mut State,
-        writer: &mut W,
+        writer: &mut LoopingBuffer<SIZE>,
         input: &'a mut [u8],
     ) -> Result<(&'a [u8], SessionStates), Error> {
         // Write the identification string
@@ -41,10 +42,10 @@ impl SessionState for UninitializedSession {
 pub struct IdentifierStringSent {}
 
 impl SessionState for IdentifierStringSent {
-    fn process<'a, W: Write>(
+    fn process<'a, const SIZE: usize>(
         &mut self,
         state: &mut State,
-        _writer: &mut W,
+        _writer: &mut LoopingBuffer<SIZE>,
         input: &'a mut [u8],
     ) -> Result<(&'a [u8], SessionStates), Error> {
         let input = input as &[u8];
@@ -92,15 +93,15 @@ impl SessionState for IdentifierStringSent {
 pub struct IdentifierStringReceived {}
 
 impl SessionState for IdentifierStringReceived {
-    fn process<'a, W: Write>(
+    fn process<'a, const SIZE: usize>(
         &mut self,
         state: &mut State,
-        writer: &mut W,
+        writer: &mut LoopingBuffer<SIZE>,
         input: &'a mut [u8],
     ) -> Result<(&'a [u8], SessionStates), Error> {
         debug!("Sending the MessageKeyExchangeInit packet");
         let kex_init_msg = gen_kex_initial_list(state);
-        write_message(state, writer, &kex_init_msg)?;
+        write_message(&mut state.sender, writer, &kex_init_msg)?;
 
         Ok((
             input,

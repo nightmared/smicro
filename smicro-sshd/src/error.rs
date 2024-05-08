@@ -84,6 +84,8 @@ pub enum Error {
     PeerTriggeredDisconnection,
     #[error("Invalid channel: no command is registered for that channel")]
     MissingCommandInChannel,
+    #[error("Requested to increase the window size beyond 4GB: aborting")]
+    ExceededChannelLength,
 }
 
 #[derive(thiserror::Error, Debug)]

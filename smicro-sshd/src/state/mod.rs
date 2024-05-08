@@ -40,25 +40,34 @@ pub struct OpenSSHKeySerialized<'a> {
     key_data: &'a [u8],
 }
 
-pub struct State<'a> {
+pub struct SenderState {
     pub rng: ThreadRng,
+    pub crypto_algs: Option<Arc<Box<dyn ICryptoAlgs>>>,
+    pub crypto_material: Option<SessionCryptoMaterials>,
+    pub sequence_number: Wrapping<u32>,
+}
+
+pub struct ReceiverState {
+    pub rng: ThreadRng,
+    pub crypto_algs: Option<Arc<Box<dyn ICryptoAlgs>>>,
+    pub crypto_material: Option<SessionCryptoMaterials>,
+    pub sequence_number: Wrapping<u32>,
+}
+
+pub struct State<'a> {
+    pub sender: SenderState,
+    pub receiver: ReceiverState,
     pub host_keys: &'a [&'a dyn Signer],
     pub my_identifier_string: &'static str,
     pub peer_identifier_string: Option<Vec<u8>>,
-    pub crypto_algs: Option<Arc<Box<dyn ICryptoAlgs>>>,
-    pub crypto_material: Option<SessionCryptoMaterials>,
     pub session_identifier: Option<Vec<u8>>,
     pub authentified_user: Option<String>,
     pub channels: ChannelManager,
-    pub sequence_number_c2s: Wrapping<u32>,
-    pub sequence_number_s2c: Wrapping<u32>,
 }
 
 pub struct SessionCryptoMaterials {
-    pub client_mac: Box<dyn MAC>,
-    pub server_mac: Box<dyn MAC>,
-    pub client_cipher: Box<dyn Cipher>,
-    pub server_cipher: Box<dyn Cipher>,
+    pub mac: Box<dyn MAC>,
+    pub cipher: Box<dyn Cipher>,
 }
 
 impl std::fmt::Debug for SessionCryptoMaterials {
@@ -70,17 +79,24 @@ impl std::fmt::Debug for SessionCryptoMaterials {
 impl<'a> State<'a> {
     pub fn new(host_keys: &'a [&'a dyn Signer]) -> Self {
         Self {
-            rng: thread_rng(),
+            sender: SenderState {
+                rng: thread_rng(),
+                crypto_algs: None,
+                crypto_material: None,
+                sequence_number: Wrapping(0),
+            },
+            receiver: ReceiverState {
+                rng: thread_rng(),
+                crypto_algs: None,
+                crypto_material: None,
+                sequence_number: Wrapping(0),
+            },
             host_keys,
             my_identifier_string: "SSH-2.0-smicro_ssh",
             peer_identifier_string: None,
-            crypto_algs: None,
-            crypto_material: None,
             session_identifier: None,
             authentified_user: None,
             channels: ChannelManager::new(),
-            sequence_number_c2s: Wrapping(0),
-            sequence_number_s2c: Wrapping(0),
         }
     }
 

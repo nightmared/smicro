@@ -1,4 +1,3 @@
-use std::io::Write;
 use std::ops::Mul;
 
 use digest::Digest;
@@ -13,7 +12,6 @@ use smicro_types::serialize::SerializePacket;
 use smicro_types::ssh::types::{PositiveBigNum, SSHSlice, SharedSSHSlice};
 
 use crate::session::KexReplySent;
-use crate::session::SessionStates;
 use crate::{
     crypto::{
         compute_exchange_hash, derive_encryption_key,
@@ -23,18 +21,16 @@ use crate::{
     error::Error,
     messages::{MessageKexEcdhInit, MessageKexEcdhReply, MessageKeyExchangeInit},
     state::State,
-    write_message,
 };
 
 pub trait KEX {
     fn perform_key_exchange(
         &self,
         state: &mut State,
-        writer: &mut dyn Write,
         ecdh_init: &MessageKexEcdhInit,
         my_kex_message: &MessageKeyExchangeInit,
         peer_kex_message: &MessageKeyExchangeInit,
-    ) -> Result<SessionStates, Error>;
+    ) -> Result<(MessageKexEcdhReply, Vec<u8>, KexReplySent), Error>;
 }
 
 pub trait KEXIdentifier: CryptoAlg + KEX {
@@ -54,12 +50,12 @@ impl KEX for EcdhSha2Nistp521 {
     fn perform_key_exchange(
         &self,
         state: &mut State,
-        writer: &mut dyn Write,
         ecdh_init: &MessageKexEcdhInit,
         my_kex_message: &MessageKeyExchangeInit,
         peer_kex_message: &MessageKeyExchangeInit,
-    ) -> Result<SessionStates, Error> {
+    ) -> Result<(MessageKexEcdhReply, Vec<u8>, KexReplySent), Error> {
         let crypto_algs = state
+            .receiver
             .crypto_algs
             .as_ref()
             .ok_or(Error::MissingCryptoAlgs)?
@@ -82,7 +78,7 @@ impl KEX for EcdhSha2Nistp521 {
             return Err(Error::InvalidPointForEcdh);
         }
 
-        let my_secret = EcEphemeralSecret::random(&mut state.rng);
+        let my_secret = EcEphemeralSecret::random(&mut state.receiver.rng);
         let shared_secret = my_secret.diffie_hellman(&peer_pubkey);
         let my_pubkey = my_secret.public_key();
 
@@ -139,8 +135,6 @@ impl KEX for EcdhSha2Nistp521 {
             signature: kex_signature,
         };
 
-        write_message(state, writer, &res)?;
-
         let derive_key = |c: u8| -> Result<Vec<u8>, Error> {
             derive_encryption_key(
                 &mut <Sha512 as Digest>::new(),
@@ -159,16 +153,16 @@ impl KEX for EcdhSha2Nistp521 {
         let integrity_key_c2s = derive_key(b'E')?;
         let integrity_key_s2c = derive_key(b'F')?;
 
-        state.session_identifier = Some(exchange_hash);
-
-        Ok(SessionStates::KexReplySent(KexReplySent {
+        let kex_reply_sent = KexReplySent {
             iv_c2s,
             iv_s2c,
             encryption_key_c2s,
             encryption_key_s2c,
             integrity_key_c2s,
             integrity_key_s2c,
-        }))
+        };
+
+        Ok((res, exchange_hash, kex_reply_sent))
     }
 }
 

@@ -30,7 +30,7 @@ fn process(message_data: &[u8]) {
     }
 
     write_message(
-        state,
+        &mut state.sender,
         writer,
         &MessageServiceAccept {
             service_name: msg.service_name,
@@ -75,7 +75,7 @@ fn process(message_data: &[u8]) {
                     SharedSSHSlice(pk.public_key_blob).serialize(&mut message)?;
 
                     if verifier.signature_is_valid(pk.public_key_blob, &message, sig)? {
-                        write_message(state, writer, &MessageUserAuthSuccess {})?;
+                        write_message(&mut state.sender, writer, &MessageUserAuthSuccess {})?;
 
                         state.authentified_user = Some(msg.user_name.to_string());
 
@@ -86,7 +86,7 @@ fn process(message_data: &[u8]) {
                     }
                 } else {
                     write_message(
-                        state,
+                        &mut state.sender,
                         writer,
                         &MessageUserAuthPublicKeyOk {
                             public_key_alg_name: pk.public_key_alg_name,
@@ -100,7 +100,7 @@ fn process(message_data: &[u8]) {
         }
     }
     write_message(
-        state,
+        &mut state.sender,
         writer,
         &MessageUserAuthFailure {
             allowed_auth_methods: NameList {

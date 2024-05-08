@@ -5,7 +5,7 @@ use nom::number::complete::be_u32;
 use nom::Parser;
 use rand::Rng;
 
-use smicro_macros::{declare_crypto_algs_list, declare_deserializable_struct, gen_serialize_impl};
+use smicro_macros::{declare_crypto_algs_list, declare_deserializable_struct, declare_message};
 use smicro_types::deserialize::DeserializePacket;
 use smicro_types::serialize::SerializePacket;
 use smicro_types::sftp::deserialize::parse_slice;
@@ -22,12 +22,11 @@ use crate::{
         MACIdentifier, SignerIdentifier,
     },
     error::Error,
-    messages::Message,
     state::State,
 };
 
 pub fn gen_kex_initial_list(state: &mut State) -> MessageKeyExchangeInit {
-    let cookie: [u8; 16] = state.rng.gen();
+    let cookie: [u8; 16] = state.receiver.rng.gen();
 
     // suboptimal, but only done once per session opening, so let's ignore it for now
     let kex_algorithms = NameList {
@@ -81,7 +80,7 @@ pub fn gen_kex_initial_list(state: &mut State) -> MessageKeyExchangeInit {
     }
 }
 
-#[gen_serialize_impl]
+#[declare_message(KexInit)]
 #[declare_deserializable_struct]
 #[derive(Clone)]
 pub struct MessageKeyExchangeInit {
@@ -188,34 +187,16 @@ impl MessageKeyExchangeInit {
     }
 }
 
-impl<'a> Message<'a> for MessageKeyExchangeInit {
-    fn get_message_type() -> MessageType {
-        MessageType::KexInit
-    }
-}
-
-#[gen_serialize_impl]
+#[declare_message(KexEcdhInit)]
 #[declare_deserializable_struct]
 pub struct MessageKexEcdhInit<'a> {
     #[field(parser = parse_slice)]
     q_client: &'a [u8],
 }
 
-impl<'a> Message<'a> for MessageKexEcdhInit<'a> {
-    fn get_message_type() -> MessageType {
-        MessageType::KexEcdhInit
-    }
-}
-
-#[gen_serialize_impl]
+#[declare_message(KexEcdhReply)]
 pub struct MessageKexEcdhReply {
     pub k_server: SSHSlice<u8>,
     pub q_server: SSHSlice<u8>,
     pub signature: SSHSlice<u8>,
-}
-
-impl<'a> Message<'_> for MessageKexEcdhReply {
-    fn get_message_type() -> MessageType {
-        MessageType::KexEcdhReply
-    }
 }

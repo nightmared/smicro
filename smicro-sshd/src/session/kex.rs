@@ -20,7 +20,11 @@ pub struct KexSent {
 fn process(message_data: &[u8]) {
     let (_, msg) = MessageKeyExchangeInit::deserialize(message_data)?;
     debug!("Received {:?}", msg);
-    state.crypto_algs = Some(Arc::new(msg.compute_crypto_algs()?));
+
+    let crypto_algs = Arc::new(msg.compute_crypto_algs()?);
+    debug!("Cryptographic algorithms exchanged");
+    state.receiver.crypto_algs = Some(crypto_algs.clone());
+    state.sender.crypto_algs = Some(crypto_algs);
 
     let next_state = KexReceived {
         my_kex_message: self.my_kex_message.clone(),
@@ -41,21 +45,24 @@ fn process(message_data: &[u8]) {
     let (_, msg) = MessageKexEcdhInit::deserialize(message_data)?;
     debug!("Received {:?}", msg);
     let crypto_algs = state
+        .receiver
         .crypto_algs
         .as_ref()
         .ok_or(Error::MissingCryptoAlgs)?
         .clone();
-    let next_state = crypto_algs.kex().perform_key_exchange(
+    let (ecdh_reply, exchange_hash, kex_reply_sent) = crypto_algs.kex().perform_key_exchange(
         state,
-        writer,
         &msg,
         &self.my_kex_message,
         &self.peer_kex_message,
     )?;
 
-    write_message(state, writer, &MessageNewKeys {})?;
+    write_message(&mut state.sender, writer, &ecdh_reply)?;
+    state.session_identifier = Some(exchange_hash);
 
-    Ok((next, next_state))
+    write_message(&mut state.sender, writer, &MessageNewKeys {})?;
+
+    Ok((next, SessionStates::KexReplySent(kex_reply_sent)))
 }
 
 #[derive(Clone, Debug)]
@@ -75,6 +82,7 @@ fn process(message_data: &[u8]) {
     }
 
     let crypto_algs = state
+        .receiver
         .crypto_algs
         .as_ref()
         .ok_or(Error::MissingCryptoAlgs)?
@@ -91,14 +99,14 @@ fn process(message_data: &[u8]) {
     let server_cipher = crypto_algs
         .server_cipher()
         .from_key(&self.encryption_key_s2c)?;
-    let materials = SessionCryptoMaterials {
-        client_mac,
-        server_mac,
-        client_cipher,
-        server_cipher,
-    };
-
-    state.crypto_material = Some(materials);
+    state.receiver.crypto_material = Some(SessionCryptoMaterials {
+        mac: client_mac,
+        cipher: client_cipher,
+    });
+    state.sender.crypto_material = Some(SessionCryptoMaterials {
+        mac: server_mac,
+        cipher: server_cipher,
+    });
 
     Ok((
         next,

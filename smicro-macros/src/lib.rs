@@ -496,6 +496,33 @@ pub fn declare_crypto_algs_list(_attrs: TokenStream, item: TokenStream) -> Token
 
 #[proc_macro_error]
 #[proc_macro_attribute]
+pub fn declare_message(attrs: TokenStream, item: TokenStream) -> TokenStream {
+    let ast: ItemStruct = parse(item).expect("Not a function");
+    let message_type: Ident = parse(attrs).expect("Not an identifier");
+    let name = &ast.ident;
+
+    let mut lifetime = quote!();
+    for param in &ast.generics.params {
+        if let GenericParam::Lifetime(LifetimeParam { .. }) = param {
+            lifetime = quote!( 'a );
+        }
+    }
+
+    quote! {
+        #[::smicro_macros::gen_serialize_impl]
+        #ast
+
+        impl<'a> crate::messages::Message<'a> for #name<#lifetime> {
+            fn get_message_type() -> MessageType {
+                ::smicro_types::ssh::types::MessageType::#message_type
+            }
+        }
+    }
+    .into()
+}
+
+#[proc_macro_error]
+#[proc_macro_attribute]
 pub fn declare_session_state_with_allowed_message_types(
     attrs: TokenStream,
     item: TokenStream,
@@ -549,10 +576,10 @@ pub fn declare_session_state_with_allowed_message_types(
 
     quote! {
         impl crate::session::SessionState for #struct_name {
-            fn process<'a, W: ::std::io::Write>(
+            fn process<'a, const SIZE: usize>(
                 &mut self,
                 state: &mut crate::state::State,
-                writer: &mut W,
+                writer: &mut ::smicro_common::LoopingBuffer<SIZE>,
                 input: &'a mut [u8],
             ) -> Result<(&'a [u8], crate::session::SessionStates), crate::error::Error> {
                 use ::smicro_types::{
@@ -565,7 +592,7 @@ pub fn declare_session_state_with_allowed_message_types(
                 let (message_data, message_type) = match crate::parse_message_type(packet_payload) {
                     Ok(x) => x,
                     Err(_) => {
-                        crate::packet::write_message(state, writer, &crate::messages::MessageUnimplemented { sequence_number: state.sequence_number_c2s.0 })?;
+                        crate::packet::write_message(&mut state.sender, writer, &crate::messages::MessageUnimplemented { sequence_number: state.receiver.sequence_number.0 })?;
                         return Ok((next, SessionStates::#struct_name(self.clone())));
                     }
                 };

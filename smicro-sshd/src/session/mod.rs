@@ -1,4 +1,4 @@
-use std::io::Write;
+use smicro_common::LoopingBuffer;
 
 use crate::{error::Error, state::State};
 
@@ -22,10 +22,10 @@ macro_rules! define_state_list {
         }
 
         impl SessionState for SessionStates {
-            fn process<'a, W: Write>(
+            fn process<'a, const SIZE: usize>(
                 &mut self,
                 state: &mut State,
-                writer: &mut W,
+                writer: &mut LoopingBuffer<SIZE>,
                 input: &'a mut [u8],
             ) -> Result<(&'a [u8], SessionStates), Error> {
                 match self {
@@ -49,10 +49,10 @@ define_state_list!(
 );
 
 pub trait SessionState {
-    fn process<'a, W: Write>(
+    fn process<'a, const SIZE: usize>(
         &mut self,
         state: &mut State,
-        writer: &mut W,
+        writer: &mut LoopingBuffer<SIZE>,
         input: &'a mut [u8],
     ) -> Result<(&'a [u8], SessionStates), Error>;
 }
