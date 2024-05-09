@@ -3,7 +3,7 @@ use std::io::Write;
 use log::{trace, warn};
 use nom::{bytes::streaming::take, sequence::tuple, IResult};
 use rand::Rng;
-use smicro_common::LoopingBuffer;
+use smicro_common::{LoopingBuffer, LoopingBufferWriter};
 use smicro_types::{error::ParsingError, serialize::SerializePacket};
 
 use crate::{
@@ -17,9 +17,14 @@ use crate::{
 // Besides, this is the same constant as OpenSSH
 pub const MAX_PKT_SIZE: usize = 4096 * 64;
 
-pub fn write_message<'a, T: SerializePacket + Message<'a>, const SIZE: usize>(
+pub fn write_message<
+    'a,
+    T: SerializePacket + Message<'a>,
+    const SIZE: usize,
+    S: LoopingBufferWriter<SIZE>,
+>(
     sender: &mut SenderState,
-    stream: &mut LoopingBuffer<SIZE>,
+    stream: &mut S,
     payload: &T,
 ) -> Result<(), Error> {
     let mut padding = [0u8; 256];
@@ -59,7 +64,7 @@ pub fn write_message<'a, T: SerializePacket + Message<'a>, const SIZE: usize>(
 
     // the packet_length field does not count in the packet size)
     ((real_packet_length - 4) as u32).serialize(&mut output_buffer)?;
-    output_buffer.write_all(&[padding_length as u8, T::get_message_type() as u8])?;
+    output_buffer.write(&[padding_length as u8, T::get_message_type() as u8])?;
     payload.serialize(&mut output_buffer)?;
     (&padding[0..padding_length]).serialize(&mut output_buffer)?;
 

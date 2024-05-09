@@ -1,7 +1,8 @@
 use std::os::fd::{AsRawFd, RawFd};
+use std::os::linux::process::CommandExt;
 use std::process::{Command, Stdio};
 
-use smicro_common::LoopingBuffer;
+use smicro_common::{LoopingBuffer, LoopingBufferWriter};
 use smicro_macros::declare_session_state_with_allowed_message_types;
 use smicro_types::sftp::deserialize::parse_utf8_slice;
 
@@ -95,6 +96,7 @@ fn process(message_data: &[u8]) {
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
+                .create_pidfd(true)
                 .spawn()?;
 
             let set_nonblocking = |fd: RawFd| -> std::io::Result<()> {
@@ -128,8 +130,6 @@ fn process(message_data: &[u8]) {
                 };
                 write_message(&mut state.sender, writer, &success)?;
             }
-
-            state.channels.channels_changed = true;
         } else {
             let failure = MessageChannelFailure {
                 recipient_channel: chan.remote_channel_number,
@@ -140,22 +140,24 @@ fn process(message_data: &[u8]) {
         let (_, msg) = MessageChannelData::deserialize(message_data)?;
 
         let chan = state.channels.get_channel(msg.recipient_channel)?;
-        let cmd = &mut chan
-            .command
-            .as_mut()
-            .ok_or(Error::MissingCommandInChannel)?;
+        if !chan.mark_closed {
+            let cmd = &mut chan
+                .command
+                .as_mut()
+                .ok_or(Error::MissingCommandInChannel)?;
 
-        if msg.data.0.len() > chan.receiver_window_size as usize {
-            return Err(Error::ExceededChannelLength);
-        }
+            if msg.data.0.len() > chan.receiver_window_size as usize {
+                return Err(Error::ExceededChannelLength);
+            }
 
-        if let Err(_) = cmd.stdin_buffer.write(msg.data.0) {
-            return Err(Error::IoError(std::io::Error::new(
-                std::io::ErrorKind::WouldBlock,
-                "Could not write data to the stdin buffer",
-            )));
+            if let Err(_) = cmd.stdin_buffer.write(msg.data.0) {
+                return Err(Error::IoError(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "Could not write data to the stdin buffer",
+                )));
+            }
+            process_write(&mut cmd.stdin_buffer, &mut cmd.stdin)?;
         }
-        process_write(&mut cmd.stdin_buffer, &mut cmd.stdin)?;
     } else if message_type == MessageType::ChannelWindowAdjust {
         let (_, msg) = MessageChannelWindowAdjust::deserialize(message_data)?;
 

@@ -6,7 +6,7 @@ use quote::{quote, quote_spanned, ToTokens};
 use syn::{
     parse, parse::Parser, punctuated::Punctuated, spanned::Spanned, token::Comma, Attribute, Expr,
     ExprLit, ExprPath, Fields, GenericParam, ItemConst, ItemEnum, ItemFn, ItemStruct,
-    LifetimeParam, Lit, Meta, MetaNameValue, Token, Type,
+    LifetimeParam, Lit, LitBool, Meta, MetaNameValue, Token, Type,
 };
 
 struct PacketArgs {
@@ -539,47 +539,59 @@ pub fn declare_session_state_with_allowed_message_types(
         ),
     };
 
-    let args: Vec<&MetaNameValue> = attribute_args.iter().collect();
-    if args.len() != 2 {
-        abort!(attribute_args.span(), "Invalid number of arguments");
+    let mut structure = None;
+    let mut msg_type = None;
+    let mut strict_kex = false;
+    for arg in attribute_args.iter() {
+        let MetaNameValue { path, value, .. } = arg;
+        if path.get_ident().is_none() {
+            abort!(path.span(), "Not an identifier?");
+        }
+        let key = path.get_ident().unwrap().to_string();
+        match key.as_str() {
+            "structure" => {
+                structure = Some(value);
+            }
+            "msg_type" => {
+                msg_type = Some(if let Expr::Array(_) = value {
+                    quote!( #value )
+                } else {
+                    quote!( [#value] )
+                });
+            }
+            "strict_kex" => {
+                if let Expr::Lit(ExprLit {
+                    lit: Lit::Bool(LitBool { value, .. }),
+                    ..
+                }) = value
+                {
+                    strict_kex = *value;
+                } else {
+                    abort!(value.span(), "Not a boolean");
+                };
+            }
+            _ => abort!(arg.span(), "Unsupported macro parameter"),
+        }
     }
 
-    if args[0]
-        .path
-        .get_ident()
-        .expect("expected ident")
-        .to_string()
-        != "structure"
-    {
-        abort!(args[0].span(), "Invalid name for the attribute");
+    if structure.is_none() {
+        abort!(attribute_args.span(), "Missing the 'structure' argument");
+    }
+    if msg_type.is_none() {
+        abort!(attribute_args.span(), "Missing the 'msg_type' argument");
     }
 
-    if args[1]
-        .path
-        .get_ident()
-        .expect("expected ident")
-        .to_string()
-        != "msg_type"
-    {
-        abort!(args[1].span(), "Invalid name for the attribute");
-    }
-
-    let struct_name = &args[0].value;
-    let allowed_type = &args[1].value;
-    let allowed_types = if let Expr::Array(_) = allowed_type {
-        quote!( #allowed_type )
-    } else {
-        quote!( [#allowed_type] )
-    };
+    let struct_name = structure.unwrap();
+    let allowed_types = msg_type.unwrap();
 
     let fun_content = ast.block.stmts;
 
     quote! {
         impl crate::session::SessionState for #struct_name {
-            fn process<'a, const SIZE: usize>(
+            fn process<'a, const SIZE: usize, W: ::smicro_common::LoopingBufferWriter<SIZE>>(
                 &mut self,
                 state: &mut crate::state::State,
-                writer: &mut ::smicro_common::LoopingBuffer<SIZE>,
+                writer: &mut W,
                 input: &'a mut [u8],
             ) -> Result<(&'a [u8], crate::session::SessionStates), crate::error::Error> {
                 use ::smicro_types::{
@@ -599,11 +611,12 @@ pub fn declare_session_state_with_allowed_message_types(
 
                 if message_type == MessageType::Disconnect {
                     return Err(crate::error::Error::PeerTriggeredDisconnection);
-
                 }
 
-                if message_type == MessageType::Ignore || message_type == MessageType::Debug || message_type == MessageType::Unimplemented {
-                    return Ok((next, SessionStates::#struct_name(self.clone())));
+                if !#strict_kex {
+                    if message_type == MessageType::Ignore || message_type == MessageType::Debug || message_type == MessageType::Unimplemented {
+                        return Ok((next, SessionStates::#struct_name(self.clone())));
+                    }
                 }
 
                 if !#allowed_types.contains(&message_type) {

@@ -1,13 +1,14 @@
 use std::sync::Arc;
 
 use log::debug;
+use smicro_common::LoopingBuffer;
 use smicro_macros::declare_session_state_with_allowed_message_types;
 
 use crate::{
     error::Error,
     messages::{MessageKexEcdhInit, MessageKeyExchangeInit, MessageNewKeys},
-    session::ExpectsServiceRequest,
-    state::SessionCryptoMaterials,
+    session::{ExpectsServiceRequest, SessionState, SessionStates},
+    state::{SessionCryptoMaterials, State},
     write_message,
 };
 
@@ -16,7 +17,7 @@ pub struct KexSent {
     pub my_kex_message: MessageKeyExchangeInit,
 }
 
-#[declare_session_state_with_allowed_message_types(structure = KexSent, msg_type = MessageType::KexInit)]
+#[declare_session_state_with_allowed_message_types(structure = KexSent, msg_type = MessageType::KexInit, strict_kex = true)]
 fn process(message_data: &[u8]) {
     let (_, msg) = MessageKeyExchangeInit::deserialize(message_data)?;
     debug!("Received {:?}", msg);
@@ -40,7 +41,7 @@ pub struct KexReceived {
     peer_kex_message: MessageKeyExchangeInit,
 }
 
-#[declare_session_state_with_allowed_message_types(structure = KexReceived, msg_type = MessageType::KexEcdhInit)]
+#[declare_session_state_with_allowed_message_types(structure = KexReceived, msg_type = MessageType::KexEcdhInit, strict_kex = true)]
 fn process(message_data: &[u8]) {
     let (_, msg) = MessageKexEcdhInit::deserialize(message_data)?;
     debug!("Received {:?}", msg);
@@ -62,6 +63,9 @@ fn process(message_data: &[u8]) {
 
     write_message(&mut state.sender, writer, &MessageNewKeys {})?;
 
+    state.sender.sequence_number.0 = 0;
+    state.receiver.sequence_number.0 = 0;
+
     Ok((next, SessionStates::KexReplySent(kex_reply_sent)))
 }
 
@@ -75,7 +79,7 @@ pub struct KexReplySent {
     pub integrity_key_s2c: Vec<u8>,
 }
 
-#[declare_session_state_with_allowed_message_types(structure = KexReplySent, msg_type = MessageType::NewKeys)]
+#[declare_session_state_with_allowed_message_types(structure = KexReplySent, msg_type = MessageType::NewKeys, strict_kex = true)]
 fn process(message_data: &[u8]) {
     if message_data != [] {
         return Err(Error::DataInNewKeysMessage);
@@ -107,6 +111,9 @@ fn process(message_data: &[u8]) {
         mac: server_mac,
         cipher: server_cipher,
     });
+
+    state.sender.sequence_number.0 = 0;
+    state.receiver.sequence_number.0 = 0;
 
     Ok((
         next,

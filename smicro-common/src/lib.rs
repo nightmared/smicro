@@ -1,5 +1,5 @@
 use std::fmt::{Debug, Display};
-use std::io::Write;
+use std::io::{Error, ErrorKind, Write};
 
 #[derive(thiserror::Error, Debug)]
 pub enum BufferCreationError {
@@ -103,17 +103,25 @@ pub fn create_circular_buffer(
     }
 }
 
-#[derive(thiserror::Error, Debug)]
-pub struct WriteInBufferError {
-    buffer_size: usize,
-    used_size: usize,
-    requested_size: usize,
+pub trait LoopingBufferWriter<const SIZE: usize> {
+    /// Bump the buffer length by `offset` bytes (`offset` being
+    /// the number of bytes that were written in the buffer).
+    fn advance_writer_pos(&mut self, offset: usize);
+
+    /// Write data directly in the buffer
+    fn write(&mut self, buf: &[u8]) -> Result<(), Error>;
+
+    /// Return a buffer to the part that is not initialized yet
+    fn get_writable_buffer(&mut self) -> &mut [u8];
 }
 
-impl Display for WriteInBufferError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_fmt(format_args!("{:?}", self))
-    }
+pub trait LoopingBufferReader<const SIZE: usize> {
+    /// Return a buffer that contains initialized data
+    fn get_readable_data<'a>(&'a mut self) -> &'a mut [u8];
+
+    /// Decrease the buffer length by `offset` bytes (`offset` being
+    /// the number of bytes that were consumed in the buffer and can be discarded).
+    fn advance_reader_pos(&mut self, offset: usize);
 }
 
 /// A mutable circular buffer
@@ -153,46 +161,29 @@ impl<const SIZE: usize> LoopingBuffer<SIZE> {
         })
     }
 
-    /// Return a buffer that contains initialized data
-    pub fn get_readable_data<'a>(&'a mut self) -> &'a mut [u8] {
+    /// Return an 'atomic' writer.
+    /// By that, we mean atomic not in the sense of 'usable concurrently',
+    /// but in the sense that all the writes performed against it will only be commited
+    /// to the backing LoopingBuffer when calling `commit()`. This means that
+    /// all writes will be registered at once, or will not be (if an error happened
+    /// at some point).
+    pub fn get_atomic_writer<'a>(&'a mut self) -> AtomicLoopingBufferWriter<'a, SIZE> {
+        let end_pos = self.end_pos;
+        AtomicLoopingBufferWriter {
+            inner: self,
+            end_pos,
+        }
+    }
+}
+
+impl<const SIZE: usize> LoopingBufferReader<SIZE> for LoopingBuffer<SIZE> {
+    fn get_readable_data<'a>(&'a mut self) -> &'a mut [u8] {
         &mut self.buf[self.start_pos..self.end_pos]
-    }
-
-    /// Return a buffer to the part that is not initiliazed yet
-    pub fn get_writable_buffer<'a>(&'a mut self) -> &'a mut [u8] {
-        &mut self.buf[self.end_pos..SIZE + self.start_pos]
-    }
-
-    /// Bump the buffer length by `offset` bytes (`offset` being
-    /// the number of bytes that were written in the buffer).
-    pub fn advance_writer_pos(&mut self, offset: usize) {
-        let new_size = self.end_pos + offset - self.start_pos;
-        if new_size > SIZE {
-            panic!("An impossible number of bytes were written in the buffer, possible attack?");
-        }
-        self.end_pos += offset;
-    }
-
-    /// Write data directly in the buffer
-    pub fn write(&mut self, buf: &[u8]) -> Result<(), WriteInBufferError> {
-        let write_len = buf.len();
-        let new_size = self.end_pos + write_len - self.start_pos;
-        if new_size > SIZE {
-            return Err(WriteInBufferError {
-                buffer_size: SIZE,
-                used_size: self.end_pos - self.start_pos,
-                requested_size: write_len,
-            });
-        }
-
-        self.buf[self.end_pos..self.end_pos + write_len].copy_from_slice(buf);
-        self.end_pos += write_len;
-        Ok(())
     }
 
     /// Decrease the buffer length by `offset` bytes (`offset` being
     /// the number of bytes that were consumed in the buffer and can be discarded).
-    pub fn advance_reader_pos(&mut self, offset: usize) {
+    fn advance_reader_pos(&mut self, offset: usize) {
         if self.start_pos + offset > self.end_pos {
             panic!("An impossible number of bytes were read from the buffer, possible attack?");
         }
@@ -207,15 +198,72 @@ impl<const SIZE: usize> LoopingBuffer<SIZE> {
     }
 }
 
-impl<const SIZE: usize> Write for LoopingBuffer<SIZE> {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.write(buf).map(|_| buf.len()).map_err(|_| {
-            std::io::Error::new(std::io::ErrorKind::WouldBlock, "Trying to write too much")
-        })
+impl<const SIZE: usize> LoopingBufferWriter<SIZE> for LoopingBuffer<SIZE> {
+    fn advance_writer_pos(&mut self, offset: usize) {
+        let new_size = self.end_pos + offset - self.start_pos;
+        if new_size > SIZE {
+            panic!("An impossible number of bytes were written in the buffer, possible attack?");
+        }
+        self.end_pos += offset;
     }
 
-    // No-op, as we don't want to implement the capability to flush to the underlying TCP stream
-    fn flush(&mut self) -> std::io::Result<()> {
+    fn write(&mut self, buf: &[u8]) -> Result<(), Error> {
+        let write_len = buf.len();
+        let new_size = self.end_pos + write_len - self.start_pos;
+        if new_size > SIZE {
+            return Err(Error::new(
+                ErrorKind::WouldBlock,
+                "Trying to write too much",
+            ));
+        }
+
+        self.buf[self.end_pos..self.end_pos + write_len].copy_from_slice(buf);
+        self.end_pos += write_len;
         Ok(())
+    }
+
+    fn get_writable_buffer(&mut self) -> &mut [u8] {
+        &mut self.buf[self.end_pos..SIZE + self.start_pos]
+    }
+}
+
+pub struct AtomicLoopingBufferWriter<'a, const SIZE: usize> {
+    inner: &'a mut LoopingBuffer<SIZE>,
+    end_pos: usize,
+}
+
+impl<'a, const SIZE: usize> AtomicLoopingBufferWriter<'a, SIZE> {
+    pub fn commit(self) {
+        self.inner
+            .advance_writer_pos(self.end_pos - self.inner.end_pos);
+    }
+}
+
+impl<'a, const SIZE: usize> LoopingBufferWriter<SIZE> for AtomicLoopingBufferWriter<'a, SIZE> {
+    fn advance_writer_pos(&mut self, offset: usize) {
+        let new_size = self.end_pos + offset - self.inner.start_pos;
+        if new_size > SIZE {
+            panic!("An impossible number of bytes were written in the buffer, possible attack?");
+        }
+        self.end_pos += offset;
+    }
+
+    fn write(&mut self, buf: &[u8]) -> Result<(), Error> {
+        let write_len = buf.len();
+        let new_size = self.end_pos + write_len - self.inner.start_pos;
+        if new_size > SIZE {
+            return Err(Error::new(
+                ErrorKind::WouldBlock,
+                "Trying to write too much",
+            ));
+        }
+
+        self.inner.buf[self.end_pos..self.end_pos + write_len].copy_from_slice(buf);
+        self.end_pos += write_len;
+        Ok(())
+    }
+
+    fn get_writable_buffer(&mut self) -> &mut [u8] {
+        &mut self.inner.buf[self.end_pos..SIZE + self.inner.start_pos]
     }
 }

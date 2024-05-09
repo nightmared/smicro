@@ -29,8 +29,12 @@ pub fn gen_kex_initial_list(state: &mut State) -> MessageKeyExchangeInit {
     let cookie: [u8; 16] = state.receiver.rng.gen();
 
     // suboptimal, but only done once per session opening, so let's ignore it for now
+    let mut kex_algorithms: Vec<String> =
+        KEX_ALGORITHMS_NAMES.iter().map(|x| x.to_string()).collect();
+    // advertise support for strict key checking
+    kex_algorithms.push("kex-strict-s-v00@openssh.com".to_string());
     let kex_algorithms = NameList {
-        entries: KEX_ALGORITHMS_NAMES.iter().map(|x| x.to_string()).collect(),
+        entries: kex_algorithms,
     };
 
     let server_host_key_algorithms = NameList {

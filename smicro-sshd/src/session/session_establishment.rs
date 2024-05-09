@@ -8,7 +8,7 @@ use nom::{
     sequence::preceded,
     AsChar,
 };
-use smicro_common::LoopingBuffer;
+use smicro_common::{LoopingBuffer, LoopingBufferWriter};
 
 use crate::{
     error::Error,
@@ -22,15 +22,15 @@ use crate::{
 pub struct UninitializedSession {}
 
 impl SessionState for UninitializedSession {
-    fn process<'a, const SIZE: usize>(
+    fn process<'a, const SIZE: usize, W: LoopingBufferWriter<SIZE>>(
         &mut self,
         state: &mut State,
-        writer: &mut LoopingBuffer<SIZE>,
+        writer: &mut W,
         input: &'a mut [u8],
     ) -> Result<(&'a [u8], SessionStates), Error> {
         // Write the identification string
-        writer.write_all(state.my_identifier_string.as_bytes())?;
-        writer.write_all(b"\r\n")?;
+        writer.write(state.my_identifier_string.as_bytes())?;
+        writer.write(b"\r\n")?;
         Ok((
             input,
             SessionStates::IdentifierStringSent(IdentifierStringSent {}),
@@ -42,10 +42,10 @@ impl SessionState for UninitializedSession {
 pub struct IdentifierStringSent {}
 
 impl SessionState for IdentifierStringSent {
-    fn process<'a, const SIZE: usize>(
+    fn process<'a, const SIZE: usize, W: LoopingBufferWriter<SIZE>>(
         &mut self,
         state: &mut State,
-        _writer: &mut LoopingBuffer<SIZE>,
+        _writer: &mut W,
         input: &'a mut [u8],
     ) -> Result<(&'a [u8], SessionStates), Error> {
         let input = input as &[u8];
@@ -93,10 +93,10 @@ impl SessionState for IdentifierStringSent {
 pub struct IdentifierStringReceived {}
 
 impl SessionState for IdentifierStringReceived {
-    fn process<'a, const SIZE: usize>(
+    fn process<'a, const SIZE: usize, W: LoopingBufferWriter<SIZE>>(
         &mut self,
         state: &mut State,
-        writer: &mut LoopingBuffer<SIZE>,
+        writer: &mut W,
         input: &'a mut [u8],
     ) -> Result<(&'a [u8], SessionStates), Error> {
         debug!("Sending the MessageKeyExchangeInit packet");

@@ -1,10 +1,13 @@
+#![feature(linux_pidfd)]
+
 use std::{
     cmp::min,
     collections::HashSet,
     io::{ErrorKind, Read, Write},
     net::SocketAddr,
-    os::fd::AsRawFd,
+    os::{fd::AsRawFd, linux::process::ChildExt},
     path::Path,
+    process::ExitStatus,
     str::FromStr,
     thread,
 };
@@ -15,9 +18,12 @@ use mio::{
     unix::SourceFd,
     Events, Interest, Poll, Token,
 };
+use state::channel::{Channel, ChannelCommand};
 use syslog::{BasicLogger, Facility, Formatter3164};
 
-use smicro_common::LoopingBuffer;
+use smicro_common::{
+    AtomicLoopingBufferWriter, LoopingBuffer, LoopingBufferReader, LoopingBufferWriter,
+};
 use smicro_types::{
     deserialize::DeserializePacket,
     ssh::{
@@ -52,7 +58,8 @@ fn handle_packet<const SIZE: usize>(
 ) -> Result<(), Error> {
     let available_data = buf.get_readable_data();
     let available_data_len = available_data.len();
-    let res = session.process(state, writer, available_data);
+    let mut atomic_writer = writer.get_atomic_writer();
+    let res = session.process(state, &mut atomic_writer, available_data);
     match res {
         Err(e) => match e {
             Error::ParsingError(nom::Err::Incomplete(_)) | Error::PeerTriggeredDisconnection => {
@@ -62,12 +69,12 @@ fn handle_packet<const SIZE: usize>(
             Error::ParsingError(e) => {
                 error!("Got an error while trying to parse the packet: {:?}", e);
                 debug!("The data that triggered the error was: {:?}", buf);
-
                 let _ = write_message(
                     &mut state.sender,
                     writer,
                     &MessageDisconnect::new(DisconnectReason::ProtocolError),
                 );
+
                 return Err(Error::InvalidPacket);
             }
             Error::DisallowedMessageType(MessageType::Ignore | MessageType::Debug) => {}
@@ -85,6 +92,9 @@ fn handle_packet<const SIZE: usize>(
         },
         Ok((next_data, new_session)) => {
             *session = new_session;
+
+            // register the writes so they can be sent to the client
+            atomic_writer.commit();
 
             let read_data = available_data_len - next_data.len();
             buf.advance_reader_pos(read_data);
@@ -159,9 +169,6 @@ fn handle_packets<const SIZE: usize>(
     state: &mut State,
 ) -> Result<(), Error> {
     loop {
-        if reader_buf.get_readable_data().len() == 0 {
-            return Ok(());
-        }
         match handle_packet(reader_buf, sender_buf, session, state) {
             Ok(_) => {}
             Err(Error::ParsingError(nom::Err::Incomplete(_))) => {
@@ -217,45 +224,43 @@ fn flush_data_to_channel<const INPUT_SIZE: usize, const SIZE: usize>(
     }
 }
 
-fn handle_channel_data<const SIZE: usize>(
-    sender_buf: &mut LoopingBuffer<SIZE>,
-    event_token: Token,
-    state: &mut State,
-) -> Result<(), Error> {
-    let channel_number = (event_token.0 / 4) as u32;
-    if let Some(chan) = state.channels.channels.get_mut(&channel_number) {
-        let cmd = chan
-            .command
-            .as_mut()
-            .ok_or(Error::MissingCommandInChannel)?;
-        if event_token.0 % 4 == 0 {
-            // stdin
-            process_write(&mut cmd.stdin_buffer, &mut cmd.stdin)?;
-        } else if event_token.0 % 4 == 1 {
-            // stdout
-            process_read(&mut cmd.stdout_buffer, &mut cmd.stdout)?;
-        } else if event_token.0 % 4 == 2 {
-            // stderr
-            process_read(&mut cmd.stderr_buffer, &mut cmd.stderr)?;
-        } else {
-        }
+fn handle_channel_message(event_token: Token, chan: &mut Channel) -> Result<(), Error> {
+    let cmd = chan
+        .command
+        .as_mut()
+        .ok_or(Error::MissingCommandInChannel)?;
 
-        flush_data_to_channel(
-            sender_buf,
-            &mut cmd.stderr_buffer,
-            chan.remote_channel_number,
-            chan.max_pkt_size,
-            &mut state.sender,
-            true,
-        )?;
-        flush_data_to_channel(
-            sender_buf,
-            &mut cmd.stdout_buffer,
-            chan.remote_channel_number,
-            chan.max_pkt_size,
-            &mut state.sender,
-            false,
-        )?;
+    if event_token.0 % 4 == 0 {
+        // stdin
+        process_write(&mut cmd.stdin_buffer, &mut cmd.stdin)?;
+    } else if event_token.0 % 4 == 1 {
+        // stdout
+        process_read(&mut cmd.stdout_buffer, &mut cmd.stdout)?;
+    } else if event_token.0 % 4 == 2 {
+        // stderr
+        process_read(&mut cmd.stderr_buffer, &mut cmd.stderr)?;
+    } else if event_token.0 % 4 == 3 {
+        // maybe the process exited?
+        if let Ok(_) = cmd.command.try_wait() {
+            chan.mark_closed = true;
+        }
+    }
+    Ok(())
+}
+
+fn handle_channel_data(event_token: Token, state: &mut State) -> Result<(), Error> {
+    let channel_number = (event_token.0 / 4) as u32;
+    if let Ok(chan) = state.channels.get_channel(channel_number) {
+        match handle_channel_message(event_token, chan) {
+            Ok(()) => {}
+            Err(Error::ConnectionClosed) => {
+                // TODO: do something
+                return Ok(());
+            }
+            Err(e) => {
+                return Err(e);
+            }
+        }
     } else {
         warn!(
             "Got data for a channel ({}) that does not exist",
@@ -304,49 +309,81 @@ fn handle_stream(mut stream: TcpStream) -> Result<(), Error> {
                     handle_packets(&mut reader_buf, &mut sender_buf, &mut session, &mut state)?;
                 }
             } else {
-                handle_channel_data(&mut sender_buf, event_token, &mut state)?;
+                handle_channel_data(event_token, &mut state)?;
             }
+
+            for (_, chan) in state.channels.channels.iter_mut() {
+                let recipient_channel = chan.remote_channel_number;
+                let max_pkt_size = chan.max_pkt_size;
+                if let Some(ref mut cmd) = chan.command {
+                    if cmd.stderr_buffer.get_readable_data().len() > 0 {
+                        flush_data_to_channel(
+                            &mut sender_buf,
+                            &mut cmd.stderr_buffer,
+                            recipient_channel,
+                            max_pkt_size,
+                            &mut state.sender,
+                            true,
+                        )?;
+                    }
+                    if cmd.stdout_buffer.get_readable_data().len() > 0 {
+                        flush_data_to_channel(
+                            &mut sender_buf,
+                            &mut cmd.stdout_buffer,
+                            recipient_channel,
+                            max_pkt_size,
+                            &mut state.sender,
+                            false,
+                        )?;
+                    }
+                }
+            }
+
             if sender_buf.get_readable_data().len() > 0 {
                 process_write(&mut sender_buf, &mut stream)?;
             }
         }
 
-        if state.channels.channels_changed {
-            for (&chan_number, chan) in state.channels.channels.iter() {
-                if let Some(cmd) = &chan.command {
-                    if registered_channels.insert(chan_number) {
-                        debug!("Registering channel {}", chan_number);
-                        let token_base = chan_number as usize * 4;
-                        let stdin_fd = cmd.stdin.as_raw_fd();
-                        poll.registry().register(
-                            &mut SourceFd(&stdin_fd),
-                            Token(token_base),
-                            Interest::WRITABLE,
-                        )?;
+        for (&chan_number, chan) in state.channels.channels.iter() {
+            // once a channel has stopped writting data and is closed, we can terminate it
+            if let Some(cmd) = &chan.command {
+                if registered_channels.insert(chan_number) {
+                    debug!("Registering channel {}", chan_number);
+                    let token_base = chan_number as usize * 4;
+                    let stdin_fd = cmd.stdin.as_raw_fd();
+                    poll.registry().register(
+                        &mut SourceFd(&stdin_fd),
+                        Token(token_base),
+                        Interest::WRITABLE,
+                    )?;
+                    let stdout_fd = cmd.stdout.as_raw_fd();
+                    poll.registry().register(
+                        &mut SourceFd(&stdout_fd),
+                        Token(token_base + 1),
+                        Interest::READABLE,
+                    )?;
+                    let stderr_fd = cmd.stderr.as_raw_fd();
+                    poll.registry().register(
+                        &mut SourceFd(&stderr_fd),
+                        Token(token_base + 2),
+                        Interest::READABLE,
+                    )?;
 
-                        let stdout_fd = cmd.stdout.as_raw_fd();
-                        poll.registry().register(
-                            &mut SourceFd(&stdout_fd),
-                            Token(token_base + 1),
-                            Interest::READABLE,
-                        )?;
-                        let stderr_fd = cmd.stderr.as_raw_fd();
-                        poll.registry().register(
-                            &mut SourceFd(&stderr_fd),
-                            Token(token_base + 2),
-                            Interest::READABLE,
-                        )?;
-                    }
+                    poll.registry().register(
+                        &mut SourceFd(&cmd.command.pidfd()?.as_raw_fd()),
+                        Token(token_base + 3),
+                        Interest::READABLE,
+                    )?;
                 }
             }
-            for chan_number in registered_channels.iter() {
-                if !state.channels.channels.contains_key(chan_number) {
-                    debug!("Unregistering channel {}", chan_number);
-                    let fd_base = *chan_number as i32 * 4;
-                    poll.registry().deregister(&mut SourceFd(&fd_base))?;
-                    poll.registry().deregister(&mut SourceFd(&(fd_base + 1)))?;
-                    poll.registry().deregister(&mut SourceFd(&(fd_base + 2)))?;
-                }
+        }
+        for chan_number in registered_channels.iter() {
+            if !state.channels.channels.contains_key(chan_number) {
+                debug!("Unregistering channel {}", chan_number);
+                let fd_base = *chan_number as i32 * 4;
+                poll.registry().deregister(&mut SourceFd(&fd_base))?;
+                poll.registry().deregister(&mut SourceFd(&(fd_base + 1)))?;
+                poll.registry().deregister(&mut SourceFd(&(fd_base + 2)))?;
             }
         }
     }
@@ -362,7 +399,7 @@ fn main() -> Result<(), Error> {
 
     let logger = syslog::unix(formatter)?;
     log::set_boxed_logger(Box::new(BasicLogger::new(logger)))
-        .map(|()| log::set_max_level(LevelFilter::Info))?;
+        .map(|()| log::set_max_level(LevelFilter::Debug))?;
 
     let mut listener = TcpListener::bind(SocketAddr::from_str("127.0.0.1:2222")?)?;
 

@@ -24,6 +24,7 @@ pub struct Channel {
     pub receiver_window_size: u32,
     pub sender_window_size: u32,
     pub max_pkt_size: u32,
+    pub mark_closed: bool,
     pub command: Option<ChannelCommand>,
 }
 
@@ -40,7 +41,6 @@ pub enum ChannelAllocationError {
 #[derive(Debug)]
 pub struct ChannelManager {
     pub channels: HashMap<u32, Channel>,
-    pub channels_changed: bool,
     pub num_channels: u32,
 }
 
@@ -48,7 +48,6 @@ impl ChannelManager {
     pub fn new() -> Self {
         ChannelManager {
             channels: HashMap::new(),
-            channels_changed: false,
             num_channels: 0,
         }
     }
@@ -73,6 +72,7 @@ impl ChannelManager {
                 receiver_window_size: window_size,
                 sender_window_size: window_size,
                 max_pkt_size,
+                mark_closed: false,
                 command: None,
             },
         );
@@ -83,6 +83,13 @@ impl ChannelManager {
     pub fn get_channel(&mut self, chan_number: u32) -> Result<&mut Channel, Error> {
         self.channels
             .get_mut(&chan_number)
+            .ok_or(Error::MissingCommandInChannel)
+    }
+
+    pub fn remove_channel(&mut self, chan_number: u32) -> Result<(), Error> {
+        self.channels
+            .remove(&chan_number)
+            .map(|_| ())
             .ok_or(Error::MissingCommandInChannel)
     }
 }
