@@ -13,6 +13,7 @@ use std::{
 };
 
 use log::{debug, error, info, trace, warn, LevelFilter};
+use messages::MessageChannelWindowAdjust;
 use mio::{
     net::{TcpListener, TcpStream},
     unix::SourceFd,
@@ -21,9 +22,7 @@ use mio::{
 use state::channel::{Channel, ChannelCommand};
 use syslog::{BasicLogger, Facility, Formatter3164};
 
-use smicro_common::{
-    AtomicLoopingBufferWriter, LoopingBuffer, LoopingBufferReader, LoopingBufferWriter,
-};
+use smicro_common::{LoopingBuffer, LoopingBufferReader, LoopingBufferWriter};
 use smicro_types::{
     deserialize::DeserializePacket,
     ssh::{
@@ -104,9 +103,9 @@ fn handle_packet<const SIZE: usize>(
     Ok(())
 }
 
-fn process_read<const SIZE: usize, R: Read + ?Sized>(
-    reader_buf: &mut LoopingBuffer<SIZE>,
+fn read_stream_to_buffer<const SIZE: usize, R: Read + ?Sized>(
     stream: &mut R,
+    reader_buf: &mut LoopingBuffer<SIZE>,
 ) -> Result<(), Error> {
     loop {
         // Read enough data to hold *at least* a packet, but without overwriting previous
@@ -134,7 +133,7 @@ fn process_read<const SIZE: usize, R: Read + ?Sized>(
     Ok(())
 }
 
-fn process_write<const SIZE: usize, W: Write + ?Sized>(
+fn write_buffer_to_stream<const SIZE: usize, W: Write + ?Sized>(
     sender_buf: &mut LoopingBuffer<SIZE>,
     stream: &mut W,
 ) -> Result<(), Error> {
@@ -189,17 +188,38 @@ fn flush_data_to_channel<const INPUT_SIZE: usize, const SIZE: usize>(
     sender_buf: &mut LoopingBuffer<SIZE>,
     input_buf: &mut LoopingBuffer<INPUT_SIZE>,
     recipient_channel: u32,
-    max_pkt_size: u32,
+    max_chan_pkt_size: u32,
+    sender_window_size: &mut u32,
     sender: &mut SenderState,
     is_stderr: bool,
 ) -> Result<(), Error> {
     let readable_data = input_buf.get_readable_data();
 
+    if *sender_window_size < MAX_PKT_SIZE as u32 {
+        match write_message(
+            sender,
+            sender_buf,
+            &MessageChannelWindowAdjust {
+                recipient_channel,
+                bytes_to_add: MAX_PKT_SIZE as u32,
+            },
+        ) {
+            Ok(()) => {
+                *sender_window_size += MAX_PKT_SIZE as u32;
+            }
+            Err(Error::IoError(e)) if e.kind() == ErrorKind::WouldBlock => {
+                return Ok(());
+            }
+            Err(e) => {
+                return Err(e);
+            }
+        }
+    }
+
     // 32 is chosen arbitrarily to represent the packet overhead
-    let max_write_size = max_pkt_size as usize - 32;
-    let data = &readable_data[0..min(readable_data.len(), max_write_size)];
-    let data_len = data.len();
-    let data = SharedSSHSlice(data);
+    let max_write_size = max_chan_pkt_size as usize - 32;
+    let data_len = min(readable_data.len(), max_write_size);
+    let data = SharedSSHSlice(&readable_data[0..data_len]);
     let res = if is_stderr {
         let channel_data = MessageChannelExtendedData {
             recipient_channel,
@@ -232,13 +252,13 @@ fn handle_channel_message(event_token: Token, chan: &mut Channel) -> Result<(), 
 
     if event_token.0 % 4 == 0 {
         // stdin
-        process_write(&mut cmd.stdin_buffer, &mut cmd.stdin)?;
+        write_buffer_to_stream(&mut cmd.stdin_buffer, &mut cmd.stdin)?;
     } else if event_token.0 % 4 == 1 {
         // stdout
-        process_read(&mut cmd.stdout_buffer, &mut cmd.stdout)?;
+        read_stream_to_buffer(&mut cmd.stdout, &mut cmd.stdout_buffer)?;
     } else if event_token.0 % 4 == 2 {
         // stderr
-        process_read(&mut cmd.stderr_buffer, &mut cmd.stderr)?;
+        read_stream_to_buffer(&mut cmd.stderr, &mut cmd.stderr_buffer)?;
     } else if event_token.0 % 4 == 3 {
         // maybe the process exited?
         if let Ok(_) = cmd.command.try_wait() {
@@ -254,7 +274,7 @@ fn handle_channel_data(event_token: Token, state: &mut State) -> Result<(), Erro
         match handle_channel_message(event_token, chan) {
             Ok(()) => {}
             Err(Error::ConnectionClosed) => {
-                // TODO: do something
+                chan.mark_closed = true;
                 return Ok(());
             }
             Err(e) => {
@@ -302,10 +322,10 @@ fn handle_stream(mut stream: TcpStream) -> Result<(), Error> {
             if event_token == stream_token {
                 // flush whatever data we couldn't write previously
                 if ev.is_writable() {
-                    process_write(&mut sender_buf, &mut stream)?;
+                    write_buffer_to_stream(&mut sender_buf, &mut stream)?;
                 }
                 if ev.is_readable() {
-                    process_read(&mut reader_buf, &mut stream)?;
+                    read_stream_to_buffer(&mut stream, &mut reader_buf)?;
                     handle_packets(&mut reader_buf, &mut sender_buf, &mut session, &mut state)?;
                 }
             } else {
@@ -313,15 +333,14 @@ fn handle_stream(mut stream: TcpStream) -> Result<(), Error> {
             }
 
             for (_, chan) in state.channels.channels.iter_mut() {
-                let recipient_channel = chan.remote_channel_number;
-                let max_pkt_size = chan.max_pkt_size;
                 if let Some(ref mut cmd) = chan.command {
                     if cmd.stderr_buffer.get_readable_data().len() > 0 {
                         flush_data_to_channel(
                             &mut sender_buf,
                             &mut cmd.stderr_buffer,
-                            recipient_channel,
-                            max_pkt_size,
+                            chan.remote_channel_number,
+                            chan.max_pkt_size,
+                            &mut chan.sender_window_size,
                             &mut state.sender,
                             true,
                         )?;
@@ -330,8 +349,9 @@ fn handle_stream(mut stream: TcpStream) -> Result<(), Error> {
                         flush_data_to_channel(
                             &mut sender_buf,
                             &mut cmd.stdout_buffer,
-                            recipient_channel,
-                            max_pkt_size,
+                            chan.remote_channel_number,
+                            chan.max_pkt_size,
+                            &mut chan.sender_window_size,
                             &mut state.sender,
                             false,
                         )?;
@@ -340,7 +360,7 @@ fn handle_stream(mut stream: TcpStream) -> Result<(), Error> {
             }
 
             if sender_buf.get_readable_data().len() > 0 {
-                process_write(&mut sender_buf, &mut stream)?;
+                write_buffer_to_stream(&mut sender_buf, &mut stream)?;
             }
         }
 

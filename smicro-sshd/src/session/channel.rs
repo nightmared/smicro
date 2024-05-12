@@ -13,9 +13,8 @@ use crate::{
         MessageChannelOpenConfirmation, MessageChannelOpenFailure, MessageChannelRequest,
         MessageChannelSuccess, MessageChannelWindowAdjust,
     },
-    process_write,
     state::channel::ChannelCommand,
-    write_message,
+    write_buffer_to_stream, write_message,
 };
 
 #[derive(Clone, Debug)]
@@ -156,7 +155,7 @@ fn process(message_data: &[u8]) {
                     "Could not write data to the stdin buffer",
                 )));
             }
-            process_write(&mut cmd.stdin_buffer, &mut cmd.stdin)?;
+            write_buffer_to_stream(&mut cmd.stdin_buffer, &mut cmd.stdin)?;
         }
     } else if message_type == MessageType::ChannelWindowAdjust {
         let (_, msg) = MessageChannelWindowAdjust::deserialize(message_data)?;
