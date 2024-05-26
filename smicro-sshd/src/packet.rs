@@ -135,8 +135,7 @@ fn parse_plaintext_packet<'a>(
     }
 
     let (input, payload) = take(length - padding_length as u32 - 1)(input)?;
-    // TODO: check the padding
-    let (input, padding) = take(padding_length)(input)?;
+    let (input, _padding) = take(padding_length)(input)?;
 
     Ok((input, payload))
 }

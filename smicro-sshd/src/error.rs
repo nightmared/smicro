@@ -86,6 +86,8 @@ pub enum Error {
     MissingCommandInChannel,
     #[error("Requested to increase the window size beyond 4GB: aborting")]
     ExceededChannelLength,
+    #[error("Could not register or unregister a channel")]
+    RegistrationManagementError(#[source] std::io::Error),
 }
 
 #[derive(thiserror::Error, Debug)]

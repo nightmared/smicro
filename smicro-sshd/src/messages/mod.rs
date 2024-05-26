@@ -181,6 +181,7 @@ pub struct MessageChannelOpenConfirmation {
     pub max_pkt_size: u32,
 }
 
+#[declare_message(ChannelRequest)]
 #[declare_deserializable_struct]
 pub struct MessageChannelRequest<'a> {
     #[field(parser = be_u32)]
@@ -242,4 +243,18 @@ pub struct MessageChannelWindowAdjust {
     pub recipient_channel: u32,
     #[field(parser = be_u32)]
     pub bytes_to_add: u32,
+}
+
+#[declare_message(ChannelEof)]
+#[declare_deserializable_struct]
+pub struct MessageChannelEof {
+    #[field(parser = be_u32)]
+    pub recipient_channel: u32,
+}
+
+#[declare_message(ChannelClose)]
+#[declare_deserializable_struct]
+pub struct MessageChannelClose {
+    #[field(parser = be_u32)]
+    pub recipient_channel: u32,
 }

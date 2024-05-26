@@ -3,6 +3,7 @@ use std::{
     process::{ChildStderr, ChildStdin, ChildStdout},
 };
 
+use log::trace;
 use smicro_common::{BufferCreationError, LoopingBuffer};
 
 use crate::{error::Error, packet::MAX_PKT_SIZE};
@@ -18,13 +19,30 @@ pub struct ChannelCommand {
     pub stderr_buffer: LoopingBuffer<MAX_PKT_SIZE>,
 }
 
+impl Drop for ChannelCommand {
+    fn drop(&mut self) {
+        trace!("Dropping the command part of a channel");
+        self.command
+            .kill()
+            .expect("Could not kill the child process");
+    }
+}
+
+#[derive(PartialEq, Debug)]
+pub enum ChannelState {
+    Running,
+    StoppedWithStatus(i32),
+    Closed,
+    Shutdowned,
+}
+
 #[derive(Debug)]
 pub struct Channel {
     pub remote_channel_number: u32,
     pub receiver_window_size: u32,
     pub sender_window_size: u32,
     pub max_pkt_size: u32,
-    pub mark_closed: bool,
+    pub state: ChannelState,
     pub command: Option<ChannelCommand>,
 }
 
@@ -72,7 +90,7 @@ impl ChannelManager {
                 receiver_window_size: window_size,
                 sender_window_size: window_size,
                 max_pkt_size,
-                mark_closed: false,
+                state: ChannelState::Running,
                 command: None,
             },
         );

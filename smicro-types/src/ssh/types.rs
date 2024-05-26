@@ -29,6 +29,8 @@ pub enum MessageType {
     ChannelWindowAdjust = 93,
     ChannelData = 94,
     ChannelExtendedData = 95,
+    ChannelEof = 96,
+    ChannelClose = 97,
     ChannelRequest = 98,
     ChannelSuccess = 99,
     ChannelFailure = 100,

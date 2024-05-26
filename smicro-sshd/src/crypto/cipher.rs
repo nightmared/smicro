@@ -148,7 +148,10 @@ impl Cipher for Chacha20Poly1305Impl {
 
         // decrypt in place
         input[0..4].copy_from_slice(pkt_size.to_be_bytes().as_slice());
-        self.cipher_main_message(&mut input[4..], sequence_number);
+        self.cipher_main_message(
+            &mut input[4..4 + pkt_size as usize + poly1305::BLOCK_SIZE],
+            sequence_number,
+        );
 
         let next_data = &input[poly1305::BLOCK_SIZE + 4 + pkt_size as usize..];
         let cur_pkt_plaintext = &input[..4 + pkt_size as usize];
