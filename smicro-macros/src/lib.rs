@@ -104,6 +104,7 @@ pub fn gen_serialize_impl(_attrs: TokenStream, item: TokenStream) -> TokenStream
 pub fn declare_response_packet(attrs: TokenStream, item: TokenStream) -> TokenStream {
     let ast: ItemStruct = parse(item.clone()).unwrap();
     let name = &ast.ident;
+    let generics = &ast.generics;
 
     let args = parse_packet_args(attrs);
 
@@ -114,7 +115,7 @@ pub fn declare_response_packet(attrs: TokenStream, item: TokenStream) -> TokenSt
         #[smicro_macros::gen_serialize_impl]
         #ast
 
-        impl crate::response::ResponsePacket for #name {
+        impl #generics crate::response::ResponsePacket for #name #generics {
             fn get_type(&self) -> ResponseType {
                 #ty
             }
@@ -586,6 +587,22 @@ pub fn declare_session_state_with_allowed_message_types(
 
     let fun_content = ast.block.stmts;
 
+    let handle_messages_part = if !strict_kex {
+        quote! (
+            if message_type == MessageType::Ignore || message_type == MessageType::Debug || message_type == MessageType::Unimplemented {
+                return Ok((next, SessionStates::#struct_name(self.clone())));
+            }
+
+            if message_type == MessageType::KexInit {
+                log::info!("Renegotiating a new key");
+                let kex_sent = crate::session::kex::renegotiate_kex(state, writer)?;
+                return kex_sent.process_kexinit(state, message_data, next);
+            }
+        )
+    } else {
+        quote!()
+    };
+
     quote! {
         impl crate::session::SessionState for #struct_name {
             fn process<'a, const SIZE: usize, W: ::smicro_common::LoopingBufferWriter<SIZE>>(
@@ -613,11 +630,7 @@ pub fn declare_session_state_with_allowed_message_types(
                     return Err(crate::error::Error::PeerTriggeredDisconnection);
                 }
 
-                if !#strict_kex {
-                    if message_type == MessageType::Ignore || message_type == MessageType::Debug || message_type == MessageType::Unimplemented {
-                        return Ok((next, SessionStates::#struct_name(self.clone())));
-                    }
-                }
+                #handle_messages_part
 
                 if !#allowed_types.contains(&message_type) {
                     return Err(crate::error::Error::DisallowedMessageType(message_type));

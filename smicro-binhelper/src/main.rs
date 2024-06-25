@@ -7,7 +7,7 @@ use std::{
 use log::{debug, error, info, trace, LevelFilter};
 use nom::{Err, IResult};
 use smicro_common::create_circular_buffer;
-use syslog::{BasicLogger, Facility, Formatter3164};
+use syslog::Facility;
 
 use smicro_types::{
     error::ParsingError,
@@ -112,21 +112,14 @@ pub fn parse_command(
 }
 
 fn main() -> Result<(), Error> {
-    let formatter = Formatter3164 {
-        facility: Facility::LOG_USER,
-        hostname: None,
-        process: "smicro_sftp".into(),
-        pid: 0,
-    };
-
-    let logger = syslog::unix(formatter)?;
-    log::set_boxed_logger(Box::new(BasicLogger::new(logger)))
-        .map(|()| log::set_max_level(LevelFilter::Info))?;
+    syslog::init(Facility::LOG_USER, LevelFilter::Info, Some("smicro_sftp"))?;
 
     let mut input = stdin().lock();
     // We do not use std::io::stdout() as it uses internally a LineWriter method that consumes a lot of CPu
     // searching for newlines
     let mut output = unsafe { File::from_raw_fd(libc::STDOUT_FILENO) };
+
+    info!("smicro_sftp binary helper started");
 
     let buf = create_circular_buffer(MAX_PKT_SIZE)?;
     let mut data_start = 0;

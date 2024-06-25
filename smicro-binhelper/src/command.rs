@@ -20,14 +20,17 @@ use nom::{
 };
 
 use smicro_macros::declare_deserializable_struct;
-use smicro_types::sftp::{
-    deserialize::{
-        parse_attrs, parse_open_modes, parse_pathbuf, parse_slice, parse_utf8_slice,
-        parse_utf8_string, parse_version, PacketHeader,
-    },
-    types::{Attrs, AttrsFlags, CommandType, Extension, OpenModes, Stat},
-};
 use smicro_types::{deserialize::DeserializePacket, error::ParsingError, sftp::types::StatusCode};
+use smicro_types::{
+    sftp::{
+        deserialize::{
+            parse_attrs, parse_open_modes, parse_pathbuf, parse_slice, parse_utf8_slice,
+            parse_utf8_string, parse_version, PacketHeader,
+        },
+        types::{Attrs, AttrsFlags, CommandType, Extension, OpenModes, Stat},
+    },
+    ssh::types::SharedSSHSlice,
+};
 
 use crate::{
     error::Error,
@@ -278,7 +281,7 @@ impl Command for CommandRead {
         }
 
         Ok(ResponseWrapper::Data(ResponseData {
-            data: unsafe { &READ_BUF[..nb_read] },
+            data: unsafe { SharedSSHSlice(&READ_BUF[..nb_read]) },
         }))
     }
 }

@@ -2,14 +2,14 @@ use std::os::fd::{AsRawFd, RawFd};
 use std::os::linux::process::CommandExt;
 use std::process::{Command, Stdio};
 
-use log::debug;
+use log::{debug, warn};
 use smicro_common::{LoopingBuffer, LoopingBufferWriter};
 use smicro_macros::declare_session_state_with_allowed_message_types;
 use smicro_types::sftp::deserialize::parse_utf8_slice;
-use smicro_types::ssh::types::MessageType;
 
-use crate::messages::{self, MessageChannelClose};
-use crate::state::channel::ChannelState;
+use crate::messages::{MessageChannelClose, MessageChannelEof};
+use crate::state::channel::{Channel, ChannelState};
+use crate::state::SenderState;
 use crate::{
     error::Error,
     messages::{
@@ -18,7 +18,7 @@ use crate::{
         MessageChannelSuccess, MessageChannelWindowAdjust,
     },
     state::channel::ChannelCommand,
-    write_buffer_to_stream, write_message,
+    write_message,
 };
 
 #[derive(Clone, Debug)]
@@ -78,6 +78,100 @@ fn process(message_data: &[u8]) {
 #[derive(Clone, Debug)]
 pub struct AcceptsChannelMessages {}
 
+fn spawn_command(command: &str, with_env: bool) -> Result<ChannelCommand, Error> {
+    // Shell injection FTW!
+    // More seriously though, this will be acceptable because the user was identified
+    // and this will be executed with the privileges of that target user once
+    // smico properly switches rights before exec.
+    let mut inner_command = if with_env {
+        Command::new("/usr/bin/env")
+    } else {
+        Command::new(command)
+    };
+    let mut cmd = if with_env {
+        inner_command.arg("sh").arg("-c").arg(command)
+    } else {
+        &mut inner_command
+    }
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .create_pidfd(true)
+    .spawn()?;
+
+    let set_nonblocking = |fd: RawFd| -> std::io::Result<()> {
+        let value = 1 as libc::c_int;
+        if unsafe { libc::ioctl(fd, libc::FIONBIO, &value) } == -1 {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    };
+
+    let stdin = cmd.stdin.take().ok_or(Error::InvalidStdioHandle)?;
+    set_nonblocking(stdin.as_raw_fd())?;
+    let stdout = cmd.stdout.take().ok_or(Error::InvalidStdioHandle)?;
+    set_nonblocking(stdout.as_raw_fd())?;
+    let stderr = cmd.stderr.take().ok_or(Error::InvalidStdioHandle)?;
+    set_nonblocking(stderr.as_raw_fd())?;
+    Ok(ChannelCommand {
+        command: cmd,
+        stdin,
+        stdout,
+        stderr,
+        stdin_buffer: LoopingBuffer::new()?,
+        stdout_buffer: LoopingBuffer::new()?,
+        stderr_buffer: LoopingBuffer::new()?,
+    })
+}
+
+fn handle_channel_request<const SIZE: usize, W: LoopingBufferWriter<SIZE>>(
+    sender: &mut SenderState,
+    writer: &mut W,
+    msg: MessageChannelRequest,
+    chan: &mut Channel,
+) -> Result<(), Error> {
+    if msg.requested_mode == "exec" {
+        let (_, command) = parse_utf8_slice(msg.channel_specific_data)?;
+
+        chan.command = Some(spawn_command(command, true)?);
+
+        if msg.want_reply {
+            let success = MessageChannelSuccess {
+                recipient_channel: chan.remote_channel_number,
+            };
+            write_message(sender, writer, &success)?;
+        }
+        Ok(())
+    } else if msg.requested_mode == "subsystem" {
+        let (_, requested_subsystem) = parse_utf8_slice(msg.channel_specific_data)?;
+        debug!(
+            "Got a request to open the subsystem '{}' on channel {}",
+            requested_subsystem, chan.remote_channel_number
+        );
+        if requested_subsystem == "sftp" {
+            let command = std::env::current_exe()?
+                .parent()
+                .unwrap()
+                .join("smicro_binhelper");
+
+            chan.command = Some(spawn_command(command.to_str().unwrap(), false)?);
+
+            if msg.want_reply {
+                let success = MessageChannelSuccess {
+                    recipient_channel: chan.remote_channel_number,
+                };
+                write_message(sender, writer, &success)?;
+            }
+        } else {
+            warn!("Unsupported filesystem");
+        }
+        Ok(())
+    } else {
+        Err(Error::UnsupportedChannelRequestKind)
+    }
+}
+
 #[declare_session_state_with_allowed_message_types(
     structure = AcceptsChannelMessages,
     msg_type = [MessageType::ChannelRequest, MessageType::ChannelData, MessageType::ChannelWindowAdjust, MessageType::ChannelEof, MessageType::ChannelClose]
@@ -89,55 +183,7 @@ fn process(message_data: &[u8]) {
 
             let chan = state.channels.get_channel(msg.recipient_channel)?;
 
-            if msg.requested_mode == "exec" {
-                let (_, command) = parse_utf8_slice(msg.channel_specific_data)?;
-
-                // Shell injection FTW!
-                // More seriously though, this will be acceptable because the user was identified
-                // and this will be executed with the privileges of that target user once
-                // smico properly switches rights before exec.
-                let mut cmd = Command::new("/usr/bin/env")
-                    .arg("sh")
-                    .arg("-c")
-                    .arg(command)
-                    .stdin(Stdio::piped())
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped())
-                    .create_pidfd(true)
-                    .spawn()?;
-
-                let set_nonblocking = |fd: RawFd| -> std::io::Result<()> {
-                    let value = 1 as libc::c_int;
-                    if unsafe { libc::ioctl(fd, libc::FIONBIO, &value) } == -1 {
-                        Err(std::io::Error::last_os_error())
-                    } else {
-                        Ok(())
-                    }
-                };
-
-                let stdin = cmd.stdin.take().ok_or(Error::InvalidStdioHandle)?;
-                set_nonblocking(stdin.as_raw_fd())?;
-                let stdout = cmd.stdout.take().ok_or(Error::InvalidStdioHandle)?;
-                set_nonblocking(stdout.as_raw_fd())?;
-                let stderr = cmd.stderr.take().ok_or(Error::InvalidStdioHandle)?;
-                set_nonblocking(stderr.as_raw_fd())?;
-                chan.command = Some(ChannelCommand {
-                    command: cmd,
-                    stdin,
-                    stdout,
-                    stderr,
-                    stdin_buffer: LoopingBuffer::new()?,
-                    stdout_buffer: LoopingBuffer::new()?,
-                    stderr_buffer: LoopingBuffer::new()?,
-                });
-
-                if msg.want_reply {
-                    let success = MessageChannelSuccess {
-                        recipient_channel: chan.remote_channel_number,
-                    };
-                    write_message(&mut state.sender, writer, &success)?;
-                }
-            } else {
+            if let Err(_) = handle_channel_request(&mut state.sender, writer, msg, chan) {
                 let failure = MessageChannelFailure {
                     recipient_channel: chan.remote_channel_number,
                 };
@@ -148,6 +194,9 @@ fn process(message_data: &[u8]) {
             let (_, msg) = MessageChannelData::deserialize(message_data)?;
 
             let chan = state.channels.get_channel(msg.recipient_channel)?;
+
+            debug!("Got channel data ({} bytes)", msg.data.0.len());
+
             if chan.state == ChannelState::Running {
                 let cmd = &mut chan
                     .command
@@ -179,7 +228,13 @@ fn process(message_data: &[u8]) {
 
             chan.receiver_window_size += msg.bytes_to_add;
         }
-        MessageType::ChannelEof => {}
+        MessageType::ChannelEof => {
+            let (_, msg) = MessageChannelEof::deserialize(message_data)?;
+
+            let chan = state.channels.get_channel(msg.recipient_channel)?;
+
+            chan.state = ChannelState::Stopped;
+        }
         MessageType::ChannelClose => {
             let (_, msg) = MessageChannelClose::deserialize(message_data)?;
 
@@ -198,7 +253,7 @@ fn process(message_data: &[u8]) {
                 },
             )?;
 
-            chan.state = ChannelState::Closed;
+            chan.state = ChannelState::Shutdowned;
         }
         _ => {
             unreachable!()

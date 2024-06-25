@@ -1,10 +1,11 @@
 use std::{
     ffi::OsString,
     fs::Metadata,
+    io::Write,
     os::{linux::fs::MetadataExt, unix::prelude::PermissionsExt},
 };
 
-use crate::serialize::SerializePacket;
+use crate::{serialize::SerializePacket, serializepacket_iterator_over_elements};
 
 use smicro_macros::gen_serialize_impl;
 
@@ -102,6 +103,8 @@ pub struct Stat {
     pub attrs: Attrs,
 }
 
+serializepacket_iterator_over_elements!(Vec<Stat>,);
+
 #[derive(Debug)]
 #[repr(u32)]
 pub enum OpenModes {
@@ -156,3 +159,5 @@ pub struct Extension {
     pub name: &'static str,
     pub data: &'static str,
 }
+
+serializepacket_iterator_over_elements!(Vec<Extension>,);

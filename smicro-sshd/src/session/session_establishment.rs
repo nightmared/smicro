@@ -1,5 +1,3 @@
-use std::io::Write;
-
 use log::{debug, trace};
 use nom::{
     bytes::streaming::{tag, take_until, take_while1},
@@ -8,7 +6,7 @@ use nom::{
     sequence::preceded,
     AsChar,
 };
-use smicro_common::{LoopingBuffer, LoopingBufferWriter};
+use smicro_common::LoopingBufferWriter;
 
 use crate::{
     error::Error,
@@ -75,8 +73,8 @@ impl SessionState for IdentifierStringSent {
         }
         state.peer_identifier_string = Some(peer_identifier_string);
 
-        // this should be free, because we check that this is ascii before, but we can't tell the
-        // compiler that
+        // the UTF-8 conversion should be free, because we checked that this is ascii before,
+        // but we can't tell the compiler that
         if log::log_enabled!(log::Level::Trace) {
             if let Ok(software_version) = std::str::from_utf8(softwareversion) {
                 trace!("Got client with software '{}'", software_version);

@@ -1,3 +1,5 @@
+use std::fmt::{Debug, Write};
+
 #[derive(
     Debug, Clone, Copy, Eq, PartialEq, num_enum::TryFromPrimitive, num_enum::IntoPrimitive,
 )]
@@ -41,11 +43,37 @@ pub struct NameList {
     pub entries: Vec<String>,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct SSHSlice<T>(pub Vec<T>);
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+impl<T> std::fmt::Debug for SSHSlice<T>
+where
+    T: Debug,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.0.len() < 25 {
+            f.write_fmt(format_args!("SSHSlice({:?})", self.0))
+        } else {
+            f.write_fmt(format_args!("SSHSlice({:?} [TRUNCATED])", self.0))
+        }
+    }
+}
+
+#[derive(Clone, Eq, PartialEq)]
 pub struct SharedSSHSlice<'a, T>(pub &'a [T]);
+
+impl<'a, T> std::fmt::Debug for SharedSSHSlice<'a, T>
+where
+    T: Debug,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.0.len() < 25 {
+            f.write_fmt(format_args!("SharedSSHSlice({:?})", self.0))
+        } else {
+            f.write_fmt(format_args!("SharedSSHSlice({:?} [TRUNCATED])", self.0))
+        }
+    }
+}
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct PositiveBigNum<'a>(pub &'a [u8]);

@@ -5,6 +5,7 @@ use smicro_macros::{
 };
 use smicro_types::serialize::SerializePacket;
 use smicro_types::sftp::types::{Attrs, Extension, ResponseType, Stat, StatusCode};
+use smicro_types::ssh::types::{SSHSlice, SharedSSHSlice};
 
 #[derive(Debug)]
 #[implement_responsepacket_on_enum]
@@ -71,26 +72,9 @@ pub struct ResponseHandle {
     pub handle: String,
 }
 
-#[derive(Debug)]
+#[declare_response_packet(packet_type = ResponseType::Data)]
 pub struct ResponseData<'a> {
-    pub data: &'a [u8],
-}
-
-impl<'a> SerializePacket for ResponseData<'a> {
-    fn get_size(&self) -> usize {
-        4 + self.data.len()
-    }
-
-    fn serialize<W: Write>(&self, mut output: W) -> Result<(), std::io::Error> {
-        (self.data.len() as u32).serialize(&mut output)?;
-        output.write_all(self.data)
-    }
-}
-
-impl<'a> ResponsePacket for ResponseData<'a> {
-    fn get_type(&self) -> ResponseType {
-        ResponseType::Data
-    }
+    pub data: SharedSSHSlice<'a, u8>,
 }
 
 #[declare_response_packet(packet_type = ResponseType::Attrs)]

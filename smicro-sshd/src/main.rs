@@ -5,6 +5,7 @@ use std::{
     collections::HashSet,
     io::{ErrorKind, Read, Write},
     net::SocketAddr,
+    ops::{BitOr, BitOrAssign},
     os::{fd::AsRawFd, linux::process::ChildExt},
     path::Path,
     str::FromStr,
@@ -18,8 +19,9 @@ use mio::{
     unix::SourceFd,
     Events, Interest, Poll, Token,
 };
+use nix::sys::eventfd::EventFd;
 use state::channel::{Channel, ChannelCommand, ChannelState};
-use syslog::{BasicLogger, Facility, Formatter3164};
+use syslog::Facility;
 
 use smicro_common::{LoopingBuffer, LoopingBufferReader, LoopingBufferWriter};
 use smicro_types::{
@@ -111,13 +113,13 @@ fn handle_packet<const SIZE: usize>(
 fn read_stream_to_buffer<const SIZE: usize, R: Read + ?Sized>(
     stream: &mut R,
     reader_buf: &mut LoopingBuffer<SIZE>,
-) -> Result<(), Error> {
+) -> Result<NonIOProgress, Error> {
     loop {
         // Read enough data to hold *at least* a packet, but without overwriting previous
         // data
         let writeable_buffer = reader_buf.get_writable_buffer();
         if writeable_buffer.len() == 0 {
-            break;
+            return Ok(NonIOProgress::Continue);
         }
         match stream.read(writeable_buffer) {
             Ok(written) => {
@@ -135,7 +137,7 @@ fn read_stream_to_buffer<const SIZE: usize, R: Read + ?Sized>(
         }
     }
 
-    Ok(())
+    Ok(NonIOProgress::Done)
 }
 
 fn write_buffer_to_stream<const SIZE: usize, W: Write + ?Sized>(
@@ -189,42 +191,32 @@ fn handle_packets<const SIZE: usize>(
     }
 }
 
-fn flush_data_to_channel<const INPUT_SIZE: usize, const SIZE: usize>(
-    sender_buf: &mut LoopingBuffer<SIZE>,
-    input_buf: &mut LoopingBuffer<INPUT_SIZE>,
+fn flush_data_to_channel<
+    const INPUT_SIZE: usize,
+    const SIZE: usize,
+    R: LoopingBufferReader<INPUT_SIZE>,
+    W: LoopingBufferWriter<SIZE>,
+>(
+    sender_buf: &mut W,
+    input_buf: &mut R,
     recipient_channel: u32,
     max_chan_pkt_size: u32,
-    sender_window_size: &mut u32,
     sender: &mut SenderState,
     is_stderr: bool,
 ) -> Result<(), Error> {
     let readable_data = input_buf.get_readable_data();
 
-    // bump the sender window, if required
-    if *sender_window_size < MAX_PKT_SIZE as u32 {
-        match write_message(
-            sender,
-            sender_buf,
-            &MessageChannelWindowAdjust {
-                recipient_channel,
-                bytes_to_add: MAX_PKT_SIZE as u32,
-            },
-        ) {
-            Ok(()) => {
-                *sender_window_size += MAX_PKT_SIZE as u32;
-            }
-            Err(Error::IoError(e)) if e.kind() == ErrorKind::WouldBlock => {
-                return Ok(());
-            }
-            Err(e) => {
-                return Err(e);
-            }
-        }
-    }
-
     // 32 is chosen arbitrarily to represent the packet overhead
+    if readable_data.len() == 0 || max_chan_pkt_size <= 32 {
+        return Ok(());
+    }
     let max_write_size = max_chan_pkt_size as usize - 32;
     let data_len = min(readable_data.len(), max_write_size);
+
+    trace!(
+        "Data is available on {}, writing it to the output stream",
+        if is_stderr { "stderr" } else { "stdout" }
+    );
     let data = SharedSSHSlice(&readable_data[0..data_len]);
     let res = if is_stderr {
         let channel_data = MessageChannelExtendedData {
@@ -250,42 +242,46 @@ fn flush_data_to_channel<const INPUT_SIZE: usize, const SIZE: usize>(
     }
 }
 
-fn handle_channel_message(event_token: Token, chan: &mut Channel) -> Result<(), Error> {
+fn handle_channel_message(event_token: Token, chan: &mut Channel) -> Result<NonIOProgress, Error> {
     let cmd = chan
         .command
         .as_mut()
         .ok_or(Error::MissingCommandInChannel)?;
+
+    let mut res = NonIOProgress::Done;
 
     if event_token.0 % 4 == 0 {
         // stdin
         write_buffer_to_stream(&mut cmd.stdin_buffer, &mut cmd.stdin)?;
     } else if event_token.0 % 4 == 1 {
         // stdout
-        read_stream_to_buffer(&mut cmd.stdout, &mut cmd.stdout_buffer)?;
+        res |= read_stream_to_buffer(&mut cmd.stdout, &mut cmd.stdout_buffer)?;
     } else if event_token.0 % 4 == 2 {
         // stderr
-        read_stream_to_buffer(&mut cmd.stderr, &mut cmd.stderr_buffer)?;
+        res |= read_stream_to_buffer(&mut cmd.stderr, &mut cmd.stderr_buffer)?;
     } else if event_token.0 % 4 == 3 {
         // maybe the process exited?
         if let Ok(Some(exit_status)) = cmd.command.try_wait() {
             chan.state = ChannelState::StoppedWithStatus(exit_status.code().unwrap_or(255));
         }
     }
-    Ok(())
+
+    Ok(res)
 }
 
 fn handle_channel_data(event_token: Token, state: &mut State) -> Result<(), Error> {
-    let channel_number = (event_token.0 / 4) as u32;
+    let channel_number = (event_token.0 / 4) as u32 - 1;
+    debug!(
+        "Received data from the process running for channel {}",
+        channel_number
+    );
     if let Ok(chan) = state.channels.get_channel(channel_number) {
         match handle_channel_message(event_token, chan) {
-            Ok(()) => {}
+            Ok(_) => {}
             Err(Error::ConnectionClosed) => {
                 // do not change the state, we will only do that once the process exited
-                return Ok(());
             }
-            Err(e) => {
-                return Err(e);
-            }
+            Err(e) => return Err(e),
         }
     } else {
         warn!(
@@ -293,7 +289,6 @@ fn handle_channel_data(event_token: Token, state: &mut State) -> Result<(), Erro
             channel_number
         );
     }
-
     Ok(())
 }
 
@@ -303,7 +298,7 @@ fn register_channel(
     cmd: &ChannelCommand,
 ) -> Result<(), std::io::Error> {
     debug!("Registering channel {}", chan_number);
-    let token_base = chan_number as usize * 4;
+    let token_base = (chan_number + 1) as usize * 4;
     poll.registry().register(
         &mut SourceFd(&cmd.stdin.as_raw_fd()),
         Token(token_base),
@@ -331,14 +326,177 @@ fn register_channel(
 
 fn unregister_channel(poll: &mut Poll, chan: &Channel) -> Result<(), std::io::Error> {
     if let Some(cmd) = &chan.command {
-        poll.registry()
-            .deregister(&mut SourceFd(&cmd.stdin.as_raw_fd()))?;
-        poll.registry()
-            .deregister(&mut SourceFd(&cmd.stdout.as_raw_fd()))?;
-        poll.registry()
-            .deregister(&mut SourceFd(&cmd.stderr.as_raw_fd()))?;
-        poll.registry()
-            .deregister(&mut SourceFd(&cmd.command.pidfd()?.as_raw_fd()))?;
+        let registry = poll.registry();
+        registry.deregister(&mut SourceFd(&cmd.stdin.as_raw_fd()))?;
+        registry.deregister(&mut SourceFd(&cmd.stdout.as_raw_fd()))?;
+        registry.deregister(&mut SourceFd(&cmd.stderr.as_raw_fd()))?;
+        registry.deregister(&mut SourceFd(&cmd.command.pidfd()?.as_raw_fd()))?;
+    }
+
+    Ok(())
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum NonIOProgress {
+    Continue,
+    Done,
+}
+
+impl BitOr for NonIOProgress {
+    type Output = NonIOProgress;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        if self == NonIOProgress::Continue {
+            NonIOProgress::Continue
+        } else {
+            rhs
+        }
+    }
+}
+
+impl BitOrAssign for NonIOProgress {
+    fn bitor_assign(&mut self, rhs: Self) {
+        *self = *self | rhs;
+    }
+}
+
+fn flush_channel<const SIZE: usize, T: LoopingBufferWriter<SIZE>>(
+    chan: &mut Channel,
+    sender: &mut SenderState,
+    output_buf: &mut T,
+) -> Result<NonIOProgress, Error> {
+    let mut res = NonIOProgress::Done;
+    if let Some(ref mut cmd) = chan.command {
+        // bump the sender window, if required
+        if chan.sender_window_size < MAX_PKT_SIZE as u32 {
+            match write_message(
+                sender,
+                output_buf,
+                &MessageChannelWindowAdjust {
+                    recipient_channel: chan.remote_channel_number,
+                    bytes_to_add: MAX_PKT_SIZE as u32,
+                },
+            ) {
+                Ok(()) => {
+                    chan.sender_window_size += MAX_PKT_SIZE as u32;
+                }
+                // retry later if we cannot write to the output buffer now
+                Err(Error::IoError(e)) if e.kind() == ErrorKind::WouldBlock => {
+                    return Ok(NonIOProgress::Continue);
+                }
+                Err(e) => {
+                    return Err(e);
+                }
+            }
+        }
+
+        if cmd.stderr_buffer.get_readable_data().len() > 0 {
+            flush_data_to_channel(
+                output_buf,
+                &mut cmd.stderr_buffer,
+                chan.remote_channel_number,
+                chan.max_pkt_size,
+                sender,
+                true,
+            )?;
+        }
+        if cmd.stdout_buffer.get_readable_data().len() > 0 {
+            flush_data_to_channel(
+                output_buf,
+                &mut cmd.stdout_buffer,
+                chan.remote_channel_number,
+                chan.max_pkt_size,
+                sender,
+                false,
+            )?;
+        }
+
+        write_buffer_to_stream(&mut cmd.stdin_buffer, &mut cmd.stdin)?;
+
+        res |= if cmd.stdin_buffer.get_readable_data().len() > 0
+            || cmd.stdout_buffer.get_readable_data().len() > 0
+            || cmd.stderr_buffer.get_readable_data().len() > 0
+        {
+            NonIOProgress::Continue
+        } else {
+            NonIOProgress::Done
+        };
+    }
+    Ok(res)
+}
+
+fn process_channel_states<const SIZE: usize, W: LoopingBufferWriter<SIZE>>(
+    state: &mut State,
+    sender_buf: &mut W,
+    poll: &mut Poll,
+    registered_channels: &mut HashSet<u32>,
+    channels_to_remove: &mut HashSet<u32>,
+) -> Result<(), Error> {
+    for (&chan_number, chan) in state.channels.channels.iter_mut() {
+        match chan.state {
+            ChannelState::Running => {
+                // register newly created channels on the event loop
+                if let Some(cmd) = &chan.command {
+                    if registered_channels.insert(chan_number) {
+                        register_channel(poll, chan_number, cmd)
+                            .map_err(|e| Error::RegistrationManagementError(e))?;
+                    }
+                }
+            }
+            ChannelState::StoppedWithStatus(status) => {
+                debug!("The command in channel {} terminated", chan_number);
+
+                write_message(
+                    &mut state.sender,
+                    sender_buf,
+                    &MessageChannelRequest {
+                        recipient_channel: chan.remote_channel_number,
+                        requested_mode: "exit-status",
+                        want_reply: false,
+                        channel_specific_data: &status.to_be_bytes(),
+                    },
+                )?;
+
+                debug!("Exit status sent for channel {}", chan_number);
+            }
+            ChannelState::Stopped => {
+                write_message(
+                    &mut state.sender,
+                    sender_buf,
+                    &MessageChannelClose {
+                        recipient_channel: chan.remote_channel_number,
+                    },
+                )?;
+
+                debug!("Close order sent to channel {}", chan_number);
+
+                chan.state = ChannelState::Shutdowned;
+            }
+            ChannelState::Shutdowned => {
+                // stop receiving data from that end
+                if registered_channels.remove(&chan_number) {
+                    debug!("Unregistering channel {}", chan_number);
+                    unregister_channel(poll, chan)
+                        .map_err(|e| Error::RegistrationManagementError(e))?;
+                } else {
+                    let mut remove = true;
+                    if let Some(cmd) = &mut chan.command {
+                        // inhibit the removal until all data was trasnferred
+                        remove = cmd.stdout_buffer.get_readable_data().len() == 0
+                            && cmd.stderr_buffer.get_readable_data().len() == 0;
+                    }
+                    if remove {
+                        debug!("Requesting the removal of channel {}", chan_number);
+                        channels_to_remove.insert(chan_number);
+                    }
+                }
+            }
+        }
+    }
+
+    for chan_number in channels_to_remove.drain() {
+        state.channels.remove_channel(chan_number)?;
+        debug!("Done cleaning up channel {}", chan_number);
     }
 
     Ok(())
@@ -357,11 +515,21 @@ fn handle_stream(mut stream: TcpStream) -> Result<(), Error> {
     let mut poll = Poll::new()?;
     let mut events = Events::with_capacity(128);
 
+    let registry = poll.registry();
+
     let stream_token = Token(0);
-    poll.registry().register(
+    registry.register(
         &mut stream,
         stream_token,
         Interest::READABLE | Interest::WRITABLE,
+    )?;
+
+    let signal_token = Token(1);
+    let data_available_eventfd = EventFd::new().map_err(Error::EventFdCreationFailed)?;
+    registry.register(
+        &mut SourceFd(&data_available_eventfd.as_raw_fd()),
+        signal_token,
+        Interest::READABLE,
     )?;
 
     let mut registered_channels: HashSet<u32> = HashSet::new();
@@ -369,6 +537,8 @@ fn handle_stream(mut stream: TcpStream) -> Result<(), Error> {
 
     loop {
         poll.poll(&mut events, None)?;
+
+        let mut non_io_backed_progress = NonIOProgress::Done;
 
         for ev in &events {
             let event_token = ev.token();
@@ -379,129 +549,65 @@ fn handle_stream(mut stream: TcpStream) -> Result<(), Error> {
                     write_buffer_to_stream(&mut sender_buf, &mut stream)?;
                 }
                 if ev.is_readable() {
-                    read_stream_to_buffer(&mut stream, &mut reader_buf)?;
-                    handle_packets(&mut reader_buf, &mut sender_buf, &mut session, &mut state)?;
+                    non_io_backed_progress |= read_stream_to_buffer(&mut stream, &mut reader_buf)?;
                 }
+            } else if event_token == signal_token {
+                data_available_eventfd
+                    .read()
+                    .map_err(Error::EventFdSignalingFailed)?;
             } else {
                 handle_channel_data(event_token, &mut state)?;
             }
         }
 
-        for (&chan_number, chan) in state.channels.channels.iter_mut() {
-            match chan.state {
-                ChannelState::Running => {
-                    // register newly created channels on the event loop
-                    if let Some(cmd) = &chan.command {
-                        if registered_channels.insert(chan_number) {
-                            register_channel(&mut poll, chan_number, cmd)
-                                .map_err(|e| Error::RegistrationManagementError(e))?;
-                        }
-                    }
-                }
-                ChannelState::StoppedWithStatus(status) => {
-                    debug!("The command in channel {} terminated", chan_number);
-
-                    write_message(
-                        &mut state.sender,
-                        &mut sender_buf,
-                        &MessageChannelRequest {
-                            recipient_channel: chan.remote_channel_number,
-                            requested_mode: "exit-status",
-                            want_reply: false,
-                            channel_specific_data: &status.to_be_bytes(),
-                        },
-                    )?;
-
-                    debug!("Exit status sent for channel {}", chan_number);
-
-                    write_message(
-                        &mut state.sender,
-                        &mut sender_buf,
-                        &MessageChannelClose {
-                            recipient_channel: chan.remote_channel_number,
-                        },
-                    )?;
-
-                    debug!("Close order sent to channel {}", chan_number);
-
-                    chan.state = ChannelState::Closed;
-                }
-                ChannelState::Closed => {
-                    chan.state = ChannelState::Shutdowned;
-                }
-                ChannelState::Shutdowned => {
-                    // stop receiving data from that end
-                    if registered_channels.remove(&chan_number) {
-                        debug!("Unregistering channel {}", chan_number);
-                        unregister_channel(&mut poll, chan)
-                            .map_err(|e| Error::RegistrationManagementError(e))?;
-                    } else {
-                        let mut remove = true;
-                        if let Some(cmd) = &mut chan.command {
-                            // inhibit the removal until all data was trasnferred
-                            remove = cmd.stdout_buffer.get_readable_data().len() == 0
-                                && cmd.stderr_buffer.get_readable_data().len() == 0;
-                        }
-                        if remove {
-                            debug!("Requesting the removal of channel {}", chan_number);
-                            channels_to_remove.insert(chan_number);
-                        }
-                    }
-                }
-            }
+        if sender_buf.get_readable_data().len() > 0 {
+            trace!("Data is available on the output stream, flushing it to the output stream");
+            write_buffer_to_stream(&mut sender_buf, &mut stream)?;
         }
 
-        for chan_number in channels_to_remove.drain() {
-            state.channels.remove_channel(chan_number)?;
-            debug!("Done cleaning up channel {}", chan_number);
+        non_io_backed_progress |= read_stream_to_buffer(&mut stream, &mut reader_buf)?;
+
+        handle_packets(&mut reader_buf, &mut sender_buf, &mut session, &mut state)?;
+
+        for cmd in state
+            .channels
+            .channels
+            .values_mut()
+            .filter(|chan| chan.state != ChannelState::Shutdowned)
+            .filter_map(|chan| chan.command.as_mut())
+        {
+            non_io_backed_progress |=
+                read_stream_to_buffer(&mut cmd.stdout, &mut cmd.stdout_buffer)?;
+            non_io_backed_progress |=
+                read_stream_to_buffer(&mut cmd.stderr, &mut cmd.stderr_buffer)?;
         }
+
+        process_channel_states(
+            &mut state,
+            &mut sender_buf,
+            &mut poll,
+            &mut registered_channels,
+            &mut channels_to_remove,
+        )?;
 
         for (_, chan) in state.channels.channels.iter_mut() {
-            if let Some(ref mut cmd) = chan.command {
-                if cmd.stderr_buffer.get_readable_data().len() > 0 {
-                    flush_data_to_channel(
-                        &mut sender_buf,
-                        &mut cmd.stderr_buffer,
-                        chan.remote_channel_number,
-                        chan.max_pkt_size,
-                        &mut chan.sender_window_size,
-                        &mut state.sender,
-                        true,
-                    )?;
-                }
-                if cmd.stdout_buffer.get_readable_data().len() > 0 {
-                    flush_data_to_channel(
-                        &mut sender_buf,
-                        &mut cmd.stdout_buffer,
-                        chan.remote_channel_number,
-                        chan.max_pkt_size,
-                        &mut chan.sender_window_size,
-                        &mut state.sender,
-                        false,
-                    )?;
-                }
-
-                write_buffer_to_stream(&mut cmd.stdin_buffer, &mut cmd.stdin)?;
-            }
+            non_io_backed_progress |= flush_channel(chan, &mut state.sender, &mut sender_buf)?;
         }
 
         if sender_buf.get_readable_data().len() > 0 {
-            write_buffer_to_stream(&mut sender_buf, &mut stream)?;
+            non_io_backed_progress = NonIOProgress::Continue;
+        }
+
+        if non_io_backed_progress == NonIOProgress::Continue {
+            data_available_eventfd
+                .write(1)
+                .map_err(Error::EventFdSignalingFailed)?;
         }
     }
 }
 
 fn main() -> Result<(), Error> {
-    let formatter = Formatter3164 {
-        facility: Facility::LOG_USER,
-        hostname: None,
-        process: "smicro_ssh".into(),
-        pid: 0,
-    };
-
-    let logger = syslog::unix(formatter)?;
-    log::set_boxed_logger(Box::new(BasicLogger::new(logger)))
-        .map(|()| log::set_max_level(LevelFilter::Debug))?;
+    syslog::init(Facility::LOG_USER, LevelFilter::Info, Some("smicro_ssh"))?;
 
     let mut listener = TcpListener::bind(SocketAddr::from_str("127.0.0.1:2222")?)?;
 

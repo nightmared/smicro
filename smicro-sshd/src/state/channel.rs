@@ -12,10 +12,10 @@ use crate::{error::Error, packet::MAX_PKT_SIZE};
 pub struct ChannelCommand {
     pub command: std::process::Child,
     pub stdin: ChildStdin,
-    pub stdout: ChildStdout,
-    pub stderr: ChildStderr,
     pub stdin_buffer: LoopingBuffer<MAX_PKT_SIZE>,
+    pub stdout: ChildStdout,
     pub stdout_buffer: LoopingBuffer<MAX_PKT_SIZE>,
+    pub stderr: ChildStderr,
     pub stderr_buffer: LoopingBuffer<MAX_PKT_SIZE>,
 }
 
@@ -32,7 +32,7 @@ impl Drop for ChannelCommand {
 pub enum ChannelState {
     Running,
     StoppedWithStatus(i32),
-    Closed,
+    Stopped,
     Shutdowned,
 }
 

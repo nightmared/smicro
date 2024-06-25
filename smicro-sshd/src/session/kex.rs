@@ -1,44 +1,71 @@
 use std::sync::Arc;
 
 use log::debug;
-use smicro_common::LoopingBuffer;
+use smicro_common::LoopingBufferWriter;
 use smicro_macros::declare_session_state_with_allowed_message_types;
+use smicro_types::deserialize::DeserializePacket;
 
 use crate::{
     error::Error,
-    messages::{MessageKexEcdhInit, MessageKeyExchangeInit, MessageNewKeys},
-    session::{ExpectsServiceRequest, SessionState, SessionStates},
+    messages::{gen_kex_initial_list, MessageKexEcdhInit, MessageKeyExchangeInit, MessageNewKeys},
+    session::ExpectsServiceRequest,
     state::{SessionCryptoMaterials, State},
     write_message,
 };
+
+use super::SessionStates;
 
 #[derive(Clone, Debug)]
 pub struct KexSent {
     pub my_kex_message: MessageKeyExchangeInit,
 }
 
+impl KexSent {
+    pub(crate) fn process_kexinit<'a>(
+        &self,
+        state: &mut State,
+        message_data: &[u8],
+        next: &'a [u8],
+    ) -> Result<(&'a [u8], SessionStates), Error> {
+        let (_, msg) = MessageKeyExchangeInit::deserialize(message_data)?;
+        debug!("Received {:?}", msg);
+
+        let crypto_algs = Arc::new(msg.compute_crypto_algs()?);
+        debug!("Cryptographic algorithms exchanged");
+        state.receiver.crypto_algs = Some(crypto_algs.clone());
+        state.sender.crypto_algs = Some(crypto_algs);
+
+        let next_state = KexReceived {
+            my_kex_message: self.my_kex_message.clone(),
+            peer_kex_message: msg,
+        };
+
+        Ok((next, SessionStates::KexReceived(next_state)))
+    }
+}
+
 #[declare_session_state_with_allowed_message_types(structure = KexSent, msg_type = MessageType::KexInit, strict_kex = true)]
 fn process(message_data: &[u8]) {
-    let (_, msg) = MessageKeyExchangeInit::deserialize(message_data)?;
-    debug!("Received {:?}", msg);
-
-    let crypto_algs = Arc::new(msg.compute_crypto_algs()?);
-    debug!("Cryptographic algorithms exchanged");
-    state.receiver.crypto_algs = Some(crypto_algs.clone());
-    state.sender.crypto_algs = Some(crypto_algs);
-
-    let next_state = KexReceived {
-        my_kex_message: self.my_kex_message.clone(),
-        peer_kex_message: msg,
-    };
-
-    Ok((next, SessionStates::KexReceived(next_state)))
+    self.process_kexinit(state, message_data, next)
 }
 
 #[derive(Clone, Debug)]
 pub struct KexReceived {
     my_kex_message: MessageKeyExchangeInit,
     peer_kex_message: MessageKeyExchangeInit,
+}
+
+pub(crate) fn renegotiate_kex<const SIZE: usize, W: LoopingBufferWriter<SIZE>>(
+    state: &mut State,
+    writer: &mut W,
+) -> Result<KexSent, Error> {
+    debug!("Received a key rotation message, sending a MessageKeyExchangeInit packet");
+    let kex_init_msg = gen_kex_initial_list(state);
+    write_message(&mut state.sender, writer, &kex_init_msg)?;
+
+    Ok(KexSent {
+        my_kex_message: kex_init_msg,
+    })
 }
 
 #[declare_session_state_with_allowed_message_types(structure = KexReceived, msg_type = MessageType::KexEcdhInit, strict_kex = true)]

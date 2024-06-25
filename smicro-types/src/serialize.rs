@@ -103,19 +103,26 @@ where
     }
 }
 
-impl<'a, T: SerializePacket, const N: usize> SerializePacket for [T; N] {
-    fn get_size(&self) -> usize {
-        self.iter().fold(0, |acc, elem| acc + elem.get_size())
-    }
+#[macro_export]
+macro_rules! serializepacket_iterator_over_elements {
+    ($t:ty, $($key:tt)*) => {
+        impl<$($key)*> SerializePacket for $t {
+            fn get_size(&self) -> usize {
+                self.iter().fold(0, |acc, elem| acc + elem.get_size())
+            }
 
-    fn serialize<W: Write>(&self, mut output: W) -> Result<(), std::io::Error> {
-        for val in self.iter() {
-            val.serialize(&mut output)?;
+            fn serialize<W: Write>(&self, mut output: W) -> Result<(), std::io::Error> {
+                for val in self.iter() {
+                    val.serialize(&mut output)?;
+                }
+
+                Ok(())
+            }
         }
-
-        Ok(())
-    }
+    };
 }
+
+serializepacket_iterator_over_elements!([T; N], T: SerializePacket, const N: usize);
 
 impl<'a> SerializePacket for &'a [u8] {
     fn get_size(&self) -> usize {

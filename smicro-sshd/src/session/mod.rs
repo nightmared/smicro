@@ -1,4 +1,4 @@
-use smicro_common::{LoopingBuffer, LoopingBufferWriter};
+use smicro_common::LoopingBufferWriter;
 
 use crate::{error::Error, state::State};
 

@@ -88,6 +88,12 @@ pub enum Error {
     ExceededChannelLength,
     #[error("Could not register or unregister a channel")]
     RegistrationManagementError(#[source] std::io::Error),
+    #[error("This channel request type is not supported")]
+    UnsupportedChannelRequestKind,
+    #[error("Cannot create an eventfd notifier")]
+    EventFdCreationFailed(#[source] nix::errno::Errno),
+    #[error("Cannot signal an event")]
+    EventFdSignalingFailed(#[source] nix::errno::Errno),
 }
 
 #[derive(thiserror::Error, Debug)]
