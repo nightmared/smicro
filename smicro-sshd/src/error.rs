@@ -28,8 +28,6 @@ pub enum Error {
     NoCommonHostKeyAlg,
     #[error("Error processing the client packet")]
     ProcessingFailed,
-    #[error("The cryptographic parameters should be available, yet there aen't defined")]
-    MissingCryptoAlgs,
     #[error("Got data in a NEWKEYS message, this shouldn't happen")]
     DataInNewKeysMessage,
     #[error("Invalid length of the key for the MAC")]

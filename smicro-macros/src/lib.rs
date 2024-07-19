@@ -5,8 +5,8 @@ use quote::{quote, quote_spanned, ToTokens};
 
 use syn::{
     parse, parse::Parser, punctuated::Punctuated, spanned::Spanned, token::Comma, Attribute, Expr,
-    ExprLit, ExprPath, Fields, GenericParam, ItemConst, ItemEnum, ItemFn, ItemStruct,
-    LifetimeParam, Lit, LitBool, Meta, MetaNameValue, Token, Type,
+    ExprLit, ExprPath, Fields, GenericParam, ItemConst, ItemEnum, ItemStruct, LifetimeParam, Lit,
+    LitBool, Meta, MetaNameValue, Token, Type,
 };
 
 struct PacketArgs {
@@ -524,11 +524,8 @@ pub fn declare_message(attrs: TokenStream, item: TokenStream) -> TokenStream {
 
 #[proc_macro_error]
 #[proc_macro_attribute]
-pub fn declare_session_state_with_allowed_message_types(
-    attrs: TokenStream,
-    item: TokenStream,
-) -> TokenStream {
-    let ast: ItemFn = parse(item).expect("Not a function");
+pub fn declare_session_state(attrs: TokenStream, item: TokenStream) -> TokenStream {
+    let ast: ItemStruct = parse(item).expect("Not a structure");
 
     let parser = Punctuated::<MetaNameValue, Token![,]>::parse_terminated;
     let attribute_args = match parser.parse(attrs) {
@@ -540,7 +537,6 @@ pub fn declare_session_state_with_allowed_message_types(
         ),
     };
 
-    let mut structure = None;
     let mut msg_type = None;
     let mut strict_kex = false;
     for arg in attribute_args.iter() {
@@ -550,9 +546,6 @@ pub fn declare_session_state_with_allowed_message_types(
         }
         let key = path.get_ident().unwrap().to_string();
         match key.as_str() {
-            "structure" => {
-                structure = Some(value);
-            }
             "msg_type" => {
                 msg_type = Some(if let Expr::Array(_) = value {
                     quote!( #value )
@@ -575,35 +568,66 @@ pub fn declare_session_state_with_allowed_message_types(
         }
     }
 
-    if structure.is_none() {
-        abort!(attribute_args.span(), "Missing the 'structure' argument");
-    }
     if msg_type.is_none() {
         abort!(attribute_args.span(), "Missing the 'msg_type' argument");
     }
 
-    let struct_name = structure.unwrap();
+    let struct_name = ast.ident;
+    let struct_vis = ast.vis;
+    let struct_attrs = ast.attrs;
+    let struct_fields = match ast.fields {
+        Fields::Unit => <Punctuated<syn::Field, Comma>>::new(),
+        Fields::Unnamed(_) => abort!(ast.fields.span(), "Unnamed structures are not supported"),
+        Fields::Named(named_fields) => named_fields.named,
+    };
+
     let allowed_types = msg_type.unwrap();
 
-    let fun_content = ast.block.stmts;
+    let allowed_renegotiation = struct_name == "ExpectsServiceRequest"
+        || struct_name == "ExpectsUserAuthRequest"
+        || struct_name == "ExpectsChannelOpen"
+        || struct_name == "AcceptsChannelMessages";
+
+    let renegotiation_part = if allowed_renegotiation {
+        quote!(if message_type == MessageType::KexInit {
+            log::info!("Renegotiating a new key");
+            let kex_sent = crate::session::KexSent {
+                my_kex_message: crate::session::kex::renegotiate_kex(state, writer)?,
+                next_state: crate::session::kex::SessionStateAllowedAfterKex::#struct_name(self.clone()),
+            };
+            return Ok((
+                next,
+                SessionStates::SessionStateEstablished(kex_sent.inner_process(
+                    state,
+                    writer,
+                    message_type,
+                    message_data,
+                )?),
+            ));
+        })
+    } else {
+        quote!()
+    };
 
     let handle_messages_part = if !strict_kex {
         quote! (
             if message_type == MessageType::Ignore || message_type == MessageType::Debug || message_type == MessageType::Unimplemented {
-                return Ok((next, SessionStates::#struct_name(self.clone())));
+                return Ok((next, SessionStates::SessionStateEstablished(SessionStateEstablished::#struct_name(self.clone()))));
             }
 
-            if message_type == MessageType::KexInit {
-                log::info!("Renegotiating a new key");
-                let kex_sent = crate::session::kex::renegotiate_kex(state, writer)?;
-                return kex_sent.process_kexinit(state, message_data, next);
-            }
+            #renegotiation_part
         )
     } else {
         quote!()
     };
 
     quote! {
+        #(#struct_attrs)*
+        #[derive(Debug, Clone)]
+        #struct_vis struct #struct_name {
+            #struct_fields
+        }
+
         impl crate::session::SessionState for #struct_name {
             fn process<'a, const SIZE: usize, W: ::smicro_common::LoopingBufferWriter<SIZE>>(
                 &mut self,
@@ -615,14 +639,14 @@ pub fn declare_session_state_with_allowed_message_types(
                     deserialize::DeserializePacket,
                     ssh::types::MessageType
                 };
-                use crate::session::SessionStates;
+                use crate::session::{SessionStates, SessionStateEstablished};
                 let (next, packet_payload) = crate::packet::parse_packet(input, state)?;
 
                 let (message_data, message_type) = match crate::parse_message_type(packet_payload) {
                     Ok(x) => x,
                     Err(_) => {
                         crate::packet::write_message(&mut state.sender, writer, &crate::messages::MessageUnimplemented { sequence_number: state.receiver.sequence_number.0 })?;
-                        return Ok((next, SessionStates::#struct_name(self.clone())));
+                        return Ok((next, SessionStates::SessionStateEstablished(SessionStateEstablished::#struct_name(self.clone()))));
                     }
                 };
 
@@ -636,7 +660,8 @@ pub fn declare_session_state_with_allowed_message_types(
                     return Err(crate::error::Error::DisallowedMessageType(message_type));
                 }
 
-                #(#fun_content)*
+                let res = self.inner_process(state, writer, message_type, message_data)?;
+                Ok((next, SessionStates::SessionStateEstablished(res)))
             }
         }
     }

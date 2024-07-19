@@ -4,12 +4,14 @@ use std::process::{Command, Stdio};
 
 use log::{debug, warn};
 use smicro_common::{LoopingBuffer, LoopingBufferWriter};
-use smicro_macros::declare_session_state_with_allowed_message_types;
+use smicro_macros::declare_session_state;
+use smicro_types::deserialize::DeserializePacket;
 use smicro_types::sftp::deserialize::parse_utf8_slice;
+use smicro_types::ssh::types::MessageType;
 
 use crate::messages::{MessageChannelClose, MessageChannelEof};
 use crate::state::channel::{Channel, ChannelState};
-use crate::state::SenderState;
+use crate::state::{SenderState, State};
 use crate::{
     error::Error,
     messages::{
@@ -21,62 +23,67 @@ use crate::{
     write_message,
 };
 
-#[derive(Clone, Debug)]
+use super::SessionStateEstablished;
+
+#[declare_session_state(msg_type = MessageType::ChannelOpen)]
 pub struct ExpectsChannelOpen {}
 
-#[declare_session_state_with_allowed_message_types(structure = ExpectsChannelOpen, msg_type = MessageType::ChannelOpen)]
-fn process(message_data: &[u8]) {
-    let (_, msg) = MessageChannelOpen::deserialize(message_data)?;
+impl ExpectsChannelOpen {
+    pub fn inner_process<const SIZE: usize, W: LoopingBufferWriter<SIZE>>(
+        &self,
+        state: &mut State,
+        writer: &mut W,
+        _message_type: MessageType,
+        message_data: &[u8],
+    ) -> Result<SessionStateEstablished, Error> {
+        let (_, msg) = MessageChannelOpen::deserialize(message_data)?;
 
-    if msg.channel_type != "session" {
-        write_message(
-            &mut state.sender,
-            writer,
-            &MessageChannelOpenFailure::new(
-                msg.sender_channel,
-                ChannelOpenFailureReason::UnknownChannelType,
-            ),
-        )?;
-
-        return Err(Error::InvalidChannelMessage);
-    }
-
-    let local_chan_number = match state.channels.allocate_channel(
-        msg.sender_channel,
-        msg.max_pkt_size,
-        msg.initial_window_size,
-    ) {
-        Ok(chan) => chan,
-        Err(e) => {
+        if msg.channel_type != "session" {
             write_message(
                 &mut state.sender,
                 writer,
                 &MessageChannelOpenFailure::new(
                     msg.sender_channel,
-                    ChannelOpenFailureReason::ConnectFailed,
+                    ChannelOpenFailureReason::UnknownChannelType,
                 ),
             )?;
 
-            return Err(Error::from(e));
+            return Err(Error::InvalidChannelMessage);
         }
-    };
 
-    let confirmation = MessageChannelOpenConfirmation {
-        recipient_channel: msg.sender_channel,
-        sender_channel: local_chan_number,
-        initial_window_size: msg.initial_window_size,
-        max_pkt_size: msg.max_pkt_size,
-    };
-    write_message(&mut state.sender, writer, &confirmation)?;
+        let local_chan_number = match state.channels.allocate_channel(
+            msg.sender_channel,
+            msg.max_pkt_size,
+            msg.initial_window_size,
+        ) {
+            Ok(chan) => chan,
+            Err(e) => {
+                write_message(
+                    &mut state.sender,
+                    writer,
+                    &MessageChannelOpenFailure::new(
+                        msg.sender_channel,
+                        ChannelOpenFailureReason::ConnectFailed,
+                    ),
+                )?;
 
-    Ok((
-        next,
-        SessionStates::AcceptsChannelMessages(AcceptsChannelMessages {}),
-    ))
+                return Err(Error::from(e));
+            }
+        };
+
+        let confirmation = MessageChannelOpenConfirmation {
+            recipient_channel: msg.sender_channel,
+            sender_channel: local_chan_number,
+            initial_window_size: msg.initial_window_size,
+            max_pkt_size: msg.max_pkt_size,
+        };
+        write_message(&mut state.sender, writer, &confirmation)?;
+
+        Ok(SessionStateEstablished::AcceptsChannelMessages(
+            AcceptsChannelMessages {},
+        ))
+    }
 }
-
-#[derive(Clone, Debug)]
-pub struct AcceptsChannelMessages {}
 
 fn spawn_command(command: &str, with_env: bool) -> Result<ChannelCommand, Error> {
     // Shell injection FTW!
@@ -172,93 +179,104 @@ fn handle_channel_request<const SIZE: usize, W: LoopingBufferWriter<SIZE>>(
     }
 }
 
-#[declare_session_state_with_allowed_message_types(
-    structure = AcceptsChannelMessages,
+#[declare_session_state(
     msg_type = [MessageType::ChannelRequest, MessageType::ChannelData, MessageType::ChannelWindowAdjust, MessageType::ChannelEof, MessageType::ChannelClose]
 )]
-fn process(message_data: &[u8]) {
-    match message_type {
-        MessageType::ChannelRequest => {
-            let (_, msg) = MessageChannelRequest::deserialize(message_data)?;
+pub struct AcceptsChannelMessages {}
 
-            let chan = state.channels.get_channel(msg.recipient_channel)?;
+impl AcceptsChannelMessages {
+    pub fn inner_process<const SIZE: usize, W: LoopingBufferWriter<SIZE>>(
+        &self,
+        state: &mut State,
+        writer: &mut W,
+        message_type: MessageType,
+        message_data: &[u8],
+    ) -> Result<SessionStateEstablished, Error> {
+        match message_type {
+            MessageType::ChannelRequest => {
+                let (_, msg) = MessageChannelRequest::deserialize(message_data)?;
 
-            if let Err(_) = handle_channel_request(&mut state.sender, writer, msg, chan) {
-                let failure = MessageChannelFailure {
-                    recipient_channel: chan.remote_channel_number,
-                };
-                write_message(&mut state.sender, writer, &failure)?;
+                let chan = state.channels.get_channel(msg.recipient_channel)?;
+
+                if let Err(_) = handle_channel_request(&mut state.sender, writer, msg, chan) {
+                    let failure = MessageChannelFailure {
+                        recipient_channel: chan.remote_channel_number,
+                    };
+                    write_message(&mut state.sender, writer, &failure)?;
+                }
             }
-        }
-        MessageType::ChannelData => {
-            let (_, msg) = MessageChannelData::deserialize(message_data)?;
+            MessageType::ChannelData => {
+                let (_, msg) = MessageChannelData::deserialize(message_data)?;
 
-            let chan = state.channels.get_channel(msg.recipient_channel)?;
+                let chan = state.channels.get_channel(msg.recipient_channel)?;
 
-            debug!("Got channel data ({} bytes)", msg.data.0.len());
+                debug!("Got channel data ({} bytes)", msg.data.0.len());
 
-            if chan.state == ChannelState::Running {
-                let cmd = &mut chan
-                    .command
-                    .as_mut()
-                    .ok_or(Error::MissingCommandInChannel)?;
+                if chan.state == ChannelState::Running {
+                    let cmd = &mut chan
+                        .command
+                        .as_mut()
+                        .ok_or(Error::MissingCommandInChannel)?;
 
-                if msg.data.0.len() > chan.receiver_window_size as usize {
+                    if msg.data.0.len() > chan.receiver_window_size as usize {
+                        return Err(Error::ExceededChannelLength);
+                    }
+
+                    if let Err(_) = cmd.stdin_buffer.write(msg.data.0) {
+                        return Err(Error::IoError(std::io::Error::new(
+                            std::io::ErrorKind::WouldBlock,
+                            "Could not write data to the stdin buffer",
+                        )));
+                    }
+
+                    chan.receiver_window_size -= msg.data.0.len() as u32;
+                }
+            }
+            MessageType::ChannelWindowAdjust => {
+                let (_, msg) = MessageChannelWindowAdjust::deserialize(message_data)?;
+
+                let chan = state.channels.get_channel(msg.recipient_channel)?;
+                if u32::MAX - msg.bytes_to_add < chan.sender_window_size {
+                    // End of channel: maximum number of writeable data reached
                     return Err(Error::ExceededChannelLength);
                 }
 
-                if let Err(_) = cmd.stdin_buffer.write(msg.data.0) {
-                    return Err(Error::IoError(std::io::Error::new(
-                        std::io::ErrorKind::WouldBlock,
-                        "Could not write data to the stdin buffer",
-                    )));
-                }
+                chan.sender_window_size += msg.bytes_to_add;
+            }
+            MessageType::ChannelEof => {
+                let (_, msg) = MessageChannelEof::deserialize(message_data)?;
 
-                chan.receiver_window_size -= msg.data.0.len() as u32;
+                let chan = state.channels.get_channel(msg.recipient_channel)?;
+
+                chan.state = ChannelState::Stopped;
+            }
+            MessageType::ChannelClose => {
+                let (_, msg) = MessageChannelClose::deserialize(message_data)?;
+
+                let chan = state.channels.get_channel(msg.recipient_channel)?;
+
+                debug!(
+                    "Received a request for closing channel {}",
+                    msg.recipient_channel
+                );
+
+                write_message(
+                    &mut state.sender,
+                    writer,
+                    &MessageChannelClose {
+                        recipient_channel: chan.remote_channel_number,
+                    },
+                )?;
+
+                chan.state = ChannelState::Shutdowned;
+            }
+            _ => {
+                unreachable!()
             }
         }
-        MessageType::ChannelWindowAdjust => {
-            let (_, msg) = MessageChannelWindowAdjust::deserialize(message_data)?;
 
-            let chan = state.channels.get_channel(msg.recipient_channel)?;
-            if u32::MAX - msg.bytes_to_add < chan.receiver_window_size {
-                // End of channel: maximum number of writeable data reached
-                return Err(Error::ExceededChannelLength);
-            }
-
-            chan.receiver_window_size += msg.bytes_to_add;
-        }
-        MessageType::ChannelEof => {
-            let (_, msg) = MessageChannelEof::deserialize(message_data)?;
-
-            let chan = state.channels.get_channel(msg.recipient_channel)?;
-
-            chan.state = ChannelState::Stopped;
-        }
-        MessageType::ChannelClose => {
-            let (_, msg) = MessageChannelClose::deserialize(message_data)?;
-
-            let chan = state.channels.get_channel(msg.recipient_channel)?;
-
-            debug!(
-                "Received a request for closing channel {}",
-                msg.recipient_channel
-            );
-
-            write_message(
-                &mut state.sender,
-                writer,
-                &MessageChannelClose {
-                    recipient_channel: chan.remote_channel_number,
-                },
-            )?;
-
-            chan.state = ChannelState::Shutdowned;
-        }
-        _ => {
-            unreachable!()
-        }
+        Ok(SessionStateEstablished::AcceptsChannelMessages(
+            self.clone(),
+        ))
     }
-
-    Ok((next, SessionStates::AcceptsChannelMessages(self.clone())))
 }

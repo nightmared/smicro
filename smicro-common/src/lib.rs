@@ -1,5 +1,5 @@
-use std::fmt::{Debug, Display};
-use std::io::{Error, ErrorKind, Write};
+use std::fmt::Debug;
+use std::io::{Error, ErrorKind};
 
 #[derive(thiserror::Error, Debug)]
 pub enum BufferCreationError {

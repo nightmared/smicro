@@ -14,14 +14,23 @@ pub use self::session_establishment::{
     IdentifierStringReceived, IdentifierStringSent, UninitializedSession,
 };
 
+pub trait SessionState {
+    fn process<'a, const SIZE: usize, W: LoopingBufferWriter<SIZE>>(
+        &mut self,
+        state: &mut State,
+        writer: &mut W,
+        input: &'a mut [u8],
+    ) -> Result<(&'a [u8], SessionStates), Error>;
+}
+
 macro_rules! define_state_list {
-    ($($name:ident),*) => {
+    ($struct:ident, $($name:ident),*) => {
         #[derive(Debug)]
-        pub enum SessionStates {
+        pub enum $struct {
             $($name(crate::session::$name)),*
         }
 
-        impl SessionState for SessionStates {
+        impl SessionState for $struct {
             fn process<'a, const SIZE: usize, W: LoopingBufferWriter<SIZE>>(
                 &mut self,
                 state: &mut State,
@@ -29,16 +38,15 @@ macro_rules! define_state_list {
                 input: &'a mut [u8],
             ) -> Result<(&'a [u8], SessionStates), Error> {
                 match self {
-                    $(SessionStates::$name(val) => val.process(state, writer, input),)*
+                    $($struct::$name(val) => val.process(state, writer, input),)*
                 }
             }
         }
     };
 }
+
 define_state_list!(
-    UninitializedSession,
-    IdentifierStringSent,
-    IdentifierStringReceived,
+    SessionStateEstablished,
     KexSent,
     KexReceived,
     KexReplySent,
@@ -48,11 +56,10 @@ define_state_list!(
     AcceptsChannelMessages
 );
 
-pub trait SessionState {
-    fn process<'a, const SIZE: usize, W: LoopingBufferWriter<SIZE>>(
-        &mut self,
-        state: &mut State,
-        writer: &mut W,
-        input: &'a mut [u8],
-    ) -> Result<(&'a [u8], SessionStates), Error>;
-}
+define_state_list!(
+    SessionStates,
+    UninitializedSession,
+    IdentifierStringSent,
+    IdentifierStringReceived,
+    SessionStateEstablished
+);

@@ -11,7 +11,7 @@ use sha2::Sha512;
 use smicro_types::serialize::SerializePacket;
 use smicro_types::ssh::types::{PositiveBigNum, SSHSlice, SharedSSHSlice};
 
-use crate::session::KexReplySent;
+use crate::session::KexReceived;
 use crate::{
     crypto::{
         compute_exchange_hash, derive_encryption_key,
@@ -19,18 +19,27 @@ use crate::{
         CryptoAlg,
     },
     error::Error,
-    messages::{MessageKexEcdhInit, MessageKexEcdhReply, MessageKeyExchangeInit},
+    messages::{MessageKexEcdhInit, MessageKexEcdhReply},
     state::State,
 };
+
+#[derive(Clone, Debug)]
+pub struct KexNegotiatedKeys {
+    pub iv_c2s: Vec<u8>,
+    pub iv_s2c: Vec<u8>,
+    pub encryption_key_c2s: Vec<u8>,
+    pub encryption_key_s2c: Vec<u8>,
+    pub integrity_key_c2s: Vec<u8>,
+    pub integrity_key_s2c: Vec<u8>,
+}
 
 pub trait KEX {
     fn perform_key_exchange(
         &self,
         state: &mut State,
         ecdh_init: &MessageKexEcdhInit,
-        my_kex_message: &MessageKeyExchangeInit,
-        peer_kex_message: &MessageKeyExchangeInit,
-    ) -> Result<(MessageKexEcdhReply, Vec<u8>, KexReplySent), Error>;
+        received_kex_msg: &KexReceived,
+    ) -> Result<(MessageKexEcdhReply, KexNegotiatedKeys), Error>;
 }
 
 pub trait KEXIdentifier: CryptoAlg + KEX {
@@ -51,15 +60,9 @@ impl KEX for EcdhSha2Nistp521 {
         &self,
         state: &mut State,
         ecdh_init: &MessageKexEcdhInit,
-        my_kex_message: &MessageKeyExchangeInit,
-        peer_kex_message: &MessageKeyExchangeInit,
-    ) -> Result<(MessageKexEcdhReply, Vec<u8>, KexReplySent), Error> {
-        let crypto_algs = state
-            .receiver
-            .crypto_algs
-            .as_ref()
-            .ok_or(Error::MissingCryptoAlgs)?
-            .clone();
+        received_kex_msg: &KexReceived,
+    ) -> Result<(MessageKexEcdhReply, KexNegotiatedKeys), Error> {
+        let crypto_algs = received_kex_msg.new_crypto_algs.clone();
 
         // Compute the shared secret
         let peer_pubkey: EcPublicKey<p521::NistP521> =
@@ -114,9 +117,15 @@ impl KEX for EcdhSha2Nistp521 {
             &q_server,
             &shared_secret,
             ecdh_init,
-            my_kex_message,
-            peer_kex_message,
+            &received_kex_msg.my_kex_message,
+            &received_kex_msg.peer_kex_message,
         )?;
+
+        // the session identifier is unique for the connection, do not reset it if it is already set
+        if state.session_identifier.is_none() {
+            state.session_identifier = Some(exchange_hash.clone());
+        }
+        let session_id = state.session_identifier.as_ref().unwrap();
 
         let mut signature = Vec::new();
         matching_host_key.sign(exchange_hash.as_bytes(), &mut signature)?;
@@ -141,7 +150,7 @@ impl KEX for EcdhSha2Nistp521 {
                 &shared_secret,
                 &exchange_hash,
                 c,
-                &exchange_hash,
+                session_id,
                 crypto_algs.key_max_length(),
             )
         };
@@ -153,7 +162,7 @@ impl KEX for EcdhSha2Nistp521 {
         let integrity_key_c2s = derive_key(b'E')?;
         let integrity_key_s2c = derive_key(b'F')?;
 
-        let kex_reply_sent = KexReplySent {
+        let negotiated_keys = KexNegotiatedKeys {
             iv_c2s,
             iv_s2c,
             encryption_key_c2s,
@@ -162,7 +171,7 @@ impl KEX for EcdhSha2Nistp521 {
             integrity_key_s2c,
         };
 
-        Ok((res, exchange_hash, kex_reply_sent))
+        Ok((res, negotiated_keys))
     }
 }
 

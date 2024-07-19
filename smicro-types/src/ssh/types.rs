@@ -1,4 +1,4 @@
-use std::fmt::{Debug, Write};
+use std::fmt::Debug;
 
 #[derive(
     Debug, Clone, Copy, Eq, PartialEq, num_enum::TryFromPrimitive, num_enum::IntoPrimitive,

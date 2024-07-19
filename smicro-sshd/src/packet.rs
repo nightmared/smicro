@@ -101,13 +101,6 @@ fn parse_plaintext_packet<'a>(
         )));
     }
 
-    if length < 12 {
-        warn!("Packet too small: {} bytes", length);
-        return Err(nom::Err::Failure(ParsingError::InvalidPacketLength(
-            length as usize,
-        )));
-    }
-
     if length <= padding_length as u32 + 1 {
         warn!("The packet size implies that the packet has no payload",);
         return Err(nom::Err::Failure(ParsingError::InvalidPacketLength(

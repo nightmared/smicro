@@ -367,8 +367,8 @@ fn flush_channel<const SIZE: usize, T: LoopingBufferWriter<SIZE>>(
 ) -> Result<NonIOProgress, Error> {
     let mut res = NonIOProgress::Done;
     if let Some(ref mut cmd) = chan.command {
-        // bump the sender window, if required
-        if chan.sender_window_size < MAX_PKT_SIZE as u32 {
+        // bump the receiver window size, if required
+        if chan.receiver_window_size < MAX_PKT_SIZE as u32 {
             match write_message(
                 sender,
                 output_buf,
@@ -378,7 +378,7 @@ fn flush_channel<const SIZE: usize, T: LoopingBufferWriter<SIZE>>(
                 },
             ) {
                 Ok(()) => {
-                    chan.sender_window_size += MAX_PKT_SIZE as u32;
+                    chan.receiver_window_size += MAX_PKT_SIZE as u32;
                 }
                 // retry later if we cannot write to the output buffer now
                 Err(Error::IoError(e)) if e.kind() == ErrorKind::WouldBlock => {
@@ -481,9 +481,11 @@ fn process_channel_states<const SIZE: usize, W: LoopingBufferWriter<SIZE>>(
                 } else {
                     let mut remove = true;
                     if let Some(cmd) = &mut chan.command {
-                        // inhibit the removal until all data was trasnferred
+                        // inhibit the removal until all data was transferred
                         remove = cmd.stdout_buffer.get_readable_data().len() == 0
                             && cmd.stderr_buffer.get_readable_data().len() == 0;
+                        // ensure that the process was waited for
+                        let _ = cmd.command.try_wait();
                     }
                     if remove {
                         debug!("Requesting the removal of channel {}", chan_number);

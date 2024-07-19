@@ -11,7 +11,10 @@ use smicro_common::LoopingBufferWriter;
 use crate::{
     error::Error,
     messages::gen_kex_initial_list,
-    session::{KexSent, SessionState, SessionStates},
+    session::{
+        kex::SessionStateAllowedAfterKex, ExpectsServiceRequest, KexSent, SessionState,
+        SessionStateEstablished, SessionStates,
+    },
     state::State,
     write_message,
 };
@@ -103,9 +106,12 @@ impl SessionState for IdentifierStringReceived {
 
         Ok((
             input,
-            SessionStates::KexSent(KexSent {
+            SessionStates::SessionStateEstablished(SessionStateEstablished::KexSent(KexSent {
                 my_kex_message: kex_init_msg,
-            }),
+                next_state: SessionStateAllowedAfterKex::ExpectsServiceRequest(
+                    ExpectsServiceRequest {},
+                ),
+            })),
         ))
     }
 }

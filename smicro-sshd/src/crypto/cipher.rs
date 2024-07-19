@@ -153,8 +153,6 @@ impl Cipher for Chacha20Poly1305Impl {
         let next_data = &input[poly1305::BLOCK_SIZE + 4 + pkt_size as usize..];
         let cur_pkt_plaintext = &input[..4 + pkt_size as usize];
 
-        log::trace!("Packet plaintext: {:?}", cur_pkt_plaintext);
-
         Ok((next_data, cur_pkt_plaintext))
     }
 }

@@ -462,7 +462,8 @@ checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
 [[package]]
 name = "mio"
 version = "1.0.0"
-source = "git+https://github.com/tokio-rs/mio.git?branch=master#1ce154579e1076260ea6934e89275912b01fae47"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4929e1f84c5e54c3ec6141cd5d8b5a5c055f031f80cf78f2072920173cb4d880"
 dependencies = [
  "hermit-abi",
  "libc",

@@ -1,6 +1,9 @@
 use base64::engine::{general_purpose::STANDARD, Engine as _};
 
-use smicro_macros::declare_session_state_with_allowed_message_types;
+use smicro_common::LoopingBufferWriter;
+use smicro_macros::declare_session_state;
+use smicro_types::deserialize::DeserializePacket;
+use smicro_types::ssh::types::MessageType;
 use smicro_types::{
     serialize::SerializePacket,
     ssh::types::{NameList, SharedSSHSlice},
@@ -15,100 +18,119 @@ use crate::{
         UserAuthPublickey,
     },
     session::ExpectsChannelOpen,
+    state::State,
     write_message,
 };
 
-#[derive(Clone, Debug)]
+use super::SessionStateEstablished;
+
+#[declare_session_state(msg_type = MessageType::ServiceRequest)]
 pub struct ExpectsServiceRequest {}
 
-#[declare_session_state_with_allowed_message_types(structure = ExpectsServiceRequest, msg_type = MessageType::ServiceRequest)]
-fn process(message_data: &[u8]) {
-    let (_, msg) = MessageServiceRequest::deserialize(message_data)?;
+impl ExpectsServiceRequest {
+    fn inner_process<const SIZE: usize, W: LoopingBufferWriter<SIZE>>(
+        &self,
+        state: &mut State,
+        writer: &mut W,
+        _message_type: MessageType,
+        message_data: &[u8],
+    ) -> Result<SessionStateEstablished, Error> {
+        let (_, msg) = MessageServiceRequest::deserialize(message_data)?;
 
-    if msg.service_name != "ssh-userauth" {
-        return Err(Error::InvalidServiceRequest);
+        if msg.service_name != "ssh-userauth" {
+            return Err(Error::InvalidServiceRequest);
+        }
+
+        write_message(
+            &mut state.sender,
+            writer,
+            &MessageServiceAccept {
+                service_name: msg.service_name,
+            },
+        )?;
+
+        Ok(SessionStateEstablished::ExpectsUserAuthRequest(
+            ExpectsUserAuthRequest {},
+        ))
     }
-
-    write_message(
-        &mut state.sender,
-        writer,
-        &MessageServiceAccept {
-            service_name: msg.service_name,
-        },
-    )?;
-
-    Ok((
-        next,
-        SessionStates::ExpectsUserAuthRequest(ExpectsUserAuthRequest {}),
-    ))
 }
 
-#[derive(Clone, Debug)]
+#[declare_session_state(msg_type = MessageType::UserAuthRequest)]
 pub struct ExpectsUserAuthRequest {}
 
-#[declare_session_state_with_allowed_message_types(structure = ExpectsUserAuthRequest, msg_type = MessageType::UserAuthRequest)]
-fn process(message_data: &[u8]) {
-    let (_, msg) = MessageUserAuthRequest::deserialize(message_data)?;
+impl ExpectsUserAuthRequest {
+    fn inner_process<const SIZE: usize, W: LoopingBufferWriter<SIZE>>(
+        &self,
+        state: &mut State,
+        writer: &mut W,
+        _message_type: MessageType,
+        message_data: &[u8],
+    ) -> Result<SessionStateEstablished, Error> {
+        let (_, msg) = MessageUserAuthRequest::deserialize(message_data)?;
 
-    if msg.method_name == "publickey" {
-        let (_, pk) = UserAuthPublickey::deserialize(msg.method_data)?;
+        if msg.method_name == "publickey" {
+            let (_, pk) = UserAuthPublickey::deserialize(msg.method_data)?;
 
-        if pk.public_key_alg_name == <EcdsaSha2Nistp521 as SignerIdentifier>::NAME {
-            let verifier = EcdsaSha2Nistp521::new();
-            let allowed_key = STANDARD.decode("AAAAE2VjZHNhLXNoYTItbmlzdHA1MjEAAAAIbmlzdHA1MjEAAACFBAD2J8ayINyXiTREW9oNZ/TTveKGTAPe0orWMgMJ/unT72Lo/NUA2G4LcgCrjpunTctfT88Drq5NB5uyULw3tLMI+wBvJqL7ACK5+j9c1GDx8wZ1W5AN+hYzi1fjvMICS/MCDmG2J3KaDZOci3A5DQCtaJ7COs9BzVmJQzWFpF76QxgJJQ==").unwrap();
-            if pk.public_key_blob == allowed_key {
-                if pk.with_signature {
-                    let sig = pk.signature.ok_or(Error::NoSignatureProvided)?;
+            if pk.public_key_alg_name == <EcdsaSha2Nistp521 as SignerIdentifier>::NAME {
+                let verifier = EcdsaSha2Nistp521::new();
+                let allowed_key = STANDARD.decode("AAAAE2VjZHNhLXNoYTItbmlzdHA1MjEAAAAIbmlzdHA1MjEAAACFBAD2J8ayINyXiTREW9oNZ/TTveKGTAPe0orWMgMJ/unT72Lo/NUA2G4LcgCrjpunTctfT88Drq5NB5uyULw3tLMI+wBvJqL7ACK5+j9c1GDx8wZ1W5AN+hYzi1fjvMICS/MCDmG2J3KaDZOci3A5DQCtaJ7COs9BzVmJQzWFpF76QxgJJQ==").unwrap();
+                if pk.public_key_blob == allowed_key {
+                    if pk.with_signature {
+                        let sig = pk.signature.ok_or(Error::NoSignatureProvided)?;
 
-                    let session_identifier = state
-                        .session_identifier
-                        .as_ref()
-                        .ok_or(Error::MissingSessionIdentifier)?;
-                    let mut message = Vec::new();
-                    SharedSSHSlice(session_identifier.as_slice()).serialize(&mut message)?;
-                    message.push(MessageType::UserAuthRequest as u8);
-                    msg.user_name.serialize(&mut message)?;
-                    msg.service_name.serialize(&mut message)?;
-                    "publickey".serialize(&mut message)?;
-                    true.serialize(&mut message)?;
-                    pk.public_key_alg_name.serialize(&mut message)?;
-                    SharedSSHSlice(pk.public_key_blob).serialize(&mut message)?;
+                        let session_identifier = state
+                            .session_identifier
+                            .as_ref()
+                            .ok_or(Error::MissingSessionIdentifier)?;
+                        let mut message = Vec::new();
+                        SharedSSHSlice(session_identifier.as_slice()).serialize(&mut message)?;
+                        message.push(MessageType::UserAuthRequest as u8);
+                        msg.user_name.serialize(&mut message)?;
+                        msg.service_name.serialize(&mut message)?;
+                        "publickey".serialize(&mut message)?;
+                        true.serialize(&mut message)?;
+                        pk.public_key_alg_name.serialize(&mut message)?;
+                        SharedSSHSlice(pk.public_key_blob).serialize(&mut message)?;
 
-                    if verifier.signature_is_valid(pk.public_key_blob, &message, sig)? {
-                        write_message(&mut state.sender, writer, &MessageUserAuthSuccess {})?;
+                        if verifier.signature_is_valid(pk.public_key_blob, &message, sig)? {
+                            write_message(&mut state.sender, writer, &MessageUserAuthSuccess {})?;
 
-                        state.authentified_user = Some(msg.user_name.to_string());
+                            state.authentified_user = Some(msg.user_name.to_string());
 
-                        return Ok((
-                            next,
-                            SessionStates::ExpectsChannelOpen(ExpectsChannelOpen {}),
+                            return Ok(SessionStateEstablished::ExpectsChannelOpen(
+                                ExpectsChannelOpen {},
+                            ));
+                        }
+                    } else {
+                        write_message(
+                            &mut state.sender,
+                            writer,
+                            &MessageUserAuthPublicKeyOk {
+                                public_key_alg_name: pk.public_key_alg_name,
+                                public_key_blob: SharedSSHSlice(pk.public_key_blob),
+                            },
+                        )?;
+
+                        return Ok(SessionStateEstablished::ExpectsUserAuthRequest(
+                            self.clone(),
                         ));
                     }
-                } else {
-                    write_message(
-                        &mut state.sender,
-                        writer,
-                        &MessageUserAuthPublicKeyOk {
-                            public_key_alg_name: pk.public_key_alg_name,
-                            public_key_blob: SharedSSHSlice(pk.public_key_blob),
-                        },
-                    )?;
-
-                    return Ok((next, SessionStates::ExpectsUserAuthRequest(self.clone())));
                 }
             }
         }
-    }
-    write_message(
-        &mut state.sender,
-        writer,
-        &MessageUserAuthFailure {
-            allowed_auth_methods: NameList {
-                entries: vec![String::from("publickey")],
+        write_message(
+            &mut state.sender,
+            writer,
+            &MessageUserAuthFailure {
+                allowed_auth_methods: NameList {
+                    entries: vec![String::from("publickey")],
+                },
+                partial_success: false,
             },
-            partial_success: false,
-        },
-    )?;
+        )?;
 
-    Ok((next, SessionStates::ExpectsUserAuthRequest(self.clone())))
+        Ok(SessionStateEstablished::ExpectsUserAuthRequest(
+            self.clone(),
+        ))
+    }
 }

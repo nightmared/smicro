@@ -41,7 +41,7 @@ fn process_command(
     pkt: Packet<CommandType, CommandWrapper>,
 ) -> Result<(), Error> {
     let mut hdr = pkt.hdr;
-    debug!("Received command {:?}", pkt.data);
+    debug!("Received command {:?}", hdr.ty);
     let response = match pkt.data.process(state) {
         Ok(res) => res,
         Err(Error::StatusCode(status)) => {
@@ -73,7 +73,7 @@ fn process_command(
         }
     }
 
-    debug!("Got the response {response:?}");
+    trace!("Got the response {response:?}");
 
     let req_id_size = if hdr.request_id.is_some() { 4 } else { 0 };
     let length = response.get_size() + 1 + req_id_size;
@@ -112,14 +112,18 @@ pub fn parse_command(
 }
 
 fn main() -> Result<(), Error> {
-    syslog::init(Facility::LOG_USER, LevelFilter::Info, Some("smicro_sftp"))?;
+    syslog::init(
+        Facility::LOG_USER,
+        LevelFilter::Info,
+        Some("smicro_binhelper"),
+    )?;
 
     let mut input = stdin().lock();
     // We do not use std::io::stdout() as it uses internally a LineWriter method that consumes a lot of CPu
     // searching for newlines
     let mut output = unsafe { File::from_raw_fd(libc::STDOUT_FILENO) };
 
-    info!("smicro_sftp binary helper started");
+    info!("smicro_binhelper started");
 
     let buf = create_circular_buffer(MAX_PKT_SIZE)?;
     let mut data_start = 0;
