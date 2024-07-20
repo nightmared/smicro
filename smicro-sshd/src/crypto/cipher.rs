@@ -1,15 +1,14 @@
-use chacha20::cipher::generic_array::GenericArray;
 use chacha20::ChaCha20Legacy;
-use cipher::StreamCipher;
-use cipher::StreamCipherSeek;
-use cipher::{Iv, KeyIvInit};
+use cipher::{BlockCipherEncrypt, Iv, KeyIvInit, StreamCipher, StreamCipherSeek};
 use elliptic_curve::subtle::ConstantTimeEq;
+use hybrid_array::Array;
 use nom::{bytes::streaming::take, IResult};
 use poly1305::Poly1305;
 use smicro_types::{
     error::ParsingError,
     ssh::deserialize::{const_take, streaming_const_take},
 };
+use universal_hash::KeyInit;
 
 use crate::{crypto::CryptoAlg, error::Error, MAX_PKT_SIZE};
 
@@ -23,7 +22,7 @@ pub trait CipherAllocator {
     fn iv_size_bits(&self) -> usize;
     fn block_size_bits(&self) -> usize;
 
-    fn from_key(&self, key: &[u8]) -> Result<Box<dyn Cipher>, Error>;
+    fn from_key(&self, key: &[u8], raw_iv: &[u8]) -> Result<Box<dyn Cipher>, Error>;
 }
 
 #[derive(Clone)]
@@ -62,26 +61,82 @@ impl CipherAllocator for Chacha20Poly1305 {
         Self::BLOCK_SIZE_BYTES * 8
     }
 
-    fn from_key(&self, raw_key: &[u8]) -> Result<Box<dyn Cipher>, Error> {
-        let key = GenericArray::from_slice(&raw_key[0..self.key_size_bits() / 8]).clone();
-        let aad_key = GenericArray::from_slice(
-            &raw_key[self.key_size_bits() / 8..2 * self.key_size_bits() / 8],
-        )
-        .clone();
+    #[cfg(not(feature = "ring"))]
+    fn from_key(&self, raw_key: &[u8], _raw_iv: &[u8]) -> Result<Box<dyn Cipher>, Error> {
+        let key = Array::try_from(&raw_key[0..self.key_size_bits() / 8])?;
+        let aad_key =
+            Array::try_from(&raw_key[self.key_size_bits() / 8..2 * self.key_size_bits() / 8])?;
 
         Ok(Box::new(Chacha20Poly1305Impl { key, aad_key }))
+    }
+
+    #[cfg(feature = "ring")]
+    fn from_key(&self, raw_key: &[u8], _raw_iv: &[u8]) -> Result<Box<dyn Cipher>, Error> {
+        let key = Array::try_from(&raw_key[0..self.key_size_bits() / 8])?;
+        let aad_key =
+            Array::try_from(&raw_key[self.key_size_bits() / 8..2 * self.key_size_bits() / 8])?;
+
+        Ok(Box::new(Chacha20Poly1305Impl { key, aad_key }))
+    }
+}
+
+#[derive(Clone)]
+pub struct Aes256Ctr {}
+
+impl CryptoAlg for Aes256Ctr {
+    fn new() -> Self {
+        Self {}
+    }
+}
+
+impl CipherIdentifier for Aes256Ctr {
+    const NAME: &'static str = "aes256-ctr";
+}
+
+impl Aes256Ctr {
+    const KEY_SIZE_BYTES: usize = 32;
+    const IV_SIZE_BYTES: usize = 16;
+    const BLOCK_SIZE_BYTES: usize = 16;
+}
+
+impl CipherAllocator for Aes256Ctr {
+    fn name(&self) -> &'static str {
+        Self::NAME
+    }
+
+    fn key_size_bits(&self) -> usize {
+        Self::KEY_SIZE_BYTES * 8
+    }
+
+    fn iv_size_bits(&self) -> usize {
+        Self::IV_SIZE_BYTES * 8
+    }
+
+    fn block_size_bits(&self) -> usize {
+        Self::BLOCK_SIZE_BYTES * 8
+    }
+
+    fn from_key(&self, raw_key: &[u8], raw_iv: &[u8]) -> Result<Box<dyn Cipher>, Error> {
+        let key = Array::try_from(&raw_key[0..Self::KEY_SIZE_BYTES])?;
+        let ctr = Array::try_from(&raw_iv[0..Self::IV_SIZE_BYTES])?;
+
+        Ok(Box::new(Aes256CtrImpl { key, ctr }))
     }
 }
 
 pub trait Cipher {
     fn block_size_bytes(&self) -> usize;
 
+    fn is_aead(&self) -> bool {
+        false
+    }
+
     fn required_space_to_encrypt(&self, data_len: usize) -> usize;
 
-    fn encrypt(&self, data: &mut [u8], sequence_number: u32) -> Result<(), Error>;
+    fn encrypt(&mut self, data: &mut [u8], sequence_number: u32) -> Result<(), Error>;
 
     fn decrypt<'a>(
-        &self,
+        &mut self,
         input: &'a mut [u8],
         sequence_number: u32,
     ) -> IResult<&'a [u8], &'a [u8], ParsingError>;
@@ -89,8 +144,8 @@ pub trait Cipher {
 
 #[derive(Clone)]
 pub struct Chacha20Poly1305Impl {
-    key: GenericArray<u8, cipher::consts::U32>,
-    aad_key: GenericArray<u8, cipher::consts::U32>,
+    key: Array<u8, cipher::consts::U32>,
+    aad_key: Array<u8, cipher::consts::U32>,
 }
 
 impl Cipher for Chacha20Poly1305Impl {
@@ -98,12 +153,16 @@ impl Cipher for Chacha20Poly1305Impl {
         64
     }
 
+    fn is_aead(&self) -> bool {
+        true
+    }
+
     fn required_space_to_encrypt(&self, data_len: usize) -> usize {
         // size of the data itself + the poly1305 tag size
         data_len + poly1305::BLOCK_SIZE
     }
 
-    fn encrypt(&self, data: &mut [u8], sequence_number: u32) -> Result<(), Error> {
+    fn encrypt(&mut self, data: &mut [u8], sequence_number: u32) -> Result<(), Error> {
         // this is a cipher with authenticated encryptions, so we need to extract the packet length
         // beforehand
         let (_, size_field) = const_take::<4>(data).map_err(|_| Error::EncryptionError)?;
@@ -122,7 +181,7 @@ impl Cipher for Chacha20Poly1305Impl {
     }
 
     fn decrypt<'a>(
-        &self,
+        &mut self,
         input: &'a mut [u8],
         sequence_number: u32,
     ) -> IResult<&'a [u8], &'a [u8], ParsingError> {
@@ -162,7 +221,7 @@ impl Chacha20Poly1305Impl {
         let sequence_number = (sequence_number as u64).to_be_bytes();
         let mut cipher = <ChaCha20Legacy as KeyIvInit>::new(
             &self.key,
-            <Iv<ChaCha20Legacy>>::from_slice(&sequence_number),
+            <&Iv<ChaCha20Legacy>>::from(&sequence_number),
         );
 
         let mut block = [0; 64];
@@ -181,7 +240,7 @@ impl Chacha20Poly1305Impl {
         let sequence_number = (sequence_number as u64).to_be_bytes();
         let mut cipher = <ChaCha20Legacy as KeyIvInit>::new(
             &self.key,
-            <Iv<ChaCha20Legacy>>::from_slice(&sequence_number),
+            <&Iv<ChaCha20Legacy>>::from(&sequence_number),
         );
         // skip the first block, that was used to derive the poly1305 key
         cipher.seek(Chacha20Poly1305::BLOCK_SIZE_BYTES);
@@ -193,15 +252,118 @@ impl Chacha20Poly1305Impl {
         let sequence_number = (sequence_number as u64).to_be_bytes();
         let mut cipher = <ChaCha20Legacy as KeyIvInit>::new(
             &self.aad_key,
-            <Iv<ChaCha20Legacy>>::from_slice(&sequence_number),
+            <&Iv<ChaCha20Legacy>>::from(&sequence_number),
         );
 
-        let mut block = [0; 64];
+        let mut block = [0; Chacha20Poly1305::BLOCK_SIZE_BYTES];
         for i in 0..4 {
             block[i] = encrypted_bytes[i];
         }
         cipher.apply_keystream(&mut block);
 
         u32::from_be_bytes([block[0], block[1], block[2], block[3]])
+    }
+}
+
+#[derive(Clone)]
+pub struct Aes256CtrImpl {
+    key: Array<u8, cipher::consts::U32>,
+    ctr: Array<u8, cipher::consts::U16>,
+}
+
+impl Cipher for Aes256CtrImpl {
+    fn block_size_bytes(&self) -> usize {
+        Aes256Ctr::BLOCK_SIZE_BYTES
+    }
+
+    fn required_space_to_encrypt(&self, data_len: usize) -> usize {
+        // size of the data itself
+        data_len
+    }
+
+    fn encrypt(&mut self, data: &mut [u8], _sequence_number: u32) -> Result<(), Error> {
+        self.cipher_main_message(data);
+
+        Ok(())
+    }
+
+    fn decrypt<'a>(
+        &mut self,
+        input: &'a mut [u8],
+        _sequence_number: u32,
+    ) -> IResult<&'a [u8], &'a [u8], ParsingError> {
+        // we need to extract the packet length from the first block
+        let _ = take(Aes256Ctr::BLOCK_SIZE_BYTES)(input.as_ref())?;
+        let pkt_size = self.get_pkt_size(&mut input[0..Aes256Ctr::BLOCK_SIZE_BYTES]);
+        // 5 = length field + 1 byte for the packet itself
+        if pkt_size < 5 || pkt_size as usize > MAX_PKT_SIZE {
+            return Err(nom::Err::Failure(ParsingError::InvalidPacketLength(
+                pkt_size as usize,
+            )));
+        }
+
+        // roundup to the next block number
+        let total_size = (pkt_size as usize + 4 + (Aes256Ctr::BLOCK_SIZE_BYTES - 1))
+            & !(Aes256Ctr::BLOCK_SIZE_BYTES - 1);
+        let _ = take(total_size)(input.as_ref())?;
+
+        self.cipher_main_message(&mut input[Aes256Ctr::BLOCK_SIZE_BYTES..total_size]);
+
+        let next_data = &input[4 + pkt_size as usize..];
+        let cur_pkt_plaintext = &input[..4 + pkt_size as usize];
+
+        Ok((next_data, cur_pkt_plaintext))
+    }
+}
+
+impl Aes256CtrImpl {
+    fn cipher_main_message(&mut self, mut bytes: &mut [u8]) {
+        while bytes.len() > 0 {
+            let (block, next_bytes) = bytes.split_at_mut(Aes256Ctr::BLOCK_SIZE_BYTES);
+            self.cipher_block(block);
+            bytes = next_bytes;
+        }
+    }
+
+    fn get_and_increment_ctr(&mut self) -> Array<u8, cipher::consts::U16> {
+        let original_ctr = self.ctr.clone();
+
+        // increment the counter in a constant-time manner: copied from openssh
+        // (https://github.com/openssh/openssh-portable/blob/c276672fc0e99f0c4389988d54a84c203ce325b6/cipher-aesctr.c#L42-L52)
+        let mut add = 1;
+        for i in (0..Aes256Ctr::BLOCK_SIZE_BYTES).rev() {
+            self.ctr[i] += add;
+            let v = self.ctr[i];
+            // there is a carry only if the current byte wrapped to zero
+            add *= 1
+                ^ (((v >> 7)
+                    | (v >> 6)
+                    | (v >> 5)
+                    | (v >> 4)
+                    | (v >> 3)
+                    | (v >> 2)
+                    | (v >> 1)
+                    | v)
+                    & 1);
+        }
+
+        original_ctr
+    }
+
+    fn cipher_block(&mut self, array: &mut [u8]) {
+        let mut keystream = self.get_and_increment_ctr();
+
+        let key = aes::Aes256::new(&self.key);
+        key.encrypt_block(&mut keystream);
+
+        for i in 0..Aes256Ctr::BLOCK_SIZE_BYTES {
+            array[i] ^= keystream[i];
+        }
+    }
+
+    fn get_pkt_size(&mut self, arr: &mut [u8]) -> u32 {
+        self.cipher_block(arr);
+
+        u32::from_be_bytes([arr[0], arr[1], arr[2], arr[3]])
     }
 }

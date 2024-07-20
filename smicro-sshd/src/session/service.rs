@@ -10,7 +10,10 @@ use smicro_types::{
 };
 
 use crate::{
-    crypto::{CryptoAlg, EcdsaSha2Nistp521, SignerIdentifier},
+    crypto::{
+        sign::{EcdsaSha2Nistp521, SignerIdentifier},
+        CryptoAlg,
+    },
     error::Error,
     messages::{
         MessageServiceAccept, MessageServiceRequest, MessageUserAuthFailure,

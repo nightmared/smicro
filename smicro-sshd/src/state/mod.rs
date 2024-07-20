@@ -16,7 +16,12 @@ use smicro_macros::declare_deserializable_struct;
 use smicro_types::sftp::deserialize::{parse_slice, parse_utf8_string};
 
 use crate::{
-    crypto::{Cipher, CryptoAlg, ICryptoAlgs, Signer, SignerIdentifier, MAC},
+    crypto::{
+        cipher::Cipher,
+        mac::MAC,
+        sign::{EcdsaSha2Nistp521, Signer, SignerIdentifier},
+        CryptoAlg, ICryptoAlgs,
+    },
     error::KeyLoadingError,
     messages::negotiate_alg_host_key_algorithms,
     DeserializePacket,
@@ -155,10 +160,14 @@ impl<'a> State<'a> {
         }
 
         let (next_data, private_key_type) = parse_utf8_string(next_data)?;
-        let signing_algo = negotiate_alg_host_key_algorithms!(
-            [private_key_type.clone()],
-            KeyLoadingError::UnsupportedSigningAlgorithm
-        );
+        let signing_algo = || -> Result<_, KeyLoadingError> {
+            negotiate_alg_host_key_algorithms!(
+                [private_key_type.clone()],
+                alg,
+                KeyLoadingError::UnsupportedSigningAlgorithm,
+                { Ok(alg) }
+            )
+        }()?;
 
         let (next_data, curve_name) = parse_utf8_string(next_data)?;
         // check that the EC curve name matches the key type

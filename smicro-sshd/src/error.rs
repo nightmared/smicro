@@ -1,4 +1,4 @@
-use std::net::AddrParseError;
+use std::{array::TryFromSliceError, net::AddrParseError};
 
 use smicro_types::{error::ParsingError, ssh::types::MessageType};
 
@@ -92,6 +92,10 @@ pub enum Error {
     EventFdCreationFailed(#[source] nix::errno::Errno),
     #[error("Cannot signal an event")]
     EventFdSignalingFailed(#[source] nix::errno::Errno),
+    #[error("Invalid data size for crypto operation")]
+    SliceError(#[from] TryFromSliceError),
+    #[error("Invalid buffer size when performing digest calculation")]
+    InvalidBufferSize(#[from] digest::InvalidBufferSize),
 }
 
 #[derive(thiserror::Error, Debug)]

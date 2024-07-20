@@ -9,18 +9,20 @@ use smicro_types::ssh::types::{MessageType, PositiveBigNum, SSHSlice, SharedSSHS
 use crate::messages::{MessageKexEcdhInit, MessageKeyExchangeInit};
 use crate::{error::Error, state::State};
 
-mod cipher;
-mod kex;
-mod mac;
-mod sign;
+pub(crate) mod cipher;
+pub(crate) mod kex;
+pub(crate) mod mac;
+pub(crate) mod sign;
 
-pub use self::cipher::{Chacha20Poly1305, Cipher, CipherAllocator, CipherIdentifier};
-pub use self::kex::{EcdhSha2Nistp521, KEXIdentifier, KexNegotiatedKeys, KEX};
-pub use self::mac::{HmacSha2512, MACAllocator, MACIdentifier, MAC};
-pub use self::sign::{EcdsaSha2Nistp521, Signer, SignerIdentifier};
+use cipher::{CipherAllocator, CipherIdentifier};
+use kex::{KEXIdentifier, KEX};
+use mac::{MACAllocator, MACIdentifier};
+use sign::SignerIdentifier;
 
 pub trait CryptoAlg {
-    fn new() -> Self;
+    fn new() -> Self
+    where
+        Self: Sized;
 }
 
 struct HashAdaptor<'a>(&'a mut dyn digest::DynDigest);

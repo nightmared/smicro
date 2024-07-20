@@ -201,23 +201,28 @@ fn flush_data_to_channel<
     input_buf: &mut R,
     recipient_channel: u32,
     max_chan_pkt_size: u32,
+    window_size: &mut u32,
     sender: &mut SenderState,
     is_stderr: bool,
 ) -> Result<(), Error> {
     let readable_data = input_buf.get_readable_data();
 
-    // 32 is chosen arbitrarily to represent the packet overhead
-    if readable_data.len() == 0 || max_chan_pkt_size <= 32 {
+    // 72 is chosen arbitrarily to represent the packet overhead
+    if readable_data.len() == 0 || max_chan_pkt_size <= 72 {
         return Ok(());
     }
-    let max_write_size = max_chan_pkt_size as usize - 32;
-    let data_len = min(readable_data.len(), max_write_size);
+    let max_write_size = max_chan_pkt_size - 72;
+    let data_len = min(readable_data.len() as u32, max_write_size);
+    if *window_size < data_len {
+        // we must wait for the client to increase the windows size
+        return Ok(());
+    }
 
     trace!(
         "Data is available on {}, writing it to the output stream",
         if is_stderr { "stderr" } else { "stdout" }
     );
-    let data = SharedSSHSlice(&readable_data[0..data_len]);
+    let data = SharedSSHSlice(&readable_data[0..data_len as usize]);
     let res = if is_stderr {
         let channel_data = MessageChannelExtendedData {
             recipient_channel,
@@ -232,9 +237,11 @@ fn flush_data_to_channel<
         };
         write_message(sender, sender_buf, &channel_data)
     };
+
     match res {
         Ok(()) => {
-            input_buf.advance_reader_pos(data_len);
+            input_buf.advance_reader_pos(data_len as usize);
+            *window_size -= data_len;
             Ok(())
         }
         Err(Error::IoError(e)) if e.kind() == ErrorKind::WouldBlock => Ok(()),
@@ -396,6 +403,7 @@ fn flush_channel<const SIZE: usize, T: LoopingBufferWriter<SIZE>>(
                 &mut cmd.stderr_buffer,
                 chan.remote_channel_number,
                 chan.max_pkt_size,
+                &mut chan.sender_window_size,
                 sender,
                 true,
             )?;
@@ -406,6 +414,7 @@ fn flush_channel<const SIZE: usize, T: LoopingBufferWriter<SIZE>>(
                 &mut cmd.stdout_buffer,
                 chan.remote_channel_number,
                 chan.max_pkt_size,
+                &mut chan.sender_window_size,
                 sender,
                 false,
             )?;

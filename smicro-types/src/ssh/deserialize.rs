@@ -56,6 +56,7 @@ pub fn streaming_const_take<const N: usize>(i: &[u8]) -> IResult<&[u8], [u8; N],
         res
     })(i)
 }
+
 // see https://github.com/rust-bakery/nom/issues/1517
 pub fn const_take<const N: usize>(i: &[u8]) -> IResult<&[u8], [u8; N], ParsingError> {
     // Safety: fine because `take` already check that we took N bytes

@@ -7,7 +7,7 @@ use smicro_types::deserialize::DeserializePacket;
 use smicro_types::ssh::types::MessageType;
 
 use crate::{
-    crypto::{ICryptoAlgs, KexNegotiatedKeys},
+    crypto::{kex::KexNegotiatedKeys, ICryptoAlgs},
     error::Error,
     messages::{gen_kex_initial_list, MessageKexEcdhInit, MessageKeyExchangeInit, MessageNewKeys},
     state::{SessionCryptoMaterials, State},
@@ -111,10 +111,10 @@ impl KexReceived {
 
         let server_mac = crypto_algs
             .server_mac()
-            .allocate_with_key(&negotiated_keys.integrity_key_s2c);
+            .allocate_with_key(&negotiated_keys.integrity_key_s2c)?;
         let server_cipher = crypto_algs
             .server_cipher()
-            .from_key(&negotiated_keys.encryption_key_s2c)?;
+            .from_key(&negotiated_keys.encryption_key_s2c, &negotiated_keys.iv_s2c)?;
         state.sender.crypto_algs = Some(crypto_algs.clone());
         state.sender.crypto_material = Some(SessionCryptoMaterials {
             mac: server_mac,
@@ -154,10 +154,11 @@ impl KexReplySent {
         let crypto_algs = self.new_crypto_algs.clone();
         let client_mac = crypto_algs
             .client_mac()
-            .allocate_with_key(&self.negotiated_keys.integrity_key_c2s);
-        let client_cipher = crypto_algs
-            .client_cipher()
-            .from_key(&self.negotiated_keys.encryption_key_c2s)?;
+            .allocate_with_key(&self.negotiated_keys.integrity_key_c2s)?;
+        let client_cipher = crypto_algs.client_cipher().from_key(
+            &self.negotiated_keys.encryption_key_c2s,
+            &self.negotiated_keys.iv_c2s,
+        )?;
 
         state.receiver.crypto_algs = Some(self.new_crypto_algs.clone());
         state.receiver.crypto_material = Some(SessionCryptoMaterials {

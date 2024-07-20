@@ -451,22 +451,25 @@ pub fn declare_crypto_algs_list(_attrs: TokenStream, item: TokenStream) -> Token
         name_list_values.push(quote! { #e::NAME });
     }
 
+    let negotiation_type = ast.ident.to_string().to_lowercase();
+
     let negotiate_alg_ident = syn::Ident::new(
-        &format!("negotiate_alg_{}", ast.ident.to_string().to_lowercase()),
+        &format!("negotiate_alg_{}", negotiation_type),
         ast.ident.span(),
     );
-    let inner_negotiate_alg_ident =
-        syn::Ident::new(&format!("__negotiate_alg_{}", ast.ident), ast.ident.span());
+    let inner_negotiate_alg_ident = syn::Ident::new(
+        &format!("__negotiate_alg_{}", negotiation_type),
+        ast.ident.span(),
+    );
 
-    let mut match_list = quote! {};
+    let mut match_list = Vec::new();
     for e in elems {
-        match_list = quote! {
-            #match_list
-            if client_alg == <$crate::crypto::#e>::NAME {
-                out_variable = Some(<$crate::crypto::#e>::new());
-                break 'out;
+        match_list.push(quote! {
+            if client_alg == #e::NAME {
+                let $var_name = #e::new();
+                return $subcode;
             }
-        };
+        });
     }
 
     quote! {
@@ -474,20 +477,15 @@ pub fn declare_crypto_algs_list(_attrs: TokenStream, item: TokenStream) -> Token
 
         #[macro_export]
         macro_rules! #inner_negotiate_alg_ident {
-            ($client_choices:expr, $error:expr) => {
+            ($client_choices:expr, $var_name:ident, $error:expr, $subcode:block) => (
                 {
-                    let mut out_variable = None;
-                    'out: for client_alg in &$client_choices {
-                        #match_list
+                    for client_alg in &$client_choices {
+                        #(#match_list)*
                     }
 
-                    if out_variable.is_none() {
-                        return Err($error);
-                    }
-
-                    out_variable.unwrap().clone()
+                    Err($error)
                 }
-            };
+            );
         }
 
         pub use #inner_negotiate_alg_ident as #negotiate_alg_ident;
