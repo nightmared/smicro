@@ -60,12 +60,16 @@ pub enum Error {
     SigningError,
     #[error("Overflow: the sequence number wrapped")]
     SequenceNumberWrapped,
+    #[error("Could not decrypt data")]
+    DecryptionError,
     #[error("Could not encrypt data")]
     EncryptionError,
     #[error("No signature provided in the authentication request")]
     NoSignatureProvided,
     #[error("This public key is not properly encoded")]
     InvalidPublicKey,
+    #[error("Invalid length of the private key material")]
+    InvalidPrivateKeyLength,
     #[error("A session identifier should be available")]
     MissingSessionIdentifier,
     #[error("This signature is not properly encoded")]

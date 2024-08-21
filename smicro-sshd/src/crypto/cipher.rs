@@ -1,8 +1,13 @@
+#[cfg(feature = "rustcrypto")]
 use chacha20::ChaCha20Legacy;
-use cipher::{BlockCipherEncrypt, Iv, KeyIvInit, StreamCipher, StreamCipherSeek};
+use cipher::BlockCipherEncrypt;
+#[cfg(feature = "rustcrypto")]
+use cipher::{Iv, KeyIvInit, StreamCipher, StreamCipherSeek};
+#[cfg(feature = "rustcrypto")]
 use elliptic_curve::subtle::ConstantTimeEq;
 use hybrid_array::Array;
 use nom::{bytes::streaming::take, IResult};
+#[cfg(feature = "rustcrypto")]
 use poly1305::Poly1305;
 use smicro_types::{
     error::ParsingError,
@@ -11,6 +16,11 @@ use smicro_types::{
 use universal_hash::KeyInit;
 
 use crate::{crypto::CryptoAlg, error::Error, MAX_PKT_SIZE};
+
+#[cfg(all(feature = "rustcrypto", feature = "ring"))]
+compile_error!("Features 'rustcrypto' and 'ring' cannot be enabled at the same time");
+
+const POLY1305_BLOCK_SIZE: usize = 16;
 
 pub trait CipherIdentifier: CryptoAlg + CipherAllocator {
     const NAME: &'static str;
@@ -61,7 +71,7 @@ impl CipherAllocator for Chacha20Poly1305 {
         Self::BLOCK_SIZE_BYTES * 8
     }
 
-    #[cfg(not(feature = "ring"))]
+    #[cfg(feature = "rustcrypto")]
     fn from_key(&self, raw_key: &[u8], _raw_iv: &[u8]) -> Result<Box<dyn Cipher>, Error> {
         let key = Array::try_from(&raw_key[0..self.key_size_bits() / 8])?;
         let aad_key =
@@ -72,11 +82,16 @@ impl CipherAllocator for Chacha20Poly1305 {
 
     #[cfg(feature = "ring")]
     fn from_key(&self, raw_key: &[u8], _raw_iv: &[u8]) -> Result<Box<dyn Cipher>, Error> {
-        let key = Array::try_from(&raw_key[0..self.key_size_bits() / 8])?;
-        let aad_key =
-            Array::try_from(&raw_key[self.key_size_bits() / 8..2 * self.key_size_bits() / 8])?;
+        let mut fixed_raw_key = [0; 64];
+        if raw_key.len() != 2 * Self::KEY_SIZE_BYTES {
+            return Err(Error::InvalidPrivateKeyLength);
+        }
+        fixed_raw_key.copy_from_slice(raw_key);
 
-        Ok(Box::new(Chacha20Poly1305Impl { key, aad_key }))
+        Ok(Box::new(Chacha20Poly1305ImplRing {
+            decrypt: ring::aead::chacha20_poly1305_openssh::OpeningKey::new(&fixed_raw_key),
+            encrypt: ring::aead::chacha20_poly1305_openssh::SealingKey::new(&fixed_raw_key),
+        }))
     }
 }
 
@@ -142,12 +157,14 @@ pub trait Cipher {
     ) -> IResult<&'a [u8], &'a [u8], ParsingError>;
 }
 
+#[cfg(feature = "rustcrypto")]
 #[derive(Clone)]
 pub struct Chacha20Poly1305Impl {
     key: Array<u8, cipher::consts::U32>,
     aad_key: Array<u8, cipher::consts::U32>,
 }
 
+#[cfg(feature = "rustcrypto")]
 impl Cipher for Chacha20Poly1305Impl {
     fn block_size_bytes(&self) -> usize {
         64
@@ -159,7 +176,7 @@ impl Cipher for Chacha20Poly1305Impl {
 
     fn required_space_to_encrypt(&self, data_len: usize) -> usize {
         // size of the data itself + the poly1305 tag size
-        data_len + poly1305::BLOCK_SIZE
+        data_len + POLY1305_BLOCK_SIZE
     }
 
     fn encrypt(&mut self, data: &mut [u8], sequence_number: u32) -> Result<(), Error> {
@@ -170,7 +187,7 @@ impl Cipher for Chacha20Poly1305Impl {
         data[0..4].copy_from_slice(pkt_size.to_be_bytes().as_slice());
 
         // encrypt in place
-        let cleartext_data_end = data.len() - poly1305::BLOCK_SIZE;
+        let cleartext_data_end = data.len() - POLY1305_BLOCK_SIZE;
         self.cipher_main_message(&mut data[4..cleartext_data_end], sequence_number);
 
         let poly1305_tag = self.compute_poly1305_hash(&data[..cleartext_data_end], sequence_number);
@@ -198,7 +215,7 @@ impl Cipher for Chacha20Poly1305Impl {
         // ensure there is enought data in the input slice
         let (next_data, _) = take(pkt_size)(next_data)?;
 
-        let (_, expected_tag) = take(poly1305::BLOCK_SIZE)(next_data)?;
+        let (_, expected_tag) = take(POLY1305_BLOCK_SIZE)(next_data)?;
         let real_tag =
             self.compute_poly1305_hash(&input[0..(pkt_size + 4) as usize], sequence_number);
         if bool::from(real_tag.ct_ne(expected_tag)) {
@@ -216,6 +233,7 @@ impl Cipher for Chacha20Poly1305Impl {
     }
 }
 
+#[cfg(feature = "rustcrypto")]
 impl Chacha20Poly1305Impl {
     fn compute_poly1305_hash(&self, bytes: &[u8], sequence_number: u32) -> poly1305::Block {
         let sequence_number = (sequence_number as u64).to_be_bytes();
@@ -250,18 +268,88 @@ impl Chacha20Poly1305Impl {
 
     fn get_pkt_size(&self, encrypted_bytes: [u8; 4], sequence_number: u32) -> u32 {
         let sequence_number = (sequence_number as u64).to_be_bytes();
-        let mut cipher = <ChaCha20Legacy as KeyIvInit>::new(
-            &self.aad_key,
-            <&Iv<ChaCha20Legacy>>::from(&sequence_number),
-        );
 
         let mut block = [0; Chacha20Poly1305::BLOCK_SIZE_BYTES];
         for i in 0..4 {
             block[i] = encrypted_bytes[i];
         }
+
+        let mut cipher = <ChaCha20Legacy as KeyIvInit>::new(
+            &self.aad_key,
+            <&Iv<ChaCha20Legacy>>::from(&sequence_number),
+        );
         cipher.apply_keystream(&mut block);
 
         u32::from_be_bytes([block[0], block[1], block[2], block[3]])
+    }
+}
+
+#[cfg(feature = "ring")]
+pub struct Chacha20Poly1305ImplRing {
+    // slight loss of space (we store the key twice instead of once), but that's only a waste of 64
+    // bytes, which I can accept as a tradeoff for not having to redesign the API to separate the
+    // sender and receiver side
+    decrypt: ring::aead::chacha20_poly1305_openssh::OpeningKey,
+    encrypt: ring::aead::chacha20_poly1305_openssh::SealingKey,
+}
+
+#[cfg(feature = "ring")]
+impl Cipher for Chacha20Poly1305ImplRing {
+    fn block_size_bytes(&self) -> usize {
+        64
+    }
+
+    fn is_aead(&self) -> bool {
+        true
+    }
+
+    fn required_space_to_encrypt(&self, data_len: usize) -> usize {
+        data_len + POLY1305_BLOCK_SIZE
+    }
+
+    fn encrypt(&mut self, data: &mut [u8], sequence_number: u32) -> Result<(), Error> {
+        let mut tmp_auth_block = [0; POLY1305_BLOCK_SIZE];
+        let (plaintext, auth_block) = data.split_at_mut(data.len() - POLY1305_BLOCK_SIZE);
+        self.encrypt
+            .seal_in_place(sequence_number, plaintext, &mut tmp_auth_block);
+        auth_block.copy_from_slice(&tmp_auth_block);
+
+        Ok(())
+    }
+
+    fn decrypt<'a>(
+        &mut self,
+        input: &'a mut [u8],
+        sequence_number: u32,
+    ) -> IResult<&'a [u8], &'a [u8], ParsingError> {
+        // this is a cipher with authenticated encryptions, so we need to extract the packet length
+        // beforehand
+        let (next_data, size_field) = streaming_const_take::<4>(input)?;
+        let pkt_size_bytes = self
+            .decrypt
+            .decrypt_packet_length(sequence_number, size_field);
+        let pkt_size = u32::from_be_bytes(pkt_size_bytes);
+        // 5 = length field + 1 byte for the packet itself
+        if pkt_size < 5 || pkt_size as usize > MAX_PKT_SIZE {
+            return Err(nom::Err::Failure(ParsingError::InvalidPacketLength(
+                pkt_size as usize,
+            )));
+        }
+        // ensure there is enought data in the input slice
+        let _ = take(pkt_size as usize + POLY1305_BLOCK_SIZE)(next_data)?;
+
+        let auth_block_pos = pkt_size as usize + 4;
+        let next_data_pos = auth_block_pos + POLY1305_BLOCK_SIZE;
+
+        let mut auth_block = [0; POLY1305_BLOCK_SIZE];
+        auth_block.copy_from_slice(&input[auth_block_pos..next_data_pos]);
+
+        self.decrypt
+            .open_in_place(sequence_number, &mut input[..auth_block_pos], &auth_block)
+            .map_err(|_| nom::Err::Failure(ParsingError::DecipheringError))?;
+        input[0..4].copy_from_slice(&pkt_size_bytes);
+
+        Ok((&input[next_data_pos..], &input[..auth_block_pos]))
     }
 }
 

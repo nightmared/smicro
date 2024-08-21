@@ -1,4 +1,4 @@
-use digest::{DynDigest, Mac, Reset};
+use digest::DynDigest;
 use hmac::Hmac;
 use sha2::{Sha256, Sha512};
 use smicro_types::serialize::SerializePacket;
