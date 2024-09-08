@@ -6,5 +6,5 @@ resolver = "2"
 debug = true
 
 [patch.crates-io]
-p521 = { git = 'https://github.com/RustCrypto/elliptic-curves.git', branch = 'master' }
+#p521 = { git = 'https://github.com/RustCrypto/elliptic-curves.git', branch = 'master' }
 #chacha20 = { git = 'https://github.com/RustCrypto/stream-ciphers.git', branch = 'master' }

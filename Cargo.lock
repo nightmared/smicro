@@ -574,7 +574,8 @@ checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 [[package]]
 name = "p521"
 version = "0.14.0-pre.1"
-source = "git+https://github.com/RustCrypto/elliptic-curves.git?branch=master#1935596875a3e657db37fa9c674672f79f094f3c"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9ec5d919bea930a34a522bb1c95a89f559925deab255db2c2ffa174fc48df664"
 dependencies = [
  "base16ct",
  "ecdsa",
@@ -633,12 +634,14 @@ dependencies = [
 [[package]]
 name = "primefield"
 version = "0.14.0-pre.0"
-source = "git+https://github.com/RustCrypto/elliptic-curves.git?branch=master#1935596875a3e657db37fa9c674672f79f094f3c"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d3f2ce0fa9cccdaf216230d151ce51a15298aef50ad76081a830128ecbc6428a"
 
 [[package]]
 name = "primeorder"
 version = "0.14.0-pre.1"
-source = "git+https://github.com/RustCrypto/elliptic-curves.git?branch=master#1935596875a3e657db37fa9c674672f79f094f3c"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9bed0c431186675ad845922b903d28c7faa2b634a6d130fb7b50bb289f5a4d52"
 dependencies = [
  "elliptic-curve",
 ]

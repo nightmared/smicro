@@ -25,7 +25,7 @@ impl Drop for ChannelCommand {
         self.command
             .kill()
             .expect("Could not kill the child process");
-        let _ = self.command.try_wait();
+        let _ = self.command.wait();
     }
 }
 
