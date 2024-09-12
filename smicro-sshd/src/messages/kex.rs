@@ -15,13 +15,12 @@ use smicro_types::ssh::{
     types::NameList,
 };
 
-use crate::crypto::mac::HmacSha2256;
 use crate::{
     crypto::{
-        cipher::{Aes256Ctr, Chacha20Poly1305, CipherAllocator, CipherIdentifier},
-        kex::{EcdhSha2Nistp521, KEXIdentifier},
-        mac::{HmacSha2512, MACAllocator, MACIdentifier},
-        sign::{EcdsaSha2Nistp521, SignerIdentifier},
+        cipher::{CipherAllocator, CipherIdentifier},
+        kex::KEXIdentifier,
+        mac::{MACAllocator, MACIdentifier},
+        sign::SignerIdentifier,
         CryptoAlg, CryptoAlgs, ICryptoAlgs,
     },
     error::Error,
@@ -119,18 +118,55 @@ pub struct MessageKeyExchangeInit {
     reserved: u32,
 }
 
-#[declare_crypto_algs_list]
-const HOST_KEY_ALGORITHMS: _ = [EcdsaSha2Nistp521];
+macro_rules! declare_key_types {
+    ($($id:ident=>$val:ty),*) => {
+        pub enum SignatureCheckerWrapper {
+            $($id($val)),*
+        }
+
+        impl SignatureCheckerWrapper {
+            pub fn signature_is_valid(
+                &self,
+                key: &[u8],
+                message: &[u8],
+                signature: &[u8],
+            ) -> Result<bool, Error>{
+                match self {
+                    $(SignatureCheckerWrapper::$id(val) => val.signature_is_valid(key, message, signature)),*,
+                }
+            }
+
+        }
+
+        pub fn get_signature_checker_from_key_type(name: &[u8]) -> Option<SignatureCheckerWrapper> {
+            match name {
+                $(v if v == <$val as SignerIdentifier>::NAME.as_bytes() => Some(SignatureCheckerWrapper::$id(<$val>::new()))),*,
+                _ => None
+            }
+        }
+    };
+}
+
+declare_key_types!(EcdsaSha2Nistp521=>crate::crypto::sign::EcdsaSha2Nistp521);
 
 #[declare_crypto_algs_list]
-const KEX_ALGORITHMS: _ = [EcdhSha2Nistp521];
+const HOST_KEY_ALGORITHMS: _ = [crate::crypto::sign::EcdsaSha2Nistp521];
+
+#[declare_crypto_algs_list]
+const KEX_ALGORITHMS: _ = [crate::crypto::kex::EcdhSha2Nistp521];
 
 // TODO: add aes256-gcm@openssh.com
 #[declare_crypto_algs_list]
-const CIPHER_ALGORITHMS: _ = [Chacha20Poly1305, Aes256Ctr];
+const CIPHER_ALGORITHMS: _ = [
+    crate::crypto::cipher::Chacha20Poly1305,
+    crate::crypto::cipher::Aes256Ctr,
+];
 
 #[declare_crypto_algs_list]
-pub const MAC_ALGORITHMS: _ = [HmacSha2256, HmacSha2512];
+pub const MAC_ALGORITHMS: _ = [
+    crate::crypto::mac::HmacSha2256,
+    crate::crypto::mac::HmacSha2512,
+];
 
 impl MessageKeyExchangeInit {
     pub fn compute_crypto_algs(&self) -> Result<Box<dyn ICryptoAlgs>, Error> {

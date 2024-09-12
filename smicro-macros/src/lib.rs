@@ -465,8 +465,8 @@ pub fn declare_crypto_algs_list(_attrs: TokenStream, item: TokenStream) -> Token
     let mut match_list = Vec::new();
     for e in elems {
         match_list.push(quote! {
-            if client_alg == #e::NAME {
-                let $var_name = #e::new();
+            if client_alg == <#e>::NAME {
+                let $var_name = <#e>::new();
                 return $subcode;
             }
         });

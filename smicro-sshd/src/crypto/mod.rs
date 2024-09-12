@@ -11,6 +11,7 @@ use crate::{error::Error, state::State};
 
 pub(crate) mod cipher;
 pub(crate) mod kex;
+pub(crate) mod keys;
 pub(crate) mod mac;
 pub(crate) mod sign;
 

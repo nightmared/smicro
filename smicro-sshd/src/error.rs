@@ -100,6 +100,10 @@ pub enum Error {
     SliceError(#[from] TryFromSliceError),
     #[error("Invalid buffer size when performing digest calculation")]
     InvalidBufferSize(#[from] digest::InvalidBufferSize),
+    #[error("Invalid or undetected user name")]
+    UnknownUserName,
+    #[error("Key type whose support is not implemented")]
+    UnsupportedKeyType,
 }
 
 #[derive(thiserror::Error, Debug)]

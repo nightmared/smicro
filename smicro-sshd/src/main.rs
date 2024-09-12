@@ -12,6 +12,7 @@ use std::{
     thread,
 };
 
+use crypto::keys::load_hostkey;
 use log::{debug, error, info, trace, warn, LevelFilter};
 use messages::{MessageChannelClose, MessageChannelWindowAdjust};
 use mio::{
@@ -24,12 +25,9 @@ use state::channel::{Channel, ChannelCommand, ChannelState};
 use syslog::Facility;
 
 use smicro_common::{LoopingBuffer, LoopingBufferReader, LoopingBufferWriter};
-use smicro_types::{
-    deserialize::DeserializePacket,
-    ssh::{
-        deserialize::parse_message_type,
-        types::{MessageType, SharedSSHSlice},
-    },
+use smicro_types::ssh::{
+    deserialize::parse_message_type,
+    types::{MessageType, SharedSSHSlice},
 };
 
 pub mod crypto;
@@ -518,7 +516,7 @@ fn handle_stream(mut stream: TcpStream) -> Result<(), Error> {
     let mut sender_buf = <LoopingBuffer<MAX_PKT_SIZE>>::new()?;
 
     let mut host_keys = Vec::new();
-    let test_hostkey = State::load_hostkey(&Path::new("/home/sthoby/dev-fast/smicro/host_key"))?;
+    let test_hostkey = load_hostkey(&Path::new("/home/sthoby/dev-fast/smicro/host_key"))?;
     host_keys.push(test_hostkey.as_ref());
     let mut state = State::new(&host_keys);
     let mut session = SessionStates::UninitializedSession(UninitializedSession {});
