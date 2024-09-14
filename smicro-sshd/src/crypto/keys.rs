@@ -170,9 +170,9 @@ pub fn load_public_key_list(allowed_keys: &Path) -> Result<Vec<AuthorizedKey>, K
                 space(),
             )
         };
-        let comment = || rest;
+        let comment = rest;
         let key_parser = || {
-            tuple((keytype_parser(), pubkey_parser(), comment())).map(|(key_type, key_data, _)| {
+            tuple((keytype_parser(), pubkey_parser(), comment)).map(|(key_type, key_data, _)| {
                 STANDARD.decode(key_data).map(|key_data| AuthorizedKey {
                     key_type: key_type.to_vec(),
                     key_data,
