@@ -12,6 +12,7 @@ use std::{
     thread,
 };
 
+use argh::FromArgs;
 use crypto::keys::load_hostkey;
 use log::{debug, error, info, trace, warn, LevelFilter};
 use messages::{MessageChannelClose, MessageChannelWindowAdjust};
@@ -615,8 +616,21 @@ fn handle_stream(mut stream: TcpStream) -> Result<(), Error> {
     }
 }
 
+#[derive(FromArgs)]
+#[argh(description = "Smicro SSHD server")]
+struct Options {
+    #[argh(option, description = "level of logging")]
+    log_level: Option<LevelFilter>,
+}
+
 fn main() -> Result<(), Error> {
-    syslog::init(Facility::LOG_USER, LevelFilter::Info, Some("smicro_ssh"))?;
+    let options: Options = argh::from_env();
+
+    syslog::init(
+        Facility::LOG_USER,
+        options.log_level.unwrap_or(LevelFilter::Info),
+        Some("smicro_ssh"),
+    )?;
 
     let mut listener = TcpListener::bind(SocketAddr::from_str("127.0.0.1:2222")?)?;
 

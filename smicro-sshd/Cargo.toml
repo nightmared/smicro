@@ -33,6 +33,7 @@ universal-hash = "0.6.0-pre.0"
 mio = { version = "1.0.0", features = ["os-ext", "net"] }
 nix = { version = "0.29", features = ["event", "user"] }
 ring = { version = "0.17.8", optional = true }
+argh = { version = "0.1.12", features = ["help"], default_features = false }
 
 [features]
 ring = ["dep:ring"]

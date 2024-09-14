@@ -110,10 +110,10 @@ impl SignerIdentifier for EcdsaSha2Nistp521 {
 
         let expand_bignum =
             |bignum: PositiveBigNum| -> Result<p521::Scalar, elliptic_curve::Error> {
-                let mut out = [0; 66];
+                let mut out = [0; Self::KEY_SIZE_BYTES];
 
-                let slice = if bignum.0.len() < 66 {
-                    out[66 - bignum.0.len()..].copy_from_slice(bignum.0);
+                let slice = if bignum.0.len() < Self::KEY_SIZE_BYTES {
+                    out[Self::KEY_SIZE_BYTES - bignum.0.len()..].copy_from_slice(bignum.0);
                     &out
                 } else {
                     bignum.0

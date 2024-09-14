@@ -8,3 +8,4 @@ debug = true
 [patch.crates-io]
 #p521 = { git = 'https://github.com/RustCrypto/elliptic-curves.git', branch = 'master' }
 #chacha20 = { git = 'https://github.com/RustCrypto/stream-ciphers.git', branch = 'master' }
+argh = { git = 'https://github.com/google/argh.git', branch = 'master' }
