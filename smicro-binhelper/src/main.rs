@@ -6,7 +6,9 @@ use std::{
 
 use log::{debug, error, info, trace, LevelFilter};
 use nom::{Err, IResult};
-use smicro_common::create_circular_buffer;
+use smicro_common::{
+    create_circular_buffer, LoopingBuffer, LoopingBufferReader, LoopingBufferWriter,
+};
 use syslog::Facility;
 
 use smicro_types::{
@@ -125,25 +127,24 @@ fn main() -> Result<(), Error> {
 
     info!("smicro_binhelper started");
 
-    let buf = create_circular_buffer(MAX_PKT_SIZE)?;
-    let mut data_start = 0;
-    let mut cur_pos = 0;
+    let mut buf: LoopingBuffer<MAX_PKT_SIZE> = LoopingBuffer::new()?;
 
     let mut state = GlobalState::new();
     loop {
-        let res = parse_command(&buf[data_start..cur_pos]);
+        let readable_data = buf.get_readable_data();
+        let res = parse_command(readable_data);
         match res {
             Err(Err::Incomplete(_)) => {
                 trace!("Not enough data, trying to read more from stdin");
                 // Read enough data to hold *at least* a packet, but without overwriting previous
                 // data
-                let written = input.read(&mut buf[cur_pos..cur_pos + MAX_PKT_SIZE - data_start])?;
+                let written = input.read(buf.get_writable_buffer())?;
                 trace!("Read {written} bytes");
                 if written == 0 {
                     info!("The client closed the connection, shutting down");
                     return Ok(());
                 }
-                cur_pos += written;
+                buf.advance_writer_pos(written);
             }
             Err(e) => {
                 error!("Got an error while trying to parse the packet: {:?}", e);
@@ -154,14 +155,8 @@ fn main() -> Result<(), Error> {
             Ok((next_data, pkt)) => {
                 process_command(&mut output, &mut state, pkt)?;
 
-                // The start of the next packet is at the beginning of the data we haven't read yet
-                data_start = cur_pos - next_data.len();
-
-                // Thanks to the properties of our doubly-mapped buffer, we can loop like this
-                if data_start >= MAX_PKT_SIZE {
-                    data_start %= MAX_PKT_SIZE;
-                    cur_pos %= MAX_PKT_SIZE;
-                }
+                let data_consumed = readable_data.len() - next_data.len();
+                buf.advance_reader_pos(data_consumed);
             }
         }
     }

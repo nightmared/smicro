@@ -13,7 +13,7 @@ pub enum BufferCreationError {
 
 pub fn create_circular_buffer(
     max_pkt_size: usize,
-) -> Result<&'static mut [u8], BufferCreationError> {
+) -> Result<(i32, &'static mut [u8]), BufferCreationError> {
     unsafe {
         // reserve a memory map where we map twice our memory mapping, so that there is no risk of
         // overwriting an existing memory map
@@ -96,9 +96,9 @@ pub fn create_circular_buffer(
         // Which means both memory areas are completely aliases,
         // and the two mapping together loop, hence forming a ringbuffer
 
-        Ok(std::slice::from_raw_parts_mut(
-            overwritable_mapping as *mut u8,
-            2 * max_pkt_size,
+        Ok((
+            fd,
+            std::slice::from_raw_parts_mut(overwritable_mapping as *mut u8, 2 * max_pkt_size),
         ))
     }
 }
@@ -134,11 +134,22 @@ pub trait LoopingBufferReader<const SIZE: usize> {
 // - the free (not initialized yet) space is size - used_space bytes long, that is size - (end_pos - start_pos),
 //   starting at end_pos:
 //   [end_pos, end_pos + (size - (end_pos - start_pos))[ = [end_pos, size + start_pos[
-// TODO: implement Drop to properly deallocate the memory mappings and the memfd
 pub struct LoopingBuffer<const SIZE: usize> {
+    fd: i32,
     buf: &'static mut [u8],
     start_pos: usize,
     end_pos: usize,
+}
+
+impl<const SIZE: usize> Drop for LoopingBuffer<SIZE> {
+    fn drop(&mut self) {
+        unsafe {
+            let mmap_ptr = self.buf.as_mut_ptr() as *mut libc::c_void;
+            libc::munmap(mmap_ptr, SIZE);
+            libc::munmap(mmap_ptr.byte_offset(SIZE as isize), SIZE);
+            libc::close(self.fd);
+        }
+    }
 }
 
 impl<const SIZE: usize> Debug for LoopingBuffer<SIZE> {
@@ -153,8 +164,9 @@ impl<const SIZE: usize> Debug for LoopingBuffer<SIZE> {
 
 impl<const SIZE: usize> LoopingBuffer<SIZE> {
     pub fn new() -> Result<Self, BufferCreationError> {
-        let buf = create_circular_buffer(SIZE)?;
+        let (fd, buf) = create_circular_buffer(SIZE)?;
         Ok(Self {
+            fd,
             buf,
             start_pos: 0,
             end_pos: 0,

@@ -7,7 +7,7 @@ use std::{
     net::SocketAddr,
     ops::{BitOr, BitOrAssign},
     os::{fd::AsRawFd, linux::process::ChildExt},
-    path::Path,
+    path::{Path, PathBuf},
     str::FromStr,
     thread,
 };
@@ -616,22 +616,7 @@ fn handle_stream(mut stream: TcpStream) -> Result<(), Error> {
     }
 }
 
-#[derive(FromArgs)]
-#[argh(description = "Smicro SSHD server")]
-struct Options {
-    #[argh(option, description = "level of logging")]
-    log_level: Option<LevelFilter>,
-}
-
-fn main() -> Result<(), Error> {
-    let options: Options = argh::from_env();
-
-    syslog::init(
-        Facility::LOG_USER,
-        options.log_level.unwrap_or(LevelFilter::Info),
-        Some("smicro_ssh"),
-    )?;
-
+fn master_process() -> Result<(), Error> {
     let mut listener = TcpListener::bind(SocketAddr::from_str("127.0.0.1:2222")?)?;
 
     let mut poll = Poll::new()?;
@@ -664,5 +649,33 @@ fn main() -> Result<(), Error> {
                 }
             }
         }
+    }
+}
+
+#[derive(Debug, FromArgs)]
+#[argh(description = "Smicro SSHD server")]
+struct Options {
+    #[argh(option, description = "level of logging")]
+    log_level: Option<LevelFilter>,
+
+    #[argh(option, description = "socket to talk to a master instance")]
+    master_socket: Option<PathBuf>,
+}
+
+fn main() -> Result<(), Error> {
+    let options: Options = argh::from_env();
+
+    syslog::init(
+        Facility::LOG_USER,
+        options.log_level.unwrap_or(LevelFilter::Info),
+        Some("smicro_ssh"),
+    )?;
+
+    if let Some(socket_path) = options.master_socket {
+        println!("{:?}", socket_path);
+
+        Ok(())
+    } else {
+        master_process()
     }
 }
