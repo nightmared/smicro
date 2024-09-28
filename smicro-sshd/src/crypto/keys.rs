@@ -18,11 +18,11 @@ use smicro_macros::declare_deserializable_struct;
 use smicro_types::deserialize::DeserializePacket;
 use smicro_types::sftp::deserialize::{parse_slice, parse_utf8_string};
 
-use crate::crypto::{sign::SignerIdentifier, CryptoAlg};
+use crate::crypto::sign::SignerIdentifier;
 use crate::error::KeyLoadingError;
-use crate::messages::negotiate_alg_host_key_algorithms;
+use crate::messages::negotiate_alg_signing_algorithms;
 
-use super::sign::Signer;
+use super::sign::SignerWrapper;
 
 #[declare_deserializable_struct]
 pub struct OpenSSHKeySerialized<'a> {
@@ -38,7 +38,7 @@ pub struct OpenSSHKeySerialized<'a> {
     key_data: &'a [u8],
 }
 
-pub fn load_hostkey(hostkey_file: &Path) -> Result<Box<dyn Signer>, KeyLoadingError> {
+pub fn load_hostkey(hostkey_file: &Path) -> Result<SignerWrapper, KeyLoadingError> {
     let mut f = File::open(hostkey_file)?;
     let mut file_content = Vec::with_capacity(4096);
     f.read_to_end(&mut file_content)?;
@@ -93,14 +93,8 @@ pub fn load_hostkey(hostkey_file: &Path) -> Result<Box<dyn Signer>, KeyLoadingEr
     }
 
     let (next_data, private_key_type) = parse_utf8_string(next_data)?;
-    let signing_algo = || -> Result<_, KeyLoadingError> {
-        negotiate_alg_host_key_algorithms!(
-            [private_key_type.clone()],
-            alg,
-            KeyLoadingError::UnsupportedSigningAlgorithm,
-            { Ok(alg) }
-        )
-    }()?;
+    let signing_algo = negotiate_alg_signing_algorithms(&[&private_key_type])
+        .map_err(|_| KeyLoadingError::UnsupportedSigningAlgorithm)?;
 
     let (next_data, curve_name) = parse_utf8_string(next_data)?;
     // check that the EC curve name matches the key type
@@ -124,7 +118,7 @@ pub fn load_hostkey(hostkey_file: &Path) -> Result<Box<dyn Signer>, KeyLoadingEr
         next_data = &next_data[1..];
     }
 
-    Ok(Box::new(signing_key))
+    Ok(signing_key)
 }
 
 #[derive(Debug)]

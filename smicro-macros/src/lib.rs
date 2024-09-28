@@ -3,10 +3,11 @@ use proc_macro2::Ident;
 use proc_macro_error::{abort, proc_macro_error};
 use quote::{quote, quote_spanned, ToTokens};
 
+use syn::{parse, FnArg, LitStr, Pat, PatType, PathSegment};
 use syn::{
-    parse, parse::Parser, punctuated::Punctuated, spanned::Spanned, token::Comma, Attribute, Expr,
-    ExprLit, ExprPath, Fields, GenericParam, ItemConst, ItemEnum, ItemStruct, LifetimeParam, Lit,
-    LitBool, Meta, MetaNameValue, Token, Type,
+    parse::Parser, punctuated::Punctuated, spanned::Spanned, token::Comma, Attribute, Expr,
+    ExprLit, ExprPath, Fields, GenericParam, ItemConst, ItemEnum, ItemStruct, ItemTrait,
+    LifetimeParam, Lit, LitBool, Meta, MetaNameValue, Path, Token, TraitItem, Type,
 };
 
 struct PacketArgs {
@@ -434,10 +435,60 @@ pub fn implement_responsepacket_on_enum(_attrs: TokenStream, item: TokenStream) 
     .into()
 }
 
+fn parse_crypto_list_args(input: TokenStream) -> (Path, Path) {
+    let parser = Punctuated::<Meta, Token![,]>::parse_terminated;
+    let attribute_args = match parser.parse(input.clone()) {
+        Ok(x) => x,
+        Err(_) => abort!(Span::call_site(), "Couldn't parse the fields of the macro"),
+    };
+
+    let mut wrapper_name = None;
+    let mut error_value = None;
+
+    for arg in attribute_args.iter() {
+        if let Meta::NameValue(namevalue) = arg {
+            let key = namevalue
+                .path
+                .get_ident()
+                .expect("the macro parameter is not an ident?")
+                .to_string();
+            match key.as_str() {
+                "wrapper_name" => {
+                    if let Expr::Path(ExprPath { path, .. }) = &namevalue.value {
+                        wrapper_name = Some(path);
+                    } else {
+                        abort!(Span::call_site(), "Invalid parameter for the value {}", key);
+                    }
+                }
+                "error_value" => {
+                    if let Expr::Path(ExprPath { path, .. }) = &namevalue.value {
+                        error_value = Some(path);
+                    } else {
+                        abort!(Span::call_site(), "Invalid parameter for the value {}", key);
+                    }
+                }
+                _ => abort!(arg.span(), "Unsupported macro parameter"),
+            }
+        } else {
+            abort!(arg.span(), "Unrecognized argument");
+        }
+    }
+
+    if wrapper_name.is_none() {
+        abort!(attribute_args.span(), "Missing 'wrapper_name' argument");
+    }
+    if error_value.is_none() {
+        abort!(attribute_args.span(), "Missing 'error_value' argument");
+    }
+
+    (wrapper_name.unwrap().clone(), error_value.unwrap().clone())
+}
+
 #[proc_macro_error]
 #[proc_macro_attribute]
-pub fn declare_crypto_algs_list(_attrs: TokenStream, item: TokenStream) -> TokenStream {
+pub fn declare_crypto_algs_list(attrs: TokenStream, item: TokenStream) -> TokenStream {
     let ast: ItemConst = parse(item.clone()).expect("Not a constant assignment");
+    let (wrapper_name, error_value) = parse_crypto_list_args(attrs);
 
     let elems = if let Expr::Array(ref expr_arr) = *ast.expr {
         &expr_arr.elems
@@ -448,7 +499,7 @@ pub fn declare_crypto_algs_list(_attrs: TokenStream, item: TokenStream) -> Token
     let name_list_ident = syn::Ident::new(&format!("{}_NAMES", ast.ident), ast.ident.span());
     let mut name_list_values: Punctuated<_, Comma> = Punctuated::new();
     for e in elems {
-        name_list_values.push(quote! { #e::NAME });
+        name_list_values.push(quote! { <#e>::NAME });
     }
 
     let negotiation_type = ast.ident.to_string().to_lowercase();
@@ -457,38 +508,35 @@ pub fn declare_crypto_algs_list(_attrs: TokenStream, item: TokenStream) -> Token
         &format!("negotiate_alg_{}", negotiation_type),
         ast.ident.span(),
     );
-    let inner_negotiate_alg_ident = syn::Ident::new(
-        &format!("__negotiate_alg_{}", negotiation_type),
-        ast.ident.span(),
-    );
 
     let mut match_list = Vec::new();
     for e in elems {
-        match_list.push(quote! {
-            if client_alg == <#e>::NAME {
-                let $var_name = <#e>::new();
-                return $subcode;
-            }
-        });
+        if let Expr::Path(ExprPath { path, .. }) = e {
+            let ident = path.segments.last().unwrap();
+            match_list.push(quote! {
+                if <#e>::NAME == client_alg.as_ref() {
+                    return Ok(#wrapper_name::#ident(<#e>::new()));
+                }
+            });
+        } else {
+            abort!(e.span(), "Invalid value");
+        }
     }
 
     quote! {
-        const #name_list_ident: [&'static str; #entries_len] = [#name_list_values];
+        const #name_list_ident: [&'static str; #entries_len] = {
+            use crate::crypto::CryptoAlgName;
+            [#name_list_values]
+        };
 
-        #[macro_export]
-        macro_rules! #inner_negotiate_alg_ident {
-            ($client_choices:expr, $var_name:ident, $error:expr, $subcode:block) => (
-                {
-                    for client_alg in &$client_choices {
-                        #(#match_list)*
-                    }
+        pub fn #negotiate_alg_ident<T: AsRef<str>>(choices: &[T]) -> Result<#wrapper_name, crate::error::Error> {
+            use crate::crypto::CryptoAlgName;
+            for client_alg in choices {
+                #(#match_list)*
+            }
 
-                    Err($error)
-                }
-            );
+            return Err(#error_value);
         }
-
-        pub use #inner_negotiate_alg_ident as #negotiate_alg_ident;
     }
     .into()
 }
@@ -595,12 +643,12 @@ pub fn declare_session_state(attrs: TokenStream, item: TokenStream) -> TokenStre
             };
             return Ok((
                 next,
-                SessionStates::SessionStateEstablished(kex_sent.inner_process(
+                kex_sent.inner_process(
                     state,
                     writer,
                     message_type,
                     message_data,
-                )?),
+                )?.into(),
             ));
         })
     } else {
@@ -610,7 +658,7 @@ pub fn declare_session_state(attrs: TokenStream, item: TokenStream) -> TokenStre
     let handle_messages_part = if !strict_kex {
         quote! (
             if message_type == MessageType::Ignore || message_type == MessageType::Debug || message_type == MessageType::Unimplemented {
-                return Ok((next, SessionStates::SessionStateEstablished(SessionStateEstablished::#struct_name(self.clone()))));
+                return Ok((next, SessionStateEstablished::#struct_name(self.clone()).into()));
             }
 
             #renegotiation_part
@@ -632,7 +680,7 @@ pub fn declare_session_state(attrs: TokenStream, item: TokenStream) -> TokenStre
                 state: &mut crate::state::State,
                 writer: &mut W,
                 input: &'a mut [u8],
-            ) -> Result<(&'a [u8], crate::session::SessionStates), crate::error::Error> {
+            ) -> Result<(&'a [u8], crate::session::PacketProcessingDecision), crate::error::Error> {
                 use ::smicro_types::{
                     deserialize::DeserializePacket,
                     ssh::types::MessageType
@@ -644,12 +692,12 @@ pub fn declare_session_state(attrs: TokenStream, item: TokenStream) -> TokenStre
                     Ok(x) => x,
                     Err(_) => {
                         crate::packet::write_message(&mut state.sender, writer, &crate::messages::MessageUnimplemented { sequence_number: state.receiver.sequence_number.0 })?;
-                        return Ok((next, SessionStates::SessionStateEstablished(SessionStateEstablished::#struct_name(self.clone()))));
+                        return Ok((next, SessionStateEstablished::#struct_name(self.clone()).into()));
                     }
                 };
 
                 if message_type == MessageType::Disconnect {
-                    return Err(crate::error::Error::PeerTriggeredDisconnection);
+                    return Ok((next, crate::session::PacketProcessingDecision::PeerTriggeredDisconnection));
                 }
 
                 #handle_messages_part
@@ -659,7 +707,175 @@ pub fn declare_session_state(attrs: TokenStream, item: TokenStream) -> TokenStre
                 }
 
                 let res = self.inner_process(state, writer, message_type, message_data)?;
-                Ok((next, SessionStates::SessionStateEstablished(res)))
+                Ok((next, res))
+            }
+        }
+    }
+    .into()
+}
+
+struct WrapperDeclarationArgs {
+    name: Ident,
+    implementors: Vec<Path>,
+}
+
+fn parse_wrapper_declaration_args(input: TokenStream) -> WrapperDeclarationArgs {
+    let parser = Punctuated::<Meta, Token![,]>::parse_terminated;
+    let attribute_args = match parser.parse(input.clone()) {
+        Ok(x) => x,
+        Err(_) => abort!(Span::call_site(), "Couldn't parse the fields of the macro"),
+    };
+
+    let mut name = None;
+    let mut implementors = Vec::new();
+
+    for arg in attribute_args.iter() {
+        if let Meta::NameValue(namevalue) = arg {
+            let key = namevalue
+                .path
+                .get_ident()
+                .expect("the macro parameter is not an ident?")
+                .to_string();
+            match key.as_str() {
+                "name" => {
+                    if let Expr::Path(ExprPath { path, .. }) = &namevalue.value {
+                        name = Some(
+                            path.get_ident()
+                                .expect("Got a complex path, expected a single ident"),
+                        );
+                    } else {
+                        abort!(Span::call_site(), "Invalid type for the key {}", key);
+                    }
+                }
+                "implementors" => {
+                    if let Expr::Array(arr) = &namevalue.value {
+                        for item in &arr.elems {
+                            match item {
+                                Expr::Path(ExprPath { path, .. }) => {
+                                    implementors.push(path.clone())
+                                }
+                                _ => abort!(namevalue.span(), "Not a path"),
+                            }
+                        }
+                    } else {
+                        abort!(Span::call_site(), "Invalid type for the key {}", key);
+                    }
+                }
+                _ => abort!(arg.span(), "Unsupported macro parameter"),
+            }
+        } else {
+            abort!(arg.span(), "Unrecognized argument");
+        }
+    }
+
+    if name.is_none() {
+        abort!(attribute_args.span(), "Missing 'name' argument");
+    }
+
+    WrapperDeclarationArgs {
+        name: name.unwrap().clone(),
+        implementors,
+    }
+}
+
+#[proc_macro_error]
+#[proc_macro_attribute]
+pub fn create_wrapper_enum_implementing_trait(
+    attrs: TokenStream,
+    item: TokenStream,
+) -> TokenStream {
+    let ast: ItemTrait = parse(item).expect("Not a trait");
+    let args = parse_wrapper_declaration_args(attrs);
+    let implementors = args.implementors;
+    let implementors_ident: Vec<&PathSegment> = implementors
+        .iter()
+        .map(|x| x.segments.last().unwrap())
+        .collect();
+
+    let mut new_items = Vec::new();
+    for item in &ast.items {
+        let f = match item {
+            TraitItem::Fn(f) => f,
+            _ => abort!(
+                item.span(),
+                "Invalid type of items, only methods are supported"
+            ),
+        };
+        let attrs = f.attrs.clone();
+        let sig = f.sig.clone();
+        let f_name = sig.ident.clone();
+        let mut arg_names = Vec::new();
+        for input in &sig.inputs {
+            match input {
+                FnArg::Receiver(_) => {}
+                FnArg::Typed(PatType { pat, .. }) => match **pat {
+                    Pat::Ident(ref i) => arg_names.push(i),
+                    _ => abort!(pat.span(), "Invalid object for typed function input"),
+                },
+            }
+        }
+        let call_part = quote! {
+            v.#f_name(#(#arg_names),*)
+        };
+        new_items.push(quote! {
+            #(#attrs)* #sig {
+                match self {
+                    #(
+                        Self::#implementors_ident(v) => #call_part
+                    ),*
+                }
+            }
+        });
+    }
+
+    let trait_name = &ast.ident;
+    let enum_name = &args.name;
+
+    let name_impl = quote!(
+        impl #enum_name {
+            pub fn name(&self) -> &'static str {
+                use crate::crypto::CryptoAlgName;
+                match self {
+                    #(Self::#implementors_ident(v) => v.name()),*
+                }
+            }
+        }
+    );
+
+    quote! {
+        #ast
+
+        #[derive(Clone)]
+        pub enum #enum_name {
+            #(#implementors_ident(#implementors)),*
+        }
+
+        #name_impl
+
+        impl #trait_name for #enum_name {
+            #(#new_items)*
+        }
+    }
+    .into()
+}
+
+#[proc_macro_error]
+#[proc_macro_attribute]
+pub fn declare_crypto_arg(attrs: TokenStream, item: TokenStream) -> TokenStream {
+    let ast: ItemStruct = parse(item).expect("Not a struct");
+    let alg_name: LitStr = parse(attrs).expect("Missing name for the crypto algorithm");
+
+    let struct_name = &ast.ident;
+
+    quote! {
+        #[derive(Clone)]
+        #ast
+
+        impl crate::crypto::CryptoAlgName for #struct_name {
+            const NAME: &'static str = #alg_name;
+
+            fn name(&self) -> &'static str {
+                Self::NAME
             }
         }
     }

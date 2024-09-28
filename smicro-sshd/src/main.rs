@@ -1,4 +1,6 @@
 #![feature(linux_pidfd)]
+#![feature(unix_socket_ancillary_data)]
+#![feature(allocator_api)]
 
 use std::{
     cmp::min,
@@ -6,14 +8,18 @@ use std::{
     io::{ErrorKind, Read, Write},
     net::SocketAddr,
     ops::{BitOr, BitOrAssign},
-    os::{fd::AsRawFd, linux::process::ChildExt},
-    path::{Path, PathBuf},
+    os::{
+        fd::AsRawFd,
+        linux::process::ChildExt,
+        unix::net::{UnixListener, UnixStream},
+    },
+    path::PathBuf,
+    process::Command,
     str::FromStr,
     thread,
 };
 
 use argh::FromArgs;
-use crypto::keys::load_hostkey;
 use log::{debug, error, info, trace, warn, LevelFilter};
 use messages::{MessageChannelClose, MessageChannelWindowAdjust};
 use mio::{
@@ -22,6 +28,7 @@ use mio::{
     Events, Interest, Poll, Token,
 };
 use nix::sys::eventfd::EventFd;
+use session::PacketProcessingDecision;
 use state::channel::{Channel, ChannelCommand, ChannelState};
 use syslog::Facility;
 
@@ -49,21 +56,27 @@ use crate::{
     state::{SenderState, State},
 };
 
+enum KeepProcessing {
+    Continue,
+    StopDisconnected,
+    StopAndTransferToChild,
+}
+
 fn handle_packet<const SIZE: usize>(
     buf: &mut LoopingBuffer<SIZE>,
     writer: &mut LoopingBuffer<SIZE>,
     session: &mut SessionStates,
     state: &mut State,
-) -> Result<(), Error> {
+) -> Result<KeepProcessing, Error> {
     let available_data = buf.get_readable_data();
     let available_data_len = available_data.len();
     let mut atomic_writer = writer.get_atomic_writer();
     let res = session.process(state, &mut atomic_writer, available_data);
     match res {
         Err(e) => match e {
-            Error::ParsingError(nom::Err::Incomplete(_)) | Error::PeerTriggeredDisconnection => {
-                // forward to our caller
-                return Err(e);
+            Error::ParsingError(nom::Err::Incomplete(_)) => {
+                // forward the signal that se need more data
+                Err(e)
             }
             Error::ParsingError(e) => {
                 error!("Got an error while trying to parse the packet: {:?}", e);
@@ -77,9 +90,12 @@ fn handle_packet<const SIZE: usize>(
                     &MessageDisconnect::new(DisconnectReason::ProtocolError),
                 );
 
-                return Err(Error::InvalidPacket);
+                Err(Error::InvalidPacket)
             }
-            Error::DisallowedMessageType(MessageType::Ignore | MessageType::Debug) => {}
+            Error::DisallowedMessageType(MessageType::Ignore | MessageType::Debug) => {
+                trace!("Received an Ignore or Debug message, skipping processing of that jessage");
+                Ok(KeepProcessing::Continue)
+            }
             e => {
                 error!("Got an error while processing the packet: {:?}", e);
                 debug!(
@@ -92,21 +108,33 @@ fn handle_packet<const SIZE: usize>(
                     &MessageDisconnect::new(DisconnectReason::ProtocolError),
                 );
 
-                return Err(Error::ProcessingFailed);
+                Err(Error::ProcessingFailed)
             }
         },
-        Ok((next_data, new_session)) => {
-            *session = new_session;
-
+        Ok((next_data, processing_decision)) => {
             // register the writes so they can be sent to the client
             atomic_writer.commit();
 
             let read_data = available_data_len - next_data.len();
             buf.advance_reader_pos(read_data);
+
+            match processing_decision {
+                PacketProcessingDecision::NewState(new_session) => {
+                    *session = new_session;
+
+                    Ok(KeepProcessing::Continue)
+                }
+                PacketProcessingDecision::SpawnChild(new_session) => {
+                    *session = new_session;
+
+                    Ok(KeepProcessing::StopAndTransferToChild)
+                }
+                PacketProcessingDecision::PeerTriggeredDisconnection => {
+                    Ok(KeepProcessing::StopDisconnected)
+                }
+            }
         }
     }
-
-    Ok(())
 }
 
 fn read_stream_to_buffer<const SIZE: usize, R: Read + ?Sized>(
@@ -172,16 +200,17 @@ fn handle_packets<const SIZE: usize>(
     sender_buf: &mut LoopingBuffer<SIZE>,
     session: &mut SessionStates,
     state: &mut State,
-) -> Result<(), Error> {
+) -> Result<KeepProcessing, Error> {
     loop {
         match handle_packet(reader_buf, sender_buf, session, state) {
-            Ok(_) => {}
+            Ok(KeepProcessing::Continue) => {}
+            Ok(x) => return Ok(x),
             Err(Error::ParsingError(nom::Err::Incomplete(_))) => {
                 trace!("Not enough data to parse the packet, trying to read more");
-                return Ok(());
+                return Ok(KeepProcessing::Continue);
             }
             Err(Error::IoError(e)) if e.kind() == ErrorKind::WouldBlock => {
-                return Ok(());
+                return Ok(KeepProcessing::Continue);
             }
             Err(e) => {
                 return Err(e);
@@ -516,10 +545,7 @@ fn handle_stream(mut stream: TcpStream) -> Result<(), Error> {
     let mut reader_buf = <LoopingBuffer<MAX_PKT_SIZE>>::new()?;
     let mut sender_buf = <LoopingBuffer<MAX_PKT_SIZE>>::new()?;
 
-    let mut host_keys = Vec::new();
-    let test_hostkey = load_hostkey(&Path::new("/home/sthoby/dev-fast/smicro/host_key"))?;
-    host_keys.push(test_hostkey.as_ref());
-    let mut state = State::new(&host_keys);
+    let mut state = State::new()?;
     let mut session = SessionStates::UninitializedSession(UninitializedSession {});
 
     let mut poll = Poll::new()?;
@@ -577,7 +603,36 @@ fn handle_stream(mut stream: TcpStream) -> Result<(), Error> {
 
         non_io_backed_progress |= read_stream_to_buffer(&mut stream, &mut reader_buf)?;
 
-        handle_packets(&mut reader_buf, &mut sender_buf, &mut session, &mut state)?;
+        match handle_packets(&mut reader_buf, &mut sender_buf, &mut session, &mut state)? {
+            KeepProcessing::Continue => {}
+            KeepProcessing::StopDisconnected => return Ok(()),
+            KeepProcessing::StopAndTransferToChild => {
+                println!("Transferring!");
+                let socket_path = "/tmp/wip";
+                let socket = UnixListener::bind(socket_path)?;
+
+                let mut cmd = Command::new(
+                    std::env::current_exe()?
+                        .parent()
+                        .unwrap()
+                        .join("smicro-sshd"),
+                )
+                .arg("--master-socket")
+                .arg(socket_path)
+                .spawn()?;
+                let (mut stream, _) = socket.accept()?;
+
+                unsafe {
+                    reader_buf.send_over_socket(&mut stream)?;
+                    sender_buf.send_over_socket(&mut stream)?;
+                };
+
+                cmd.wait()?;
+                drop(socket);
+
+                return Ok(());
+            }
+        }
 
         for cmd in state
             .channels
@@ -636,7 +691,7 @@ fn master_process() -> Result<(), Error> {
                     Ok((stream, _address)) => {
                         info!("Received a new connection");
                         thread::spawn(move || match handle_stream(stream) {
-                            Ok(()) | Err(Error::PeerTriggeredDisconnection) => {
+                            Ok(()) => {
                                 info!("Connection terminated");
                             }
                             Err(e) => error!("Got an error while handling a stream: {:?}", e),
@@ -672,7 +727,13 @@ fn main() -> Result<(), Error> {
     )?;
 
     if let Some(socket_path) = options.master_socket {
-        println!("{:?}", socket_path);
+        let mut stream = UnixStream::connect(socket_path)?;
+
+        unsafe {
+            let reader_buf = <LoopingBuffer<MAX_PKT_SIZE>>::receive_over_socket(&mut stream)?;
+            let sender_buf = <LoopingBuffer<MAX_PKT_SIZE>>::receive_over_socket(&mut stream)?;
+            println!("{:?} {:?}", reader_buf, sender_buf);
+        };
 
         Ok(())
     } else {

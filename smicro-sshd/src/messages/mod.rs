@@ -17,8 +17,8 @@ use smicro_types::{
 mod kex;
 
 pub use self::kex::{
-    gen_kex_initial_list, get_signature_checker_from_key_type, negotiate_alg_host_key_algorithms,
-    MessageKexEcdhInit, MessageKexEcdhReply, MessageKeyExchangeInit,
+    gen_kex_initial_list, negotiate_alg_signing_algorithms, MessageKexEcdhInit,
+    MessageKexEcdhReply, MessageKeyExchangeInit,
 };
 
 pub trait Message<'a>: Sized {

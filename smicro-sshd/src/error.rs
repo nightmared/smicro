@@ -24,8 +24,8 @@ pub enum Error {
     NoCommonCipher,
     #[error("No common Kex algorithm was found")]
     NoCommonKexAlg,
-    #[error("No common host key algorithm was found")]
-    NoCommonHostKeyAlg,
+    #[error("No common signing key algorithm was found")]
+    NoCommonSigningAlg,
     #[error("Error processing the client packet")]
     ProcessingFailed,
     #[error("Got data in a NEWKEYS message, this shouldn't happen")]
@@ -82,8 +82,6 @@ pub enum Error {
     InvalidStdioHandle,
     #[error("The client closed the connection")]
     ConnectionClosed,
-    #[error("The peer sent a disconnect message")]
-    PeerTriggeredDisconnection,
     #[error("Invalid channel: no command is registered for that channel")]
     MissingCommandInChannel,
     #[error("Requested to increase the window size beyond 4GB: aborting")]

@@ -16,13 +16,7 @@ use smicro_types::ssh::{
 };
 
 use crate::{
-    crypto::{
-        cipher::{CipherAllocator, CipherIdentifier},
-        kex::KEXIdentifier,
-        mac::{MACAllocator, MACIdentifier},
-        sign::SignerIdentifier,
-        CryptoAlg, CryptoAlgs, ICryptoAlgs,
-    },
+    crypto::{cipher::CipherAllocator, mac::MACAllocator, CryptoAlg, CryptoAlgs},
     error::Error,
     state::State,
 };
@@ -40,7 +34,7 @@ pub fn gen_kex_initial_list(state: &mut State) -> MessageKeyExchangeInit {
     };
 
     let server_host_key_algorithms = NameList {
-        entries: HOST_KEY_ALGORITHMS_NAMES
+        entries: SIGNING_ALGORITHMS_NAMES
             .iter()
             .map(|x| x.to_string())
             .collect(),
@@ -118,141 +112,74 @@ pub struct MessageKeyExchangeInit {
     reserved: u32,
 }
 
-macro_rules! declare_key_types {
-    ($($id:ident=>$val:ty),*) => {
-        pub enum SignatureCheckerWrapper {
-            $($id($val)),*
-        }
+#[declare_crypto_algs_list(wrapper_name = crate::crypto::sign::SignerIdentifierWrapper, error_value = Error::NoCommonSigningAlg)]
+const SIGNING_ALGORITHMS: _ = [crate::crypto::sign::EcdsaSha2Nistp521];
 
-        impl SignatureCheckerWrapper {
-            pub fn signature_is_valid(
-                &self,
-                key: &[u8],
-                message: &[u8],
-                signature: &[u8],
-            ) -> Result<bool, Error>{
-                match self {
-                    $(SignatureCheckerWrapper::$id(val) => val.signature_is_valid(key, message, signature)),*,
-                }
-            }
-
-        }
-
-        pub fn get_signature_checker_from_key_type(name: &[u8]) -> Option<SignatureCheckerWrapper> {
-            match name {
-                $(v if v == <$val as SignerIdentifier>::NAME.as_bytes() => Some(SignatureCheckerWrapper::$id(<$val>::new()))),*,
-                _ => None
-            }
-        }
-    };
-}
-
-declare_key_types!(EcdsaSha2Nistp521=>crate::crypto::sign::EcdsaSha2Nistp521);
-
-#[declare_crypto_algs_list]
-const HOST_KEY_ALGORITHMS: _ = [crate::crypto::sign::EcdsaSha2Nistp521];
-
-#[declare_crypto_algs_list]
+#[declare_crypto_algs_list(wrapper_name = crate::crypto::kex::KEXWrapper, error_value = Error::NoCommonKexAlg)]
 const KEX_ALGORITHMS: _ = [crate::crypto::kex::EcdhSha2Nistp521];
 
 // TODO: add aes256-gcm@openssh.com
-#[declare_crypto_algs_list]
+#[declare_crypto_algs_list(wrapper_name = crate::crypto::cipher::CipherAllocatorWrapper, error_value = Error::NoCommonCipher)]
 const CIPHER_ALGORITHMS: _ = [
     crate::crypto::cipher::Chacha20Poly1305,
     crate::crypto::cipher::Aes256Ctr,
 ];
 
-#[declare_crypto_algs_list]
+#[declare_crypto_algs_list(wrapper_name = crate::crypto::mac::MACAllocatorWrapper, error_value = Error::NoCommonMAC)]
 pub const MAC_ALGORITHMS: _ = [
     crate::crypto::mac::HmacSha2256,
     crate::crypto::mac::HmacSha2512,
 ];
 
 impl MessageKeyExchangeInit {
-    pub fn compute_crypto_algs(&self) -> Result<Box<dyn ICryptoAlgs>, Error> {
+    pub fn compute_crypto_algs(&self) -> Result<CryptoAlgs, Error> {
         if self.first_kex_packet_follows {
             error!("first_kex_packet_follows is not supported");
             return Err(Error::Unsupported);
         }
 
-        negotiate_alg_kex_algorithms!(self.kex_algorithms.entries, kex, Error::NoCommonKexAlg, {
-            negotiate_alg_host_key_algorithms!(
-                self.server_host_key_algorithms.entries,
-                host_key_alg,
-                Error::NoCommonHostKeyAlg,
-                {
-                    negotiate_alg_cipher_algorithms!(
-                        self.encryption_algorithms_client_to_server.entries,
-                        client_to_server_cipher,
-                        Error::NoCommonCipher,
-                        {
-                            negotiate_alg_cipher_algorithms!(
-                                self.encryption_algorithms_server_to_client.entries,
-                                server_to_client_cipher,
-                                Error::NoCommonCipher,
-                                {
-                                    negotiate_alg_mac_algorithms!(
-                                        self.mac_algorithms_client_to_server.entries,
-                                        client_to_server_mac,
-                                        Error::NoCommonMAC,
-                                        {
-                                            negotiate_alg_mac_algorithms!(
-                                                self.mac_algorithms_server_to_client.entries,
-                                                server_to_client_mac,
-                                                Error::NoCommonMAC,
-                                                {
-                                                    let cipher_max_length =
-                                                        |cipher: &dyn CipherAllocator| -> usize {
-                                                            max(
-                                                                cipher.iv_size_bits(),
-                                                                max(
-                                                                    cipher.block_size_bits(),
-                                                                    cipher.key_size_bits(),
-                                                                ),
-                                                            )
-                                                        };
-                                                    let key_max_length = max(
-                                                        max(
-                                                            client_to_server_mac.key_size_bites(),
-                                                            cipher_max_length(
-                                                                &client_to_server_cipher,
-                                                            ),
-                                                        ),
-                                                        max(
-                                                            server_to_client_mac.key_size_bites(),
-                                                            cipher_max_length(
-                                                                &server_to_client_cipher,
-                                                            ),
-                                                        ),
-                                                    );
+        let kex = negotiate_alg_kex_algorithms(&self.kex_algorithms.entries)?;
+        let host_key_alg =
+            negotiate_alg_signing_algorithms(&self.server_host_key_algorithms.entries)?;
+        let client_to_server_cipher =
+            negotiate_alg_cipher_algorithms(&self.encryption_algorithms_client_to_server.entries)?;
+        let server_to_client_cipher =
+            negotiate_alg_cipher_algorithms(&self.encryption_algorithms_server_to_client.entries)?;
+        let client_to_server_mac =
+            negotiate_alg_mac_algorithms(&self.mac_algorithms_client_to_server.entries)?;
+        let server_to_client_mac =
+            negotiate_alg_mac_algorithms(&self.mac_algorithms_server_to_client.entries)?;
 
-                                                    let crypto_algs = CryptoAlgs {
-                                                        kex,
-                                                        host_key_alg,
-                                                        client_to_server_cipher,
-                                                        server_to_client_cipher,
-                                                        client_to_server_mac,
-                                                        server_to_client_mac,
-                                                        key_max_length,
-                                                    };
-
-                                                    debug!(
-                                                        "Cryptographic parameters negotiated: {:?}",
-                                                        crypto_algs
-                                                    );
-
-                                                    Ok(Box::new(crypto_algs))
-                                                }
-                                            )
-                                        }
-                                    )
-                                }
-                            )
-                        }
-                    )
-                }
+        let cipher_max_length = |cipher: &dyn CipherAllocator| -> usize {
+            max(
+                cipher.iv_size_bits(),
+                max(cipher.block_size_bits(), cipher.key_size_bits()),
             )
-        })
+        };
+        let key_max_length = max(
+            max(
+                client_to_server_mac.key_size_bites(),
+                cipher_max_length(&client_to_server_cipher),
+            ),
+            max(
+                server_to_client_mac.key_size_bites(),
+                cipher_max_length(&server_to_client_cipher),
+            ),
+        );
+
+        let crypto_algs = CryptoAlgs {
+            kex,
+            host_key_alg,
+            client_to_server_cipher,
+            server_to_client_cipher,
+            client_to_server_mac,
+            server_to_client_mac,
+            key_max_length,
+        };
+
+        debug!("Cryptographic parameters negotiated: {:?}", crypto_algs);
+
+        Ok(crypto_algs)
     }
 }
 

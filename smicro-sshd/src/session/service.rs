@@ -11,11 +11,12 @@ use smicro_types::{
     ssh::types::{NameList, SharedSSHSlice},
 };
 
+use crate::crypto::sign::SignerIdentifier;
 use crate::{
     crypto::keys::{load_public_key_list, AuthorizedKey},
     error::Error,
     messages::{
-        get_signature_checker_from_key_type, MessageServiceAccept, MessageServiceRequest,
+        negotiate_alg_signing_algorithms, MessageServiceAccept, MessageServiceRequest,
         MessageUserAuthFailure, MessageUserAuthPublicKeyOk, MessageUserAuthRequest,
         MessageUserAuthSuccess, UserAuthPublickey,
     },
@@ -24,7 +25,7 @@ use crate::{
     write_message,
 };
 
-use super::SessionStateEstablished;
+use super::{PacketProcessingDecision, SessionStateEstablished, SessionStates};
 
 #[declare_session_state(msg_type = MessageType::ServiceRequest)]
 pub struct ExpectsServiceRequest {}
@@ -36,7 +37,7 @@ impl ExpectsServiceRequest {
         writer: &mut W,
         _message_type: MessageType,
         message_data: &[u8],
-    ) -> Result<SessionStateEstablished, Error> {
+    ) -> Result<PacketProcessingDecision, Error> {
         let (_, msg) = MessageServiceRequest::deserialize(message_data)?;
 
         if msg.service_name != "ssh-userauth" {
@@ -51,9 +52,7 @@ impl ExpectsServiceRequest {
             },
         )?;
 
-        Ok(SessionStateEstablished::ExpectsUserAuthRequest(
-            ExpectsUserAuthRequest {},
-        ))
+        Ok(SessionStateEstablished::ExpectsUserAuthRequest(ExpectsUserAuthRequest {}).into())
     }
 }
 
@@ -80,7 +79,7 @@ impl ExpectsUserAuthRequest {
         &self,
         state: &mut State,
         writer: &mut W,
-    ) -> Result<SessionStateEstablished, Error> {
+    ) -> Result<PacketProcessingDecision, Error> {
         write_message(
             &mut state.sender,
             writer,
@@ -92,9 +91,7 @@ impl ExpectsUserAuthRequest {
             },
         )?;
 
-        Ok(SessionStateEstablished::ExpectsUserAuthRequest(
-            self.clone(),
-        ))
+        Ok(SessionStateEstablished::ExpectsUserAuthRequest(self.clone()).into())
     }
 
     fn auth_pub_key<const SIZE: usize, W: LoopingBufferWriter<SIZE>>(
@@ -109,9 +106,11 @@ impl ExpectsUserAuthRequest {
             return Ok(PubkeyAuthDecision::Rejected);
         }
 
-        let verifier = match get_signature_checker_from_key_type(&authorized_key.key_type) {
-            Some(v) => v,
-            None => {
+        let verifier = match negotiate_alg_signing_algorithms(&[&String::from_utf8_lossy(
+            &authorized_key.key_type,
+        )]) {
+            Ok(v) => v,
+            Err(_) => {
                 info!("Unsupported key type {}", req.public_key_alg_name);
                 return Ok(PubkeyAuthDecision::Rejected);
             }
@@ -182,7 +181,7 @@ impl ExpectsUserAuthRequest {
         writer: &mut W,
         _message_type: MessageType,
         message_data: &[u8],
-    ) -> Result<SessionStateEstablished, Error> {
+    ) -> Result<PacketProcessingDecision, Error> {
         let (_, msg) = MessageUserAuthRequest::deserialize(message_data)?;
 
         if let Some(_invalid_char) = msg
@@ -213,14 +212,20 @@ impl ExpectsUserAuthRequest {
             match self.auth_pub_key(state, writer, &authorized_key, &msg, &pk)? {
                 PubkeyAuthDecision::Rejected => continue,
                 PubkeyAuthDecision::WorkInProgress => {
-                    return Ok(SessionStateEstablished::ExpectsUserAuthRequest(
-                        self.clone(),
-                    ))
+                    return Ok(SessionStateEstablished::ExpectsUserAuthRequest(self.clone()).into())
                 }
                 PubkeyAuthDecision::Accepted => {
-                    return Ok(SessionStateEstablished::ExpectsChannelOpen(
-                        ExpectsChannelOpen {},
-                    ))
+                    return Ok(PacketProcessingDecision::NewState(
+                        SessionStates::SessionStateEstablished(
+                            SessionStateEstablished::ExpectsChannelOpen(ExpectsChannelOpen {}),
+                        ),
+                    ));
+
+                    //return Ok(PacketProcessingDecision::SpawnChild(
+                    //    SessionStates::SessionStateEstablished(
+                    //        SessionStateEstablished::ExpectsChannelOpen(ExpectsChannelOpen {}),
+                    //    ),
+                    //));
                 }
             }
         }

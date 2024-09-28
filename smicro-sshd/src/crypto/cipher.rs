@@ -9,11 +9,13 @@ use hybrid_array::Array;
 use nom::{bytes::streaming::take, IResult};
 #[cfg(feature = "rustcrypto")]
 use poly1305::Poly1305;
+use universal_hash::KeyInit;
+
+use smicro_macros::{create_wrapper_enum_implementing_trait, declare_crypto_arg};
 use smicro_types::{
     error::ParsingError,
     ssh::deserialize::{const_take, streaming_const_take},
 };
-use universal_hash::KeyInit;
 
 use crate::{crypto::CryptoAlg, error::Error, MAX_PKT_SIZE};
 
@@ -22,30 +24,22 @@ compile_error!("Features 'rustcrypto' and 'ring' cannot be enabled at the same t
 
 const POLY1305_BLOCK_SIZE: usize = 16;
 
-pub trait CipherIdentifier: CryptoAlg + CipherAllocator {
-    const NAME: &'static str;
-}
-
+#[create_wrapper_enum_implementing_trait(name = CipherAllocatorWrapper, implementors = [Chacha20Poly1305, Aes256Ctr])]
 pub trait CipherAllocator {
-    fn name(&self) -> &'static str;
     fn key_size_bits(&self) -> usize;
     fn iv_size_bits(&self) -> usize;
     fn block_size_bits(&self) -> usize;
 
-    fn from_key(&self, key: &[u8], raw_iv: &[u8]) -> Result<Box<dyn Cipher>, Error>;
+    fn from_key(&self, key: &[u8], raw_iv: &[u8]) -> Result<CipherWrapper, Error>;
 }
 
-#[derive(Clone)]
+#[declare_crypto_arg("chacha20-poly1305@openssh.com")]
 pub struct Chacha20Poly1305 {}
 
 impl CryptoAlg for Chacha20Poly1305 {
     fn new() -> Self {
         Self {}
     }
-}
-
-impl CipherIdentifier for Chacha20Poly1305 {
-    const NAME: &'static str = "chacha20-poly1305@openssh.com";
 }
 
 impl Chacha20Poly1305 {
@@ -55,10 +49,6 @@ impl Chacha20Poly1305 {
 }
 
 impl CipherAllocator for Chacha20Poly1305 {
-    fn name(&self) -> &'static str {
-        Self::NAME
-    }
-
     fn key_size_bits(&self) -> usize {
         Self::KEY_SIZE_BYTES * 8
     }
@@ -71,41 +61,42 @@ impl CipherAllocator for Chacha20Poly1305 {
         Self::BLOCK_SIZE_BYTES * 8
     }
 
-    #[cfg(feature = "rustcrypto")]
-    fn from_key(&self, raw_key: &[u8], _raw_iv: &[u8]) -> Result<Box<dyn Cipher>, Error> {
-        let key = Array::try_from(&raw_key[0..self.key_size_bits() / 8])?;
-        let aad_key =
-            Array::try_from(&raw_key[self.key_size_bits() / 8..2 * self.key_size_bits() / 8])?;
+    fn from_key(&self, raw_key: &[u8], _raw_iv: &[u8]) -> Result<CipherWrapper, Error> {
+        #[cfg(feature = "rustcrypto")]
+        {
+            let key = Array::try_from(&raw_key[0..self.key_size_bits() / 8])?;
+            let aad_key =
+                Array::try_from(&raw_key[self.key_size_bits() / 8..2 * self.key_size_bits() / 8])?;
 
-        Ok(Box::new(Chacha20Poly1305Impl { key, aad_key }))
-    }
-
-    #[cfg(feature = "ring")]
-    fn from_key(&self, raw_key: &[u8], _raw_iv: &[u8]) -> Result<Box<dyn Cipher>, Error> {
-        let mut fixed_raw_key = [0; 64];
-        if raw_key.len() != 2 * Self::KEY_SIZE_BYTES {
-            return Err(Error::InvalidPrivateKeyLength);
+            Ok(CipherWrapper::Chacha20Poly1305Impl(Chacha20Poly1305Impl {
+                key,
+                aad_key,
+            }))
         }
-        fixed_raw_key.copy_from_slice(raw_key);
 
-        Ok(Box::new(Chacha20Poly1305ImplRing {
-            decrypt: ring::aead::chacha20_poly1305_openssh::OpeningKey::new(&fixed_raw_key),
-            encrypt: ring::aead::chacha20_poly1305_openssh::SealingKey::new(&fixed_raw_key),
-        }))
+        #[cfg(feature = "ring")]
+        {
+            let mut fixed_raw_key = [0; 64];
+            if raw_key.len() != 2 * Self::KEY_SIZE_BYTES {
+                return Err(Error::InvalidPrivateKeyLength);
+            }
+            fixed_raw_key.copy_from_slice(raw_key);
+
+            Ok(CipherWrapper::Chacha20Poly1305Impl(Chacha20Poly1305Impl {
+                decrypt: ring::aead::chacha20_poly1305_openssh::OpeningKey::new(&fixed_raw_key),
+                encrypt: ring::aead::chacha20_poly1305_openssh::SealingKey::new(&fixed_raw_key),
+            }))
+        }
     }
 }
 
-#[derive(Clone)]
+#[declare_crypto_arg("aes256-ctr")]
 pub struct Aes256Ctr {}
 
 impl CryptoAlg for Aes256Ctr {
     fn new() -> Self {
         Self {}
     }
-}
-
-impl CipherIdentifier for Aes256Ctr {
-    const NAME: &'static str = "aes256-ctr";
 }
 
 impl Aes256Ctr {
@@ -115,10 +106,6 @@ impl Aes256Ctr {
 }
 
 impl CipherAllocator for Aes256Ctr {
-    fn name(&self) -> &'static str {
-        Self::NAME
-    }
-
     fn key_size_bits(&self) -> usize {
         Self::KEY_SIZE_BYTES * 8
     }
@@ -131,14 +118,15 @@ impl CipherAllocator for Aes256Ctr {
         Self::BLOCK_SIZE_BYTES * 8
     }
 
-    fn from_key(&self, raw_key: &[u8], raw_iv: &[u8]) -> Result<Box<dyn Cipher>, Error> {
+    fn from_key(&self, raw_key: &[u8], raw_iv: &[u8]) -> Result<CipherWrapper, Error> {
         let key = Array::try_from(&raw_key[0..Self::KEY_SIZE_BYTES])?;
         let ctr = Array::try_from(&raw_iv[0..Self::IV_SIZE_BYTES])?;
 
-        Ok(Box::new(Aes256CtrImpl { key, ctr }))
+        Ok(CipherWrapper::Aes256CtrImpl(Aes256CtrImpl { key, ctr }))
     }
 }
 
+#[create_wrapper_enum_implementing_trait(name = CipherWrapper, implementors = [Chacha20Poly1305Impl, Aes256CtrImpl])]
 pub trait Cipher {
     fn block_size_bytes(&self) -> usize;
 
@@ -158,7 +146,7 @@ pub trait Cipher {
 }
 
 #[cfg(feature = "rustcrypto")]
-#[derive(Clone)]
+#[declare_crypto_arg("chacha20-poly1305@openssh.com")]
 pub struct Chacha20Poly1305Impl {
     key: Array<u8, cipher::consts::U32>,
     aad_key: Array<u8, cipher::consts::U32>,
@@ -285,7 +273,8 @@ impl Chacha20Poly1305Impl {
 }
 
 #[cfg(feature = "ring")]
-pub struct Chacha20Poly1305ImplRing {
+#[declare_crypto_arg("chacha20-poly1305@openssh.com")]
+pub struct Chacha20Poly1305Impl {
     // slight loss of space (we store the key twice instead of once), but that's only a waste of 64
     // bytes, which I can accept as a tradeoff for not having to redesign the API to separate the
     // sender and receiver side
@@ -294,7 +283,7 @@ pub struct Chacha20Poly1305ImplRing {
 }
 
 #[cfg(feature = "ring")]
-impl Cipher for Chacha20Poly1305ImplRing {
+impl Cipher for Chacha20Poly1305Impl {
     fn block_size_bytes(&self) -> usize {
         64
     }
@@ -353,7 +342,7 @@ impl Cipher for Chacha20Poly1305ImplRing {
     }
 }
 
-#[derive(Clone)]
+#[declare_crypto_arg("aes256-ctr")]
 pub struct Aes256CtrImpl {
     key: Array<u8, cipher::consts::U32>,
     ctr: Array<u8, cipher::consts::U16>,

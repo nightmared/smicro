@@ -1,5 +1,17 @@
+#![feature(unix_socket_ancillary_data)]
+#![feature(allocator_api)]
+
+use std::alloc::Allocator;
+use std::cell::UnsafeCell;
 use std::fmt::Debug;
 use std::io::{Error, ErrorKind};
+use std::ptr::{slice_from_raw_parts_mut, NonNull};
+use std::sync::Arc;
+#[cfg(feature = "share_loop")]
+use std::{
+    io::{IoSlice, IoSliceMut},
+    os::unix::net::{AncillaryData, AncillaryError, SocketAncillary, UnixStream},
+};
 
 #[derive(thiserror::Error, Debug)]
 pub enum BufferCreationError {
@@ -9,19 +21,35 @@ pub enum BufferCreationError {
     VirtualFileCreationFailed(std::io::Error),
     #[error("Could not truncate the virtual buffer")]
     VirtualFileTruncationFailed(std::io::Error),
+    #[cfg(feature = "share_loop")]
+    #[error("Could not read enough data to recreate a LoopingBuffer")]
+    MissingDataInStream,
+    #[cfg(feature = "share_loop")]
+    #[error("No associated file descripto: cannot restore the LoopingBuffer")]
+    MissingFdInStream,
+    #[cfg(feature = "share_loop")]
+    #[error("Received an incorrect length for the LoopingBuffer")]
+    LengthMismatch,
+    #[cfg(feature = "share_loop")]
+    #[error("Could not read data from the stream")]
+    StreamRecvError(std::io::Error),
+    #[cfg(feature = "share_loop")]
+    #[error("Could not decode ancillary data")]
+    AncillaryDecodeError(AncillaryError),
 }
 
-pub fn create_circular_buffer(
-    max_pkt_size: usize,
-) -> Result<(i32, &'static mut [u8]), BufferCreationError> {
+pub fn create_circular_buffer_from_existing_fd(
+    buf_size: usize,
+    fd: i32,
+) -> Result<&'static mut [u8], BufferCreationError> {
     unsafe {
         // reserve a memory map where we map twice our memory mapping, so that there is no risk of
         // overwriting an existing memory map
         let overwritable_mapping = libc::mmap(
             std::ptr::null_mut(),
-            2 * max_pkt_size,
+            2 * buf_size,
             libc::PROT_READ | libc::PROT_WRITE,
-            libc::MAP_ANONYMOUS | libc::MAP_PRIVATE,
+            libc::MAP_ANONYMOUS | libc::MAP_SHARED,
             -1,
             0,
         );
@@ -39,22 +67,9 @@ pub fn create_circular_buffer(
         //                  | |
         //            Anonymous memory
 
-        let fd = libc::memfd_create(b"read_buffer\0".as_ptr() as *const i8, 0);
-        if fd == -1 {
-            return Err(BufferCreationError::VirtualFileCreationFailed(
-                std::io::Error::last_os_error(),
-            ));
-        }
-
-        if libc::ftruncate(fd, max_pkt_size as i64) == -1 {
-            return Err(BufferCreationError::VirtualFileTruncationFailed(
-                std::io::Error::last_os_error(),
-            ));
-        }
-
         let first_map = libc::mmap(
             overwritable_mapping,
-            max_pkt_size,
+            buf_size,
             libc::PROT_READ | libc::PROT_WRITE,
             libc::MAP_FIXED | libc::MAP_SHARED,
             fd,
@@ -67,8 +82,8 @@ pub fn create_circular_buffer(
         }
 
         let second_map = libc::mmap(
-            overwritable_mapping.offset(max_pkt_size as isize),
-            max_pkt_size,
+            overwritable_mapping.offset(buf_size as isize),
+            buf_size,
             libc::PROT_READ | libc::PROT_WRITE,
             libc::MAP_FIXED | libc::MAP_SHARED,
             fd,
@@ -93,14 +108,41 @@ pub fn create_circular_buffer(
         //        -------------------
         //        | MAX_PKT_SIZE    |
         //        -------------------
-        // Which means both memory areas are completely aliases,
+        // Which means both memory areas completely aliases,
         // and the two mapping together loop, hence forming a ringbuffer
 
-        Ok((
-            fd,
-            std::slice::from_raw_parts_mut(overwritable_mapping as *mut u8, 2 * max_pkt_size),
+        Ok(std::slice::from_raw_parts_mut(
+            overwritable_mapping as *mut u8,
+            2 * buf_size,
         ))
     }
+}
+
+pub fn create_memfd(buf_size: usize) -> Result<i32, BufferCreationError> {
+    unsafe {
+        let fd = libc::memfd_create(b"read_buffer\0".as_ptr() as *const i8, 0);
+        if fd == -1 {
+            return Err(BufferCreationError::VirtualFileCreationFailed(
+                std::io::Error::last_os_error(),
+            ));
+        }
+
+        if libc::ftruncate(fd, buf_size as i64) == -1 {
+            return Err(BufferCreationError::VirtualFileTruncationFailed(
+                std::io::Error::last_os_error(),
+            ));
+        }
+
+        Ok(fd)
+    }
+}
+
+pub fn create_circular_buffer(
+    buf_size: usize,
+) -> Result<(i32, &'static mut [u8]), BufferCreationError> {
+    let fd = create_memfd(buf_size)?;
+
+    Ok((fd, create_circular_buffer_from_existing_fd(buf_size, fd)?))
 }
 
 pub trait LoopingBufferWriter<const SIZE: usize> {
@@ -184,6 +226,79 @@ impl<const SIZE: usize> LoopingBuffer<SIZE> {
         AtomicLoopingBufferWriter {
             inner: self,
             end_pos,
+        }
+    }
+
+    #[cfg(feature = "share_loop")]
+    /// Warning: unsafe as the looping buffer must not be used in the originating process after
+    /// being sent (we risk concurrent use of the memory, and thus reading/writing uninitialized
+    /// data)
+    pub unsafe fn send_over_socket(&mut self, stream: &mut UnixStream) -> std::io::Result<()> {
+        let mut buf = [0; 12];
+        buf[0..4].copy_from_slice(&(SIZE as u32).to_be_bytes());
+        buf[4..8].copy_from_slice(&(self.start_pos as u32).to_be_bytes());
+        buf[8..12].copy_from_slice(&(self.end_pos as u32).to_be_bytes());
+        let buf = IoSlice::new(&buf);
+
+        let mut ancillary_buffer = [0; 128];
+        let mut ancillary = SocketAncillary::new(&mut ancillary_buffer[..]);
+        ancillary.add_fds(&[self.fd]);
+
+        stream.send_vectored_with_ancillary(&mut [buf], &mut ancillary)?;
+
+        Ok(())
+    }
+
+    #[cfg(feature = "share_loop")]
+    pub unsafe fn receive_over_socket(
+        stream: &mut UnixStream,
+    ) -> Result<Self, BufferCreationError> {
+        let mut ancillary_buffer = [0; 128];
+        let mut ancillary = SocketAncillary::new(&mut ancillary_buffer[..]);
+
+        let mut recv_buffer = [0; 12];
+
+        let nb_read = stream
+            .recv_vectored_with_ancillary(&mut [IoSliceMut::new(&mut recv_buffer)], &mut ancillary)
+            .map_err(BufferCreationError::StreamRecvError)?;
+        if nb_read != 12 {
+            return Err(BufferCreationError::MissingDataInStream);
+        }
+
+        let mut buf = [0; 4];
+        buf.copy_from_slice(&recv_buffer[0..4]);
+        let size = u32::from_be_bytes(buf);
+
+        if size as usize != SIZE {
+            return Err(BufferCreationError::LengthMismatch);
+        }
+
+        buf.copy_from_slice(&recv_buffer[4..8]);
+        let start_pos = u32::from_be_bytes(buf) as usize;
+
+        buf.copy_from_slice(&recv_buffer[8..12]);
+        let end_pos = u32::from_be_bytes(buf) as usize;
+
+        let mut fd = None;
+        for ancillary_result in ancillary.messages() {
+            if let AncillaryData::ScmRights(mut scm_rights) =
+                ancillary_result.map_err(BufferCreationError::AncillaryDecodeError)?
+            {
+                fd = scm_rights.next();
+            }
+        }
+
+        match fd {
+            Some(fd) => {
+                let buf = create_circular_buffer_from_existing_fd(SIZE, fd)?;
+                Ok(Self {
+                    fd,
+                    buf,
+                    start_pos,
+                    end_pos,
+                })
+            }
+            None => Err(BufferCreationError::MissingFdInStream),
         }
     }
 }
@@ -277,5 +392,97 @@ impl<'a, const SIZE: usize> LoopingBufferWriter<SIZE> for AtomicLoopingBufferWri
 
     fn get_writable_buffer(&mut self) -> &mut [u8] {
         &mut self.inner.buf[self.end_pos..SIZE + self.inner.start_pos]
+    }
+}
+
+pub struct BumpAllocatorOnMemfdInner {
+    fd: i32,
+    buf: *mut u8,
+    size: usize,
+    last_alloc_end: usize,
+    cur_alignment: usize,
+}
+
+#[derive(Clone)]
+pub struct BumpAllocatorOnMemfd {
+    inner: Arc<UnsafeCell<BumpAllocatorOnMemfdInner>>,
+}
+
+impl BumpAllocatorOnMemfd {
+    pub fn new(size: usize) -> Result<Self, BufferCreationError> {
+        let fd = create_memfd(size)?;
+
+        unsafe {
+            let buf = libc::mmap(
+                std::ptr::null_mut(),
+                size,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_ANONYMOUS | libc::MAP_SHARED,
+                fd,
+                0,
+            );
+            if fd as usize == usize::MAX {
+                return Err(BufferCreationError::AllocationFailed(
+                    std::io::Error::last_os_error(),
+                ));
+            }
+
+            Ok(BumpAllocatorOnMemfd {
+                inner: Arc::new(UnsafeCell::new(BumpAllocatorOnMemfdInner {
+                    fd,
+                    buf: buf as *mut u8,
+                    size,
+                    last_alloc_end: 0,
+                    // mmap allocations are page-aligned
+                    cur_alignment: libc::sysconf(libc::_SC_PAGESIZE) as usize,
+                })),
+            })
+        }
+    }
+}
+
+unsafe impl Allocator for BumpAllocatorOnMemfd {
+    fn allocate(
+        &self,
+        layout: std::alloc::Layout,
+    ) -> Result<std::ptr::NonNull<[u8]>, std::alloc::AllocError> {
+        let inner = self.inner.get();
+        unsafe {
+            let inner = &mut *inner;
+            let required_align = layout.align();
+            let cur_align = inner.cur_alignment;
+            let padding_alignment_bytes = if cur_align % required_align == 0 {
+                0
+            } else {
+                let next_aligned_pos = (cur_align + required_align) & !(required_align - 1);
+                next_aligned_pos - cur_align
+            };
+
+            // not enought bytes available in the allocator
+            let next_end_pos = inner.last_alloc_end + padding_alignment_bytes + layout.size();
+            if next_end_pos > inner.size {
+                return Err(std::alloc::AllocError);
+            }
+
+            let ptr = (*inner).buf.byte_offset(inner.last_alloc_end as isize);
+            let ptr = NonNull::new_unchecked(slice_from_raw_parts_mut(ptr, layout.size()));
+
+            let mut new_align = 1;
+            while next_end_pos & !((1 << (new_align + 1)) - 1) == 0 {
+                new_align += 1;
+            }
+
+            inner.last_alloc_end = next_end_pos;
+            inner.cur_alignment = new_align;
+
+            Ok(ptr)
+        }
+    }
+
+    unsafe fn deallocate(&self, ptr: std::ptr::NonNull<u8>, layout: std::alloc::Layout) {
+        // deallocating is a no-op, but we zero out the memory in case it was sensitive
+        for i in 0..(layout.size() as isize) {
+            ptr.byte_offset(i).write(0);
+        }
     }
 }

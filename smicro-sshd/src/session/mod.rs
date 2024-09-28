@@ -14,13 +14,19 @@ pub use self::session_establishment::{
     IdentifierStringReceived, IdentifierStringSent, UninitializedSession,
 };
 
+pub enum PacketProcessingDecision {
+    NewState(SessionStates),
+    SpawnChild(SessionStates),
+    PeerTriggeredDisconnection,
+}
+
 pub trait SessionState {
     fn process<'a, const SIZE: usize, W: LoopingBufferWriter<SIZE>>(
         &mut self,
         state: &mut State,
         writer: &mut W,
         input: &'a mut [u8],
-    ) -> Result<(&'a [u8], SessionStates), Error>;
+    ) -> Result<(&'a [u8], PacketProcessingDecision), Error>;
 }
 
 macro_rules! define_state_list {
@@ -36,7 +42,7 @@ macro_rules! define_state_list {
                 state: &mut State,
                 writer: &mut W,
                 input: &'a mut [u8],
-            ) -> Result<(&'a [u8], SessionStates), Error> {
+            ) -> Result<(&'a [u8], PacketProcessingDecision), Error> {
                 match self {
                     $($struct::$name(val) => val.process(state, writer, input),)*
                 }
@@ -55,6 +61,12 @@ define_state_list!(
     ExpectsChannelOpen,
     AcceptsChannelMessages
 );
+
+impl Into<PacketProcessingDecision> for SessionStateEstablished {
+    fn into(self) -> PacketProcessingDecision {
+        PacketProcessingDecision::NewState(SessionStates::SessionStateEstablished(self))
+    }
+}
 
 define_state_list!(
     SessionStates,

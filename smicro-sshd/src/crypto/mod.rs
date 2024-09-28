@@ -7,6 +7,7 @@ use smicro_types::serialize::SerializePacket;
 use smicro_types::ssh::types::{MessageType, PositiveBigNum, SSHSlice, SharedSSHSlice};
 
 use crate::messages::{MessageKexEcdhInit, MessageKeyExchangeInit};
+use crate::state::IDENTIFIER_STRING;
 use crate::{error::Error, state::State};
 
 pub(crate) mod cipher;
@@ -15,10 +16,16 @@ pub(crate) mod keys;
 pub(crate) mod mac;
 pub(crate) mod sign;
 
-use cipher::{CipherAllocator, CipherIdentifier};
-use kex::{KEXIdentifier, KEX};
-use mac::{MACAllocator, MACIdentifier};
-use sign::SignerIdentifier;
+use cipher::CipherAllocatorWrapper;
+use kex::KEXWrapper;
+use mac::MACAllocatorWrapper;
+use sign::SignerIdentifierWrapper;
+
+pub trait CryptoAlgName {
+    const NAME: &'static str;
+
+    fn name(&self) -> &'static str;
+}
 
 pub trait CryptoAlg {
     fn new() -> Self
@@ -59,7 +66,7 @@ fn compute_exchange_hash<C: elliptic_curve::Curve>(
             .expect("The client identifier string should have been set by now"),
     )
     .serialize(&mut hash)?;
-    state.my_identifier_string.serialize(&mut hash)?;
+    IDENTIFIER_STRING.serialize(&mut hash)?;
 
     // Hash the SSH_MSG_KEXINIT messages
     let mut serialize_kex_msg = |kex_msg: &MessageKeyExchangeInit| -> Result<(), Error> {
@@ -132,94 +139,32 @@ fn derive_encryption_key<C: elliptic_curve::Curve>(
     Ok(resulting_key)
 }
 
-pub trait ICryptoAlgs: Debug {
-    fn kex(&self) -> &dyn KEX;
-
-    fn host_key_name(&self) -> &'static str;
-
-    fn key_max_length(&self) -> usize;
-
-    fn client_cipher(&self) -> &dyn CipherAllocator;
-
-    fn server_cipher(&self) -> &dyn CipherAllocator;
-
-    fn client_mac(&self) -> &dyn MACAllocator;
-
-    fn server_mac(&self) -> &dyn MACAllocator;
-}
-
-pub struct CryptoAlgs<
-    Kex: KEXIdentifier,
-    HostKey: SignerIdentifier,
-    C2SCipher: CipherIdentifier,
-    S2CCipher: CipherIdentifier,
-    C2SMac: MACIdentifier,
-    S2CMac: MACIdentifier,
-> {
-    pub kex: Kex,
-    pub host_key_alg: HostKey,
-    pub client_to_server_cipher: C2SCipher,
-    pub server_to_client_cipher: S2CCipher,
-    pub client_to_server_mac: C2SMac,
-    pub server_to_client_mac: S2CMac,
+#[derive(Clone)]
+pub struct CryptoAlgs {
+    pub kex: KEXWrapper,
+    pub host_key_alg: SignerIdentifierWrapper,
+    pub client_to_server_cipher: CipherAllocatorWrapper,
+    pub server_to_client_cipher: CipherAllocatorWrapper,
+    pub client_to_server_mac: MACAllocatorWrapper,
+    pub server_to_client_mac: MACAllocatorWrapper,
     pub key_max_length: usize,
 }
 
-impl<
-        Kex: KEXIdentifier,
-        HostKey: SignerIdentifier,
-        C2SCipher: CipherIdentifier,
-        S2CCipher: CipherIdentifier,
-        C2SMac: MACIdentifier,
-        S2CMac: MACIdentifier,
-    > ICryptoAlgs for CryptoAlgs<Kex, HostKey, C2SCipher, S2CCipher, C2SMac, S2CMac>
-{
-    fn kex(&self) -> &dyn KEX {
-        &self.kex
-    }
-
-    fn host_key_name(&self) -> &'static str {
-        self.host_key_alg.name()
-    }
-
-    fn key_max_length(&self) -> usize {
-        self.key_max_length
-    }
-
-    fn client_cipher(&self) -> &dyn CipherAllocator {
-        &self.client_to_server_cipher
-    }
-
-    fn server_cipher(&self) -> &dyn CipherAllocator {
-        &self.server_to_client_cipher
-    }
-
-    fn client_mac(&self) -> &dyn MACAllocator {
-        &self.client_to_server_mac
-    }
-
-    fn server_mac(&self) -> &dyn MACAllocator {
-        &self.server_to_client_mac
-    }
-}
-
-impl<
-        Kex: KEXIdentifier,
-        HostKey: SignerIdentifier,
-        C2SCipher: CipherIdentifier,
-        S2CCipher: CipherIdentifier,
-        C2SMac: MACIdentifier,
-        S2CMac: MACIdentifier,
-    > Debug for CryptoAlgs<Kex, HostKey, C2SCipher, S2CCipher, C2SMac, S2CMac>
-{
+impl Debug for CryptoAlgs {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CryptoAlgs")
-            .field("kex", &Kex::NAME)
-            .field("host_key_alg", &HostKey::NAME)
-            .field("client_to_server_cipher", &C2SCipher::NAME)
-            .field("client_to_server_mac", &C2SMac::NAME)
-            .field("server_to_client_cipher", &S2CCipher::NAME)
-            .field("server_to_client_mac", &S2CMac::NAME)
+            .field("kex", &self.kex.name())
+            .field("host_key_alg", &self.host_key_alg.name())
+            .field(
+                "client_to_server_cipher",
+                &self.client_to_server_cipher.name(),
+            )
+            .field("client_to_server_mac", &self.client_to_server_mac.name())
+            .field(
+                "server_to_client_cipher",
+                &self.server_to_client_cipher.name(),
+            )
+            .field("server_to_client_mac", &self.server_to_client_mac.name())
             .finish()
     }
 }

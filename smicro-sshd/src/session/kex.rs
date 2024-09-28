@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use log::debug;
 use smicro_common::LoopingBufferWriter;
 use smicro_macros::declare_session_state;
@@ -7,14 +5,19 @@ use smicro_types::deserialize::DeserializePacket;
 use smicro_types::ssh::types::MessageType;
 
 use crate::{
-    crypto::{kex::KexNegotiatedKeys, ICryptoAlgs},
+    crypto::{
+        cipher::CipherAllocator,
+        kex::{KexNegotiatedKeys, KEX},
+        mac::MACAllocator,
+        CryptoAlgs,
+    },
     error::Error,
     messages::{gen_kex_initial_list, MessageKexEcdhInit, MessageKeyExchangeInit, MessageNewKeys},
     state::{SessionCryptoMaterials, State},
     write_message,
 };
 
-use super::SessionStateEstablished;
+use super::{PacketProcessingDecision, SessionStateEstablished, SessionStates};
 
 #[derive(Clone, Debug)]
 pub(crate) enum SessionStateAllowedAfterKex {
@@ -24,20 +27,14 @@ pub(crate) enum SessionStateAllowedAfterKex {
     AcceptsChannelMessages(super::AcceptsChannelMessages),
 }
 
-impl SessionStateAllowedAfterKex {
-    fn to_sessionstates(&self) -> SessionStateEstablished {
-        match self {
-            Self::ExpectsServiceRequest(x) => {
-                SessionStateEstablished::ExpectsServiceRequest(x.clone())
-            }
-            Self::ExpectsUserAuthRequest(x) => {
-                SessionStateEstablished::ExpectsUserAuthRequest(x.clone())
-            }
-            Self::ExpectsChannelOpen(x) => SessionStateEstablished::ExpectsChannelOpen(x.clone()),
-            Self::AcceptsChannelMessages(x) => {
-                SessionStateEstablished::AcceptsChannelMessages(x.clone())
-            }
-        }
+impl Into<PacketProcessingDecision> for SessionStateAllowedAfterKex {
+    fn into(self) -> PacketProcessingDecision {
+        PacketProcessingDecision::NewState(SessionStates::SessionStateEstablished(match self {
+            Self::ExpectsServiceRequest(x) => SessionStateEstablished::ExpectsServiceRequest(x),
+            Self::ExpectsUserAuthRequest(x) => SessionStateEstablished::ExpectsUserAuthRequest(x),
+            Self::ExpectsChannelOpen(x) => SessionStateEstablished::ExpectsChannelOpen(x),
+            Self::AcceptsChannelMessages(x) => SessionStateEstablished::AcceptsChannelMessages(x),
+        }))
     }
 }
 
@@ -65,7 +62,7 @@ impl KexSent {
         _writer: &mut W,
         _message_type: MessageType,
         message_data: &[u8],
-    ) -> Result<SessionStateEstablished, Error> {
+    ) -> Result<PacketProcessingDecision, Error> {
         let (_, msg) = MessageKeyExchangeInit::deserialize(message_data)?;
         debug!("Received a key exchange init message: {:?}", msg);
 
@@ -75,11 +72,11 @@ impl KexSent {
         let next_state = KexReceived {
             my_kex_message: self.my_kex_message.clone(),
             peer_kex_message: msg,
-            new_crypto_algs: Arc::new(crypto_algs),
+            new_crypto_algs: crypto_algs,
             next_state: self.next_state.clone(),
         };
 
-        Ok(SessionStateEstablished::KexReceived(next_state))
+        Ok(SessionStateEstablished::KexReceived(next_state).into())
     }
 }
 
@@ -87,7 +84,7 @@ impl KexSent {
 pub struct KexReceived {
     pub my_kex_message: MessageKeyExchangeInit,
     pub peer_kex_message: MessageKeyExchangeInit,
-    pub new_crypto_algs: Arc<Box<dyn ICryptoAlgs>>,
+    pub new_crypto_algs: CryptoAlgs,
     pub(crate) next_state: SessionStateAllowedAfterKex,
 }
 
@@ -98,22 +95,22 @@ impl KexReceived {
         writer: &mut W,
         _message_type: MessageType,
         message_data: &[u8],
-    ) -> Result<SessionStateEstablished, Error> {
+    ) -> Result<PacketProcessingDecision, Error> {
         let (_, msg) = MessageKexEcdhInit::deserialize(message_data)?;
         debug!("Received an ECDH key exchange request: {:?}", msg);
         let crypto_algs = self.new_crypto_algs.clone();
         let (ecdh_reply, negotiated_keys) =
-            crypto_algs.kex().perform_key_exchange(state, &msg, &self)?;
+            crypto_algs.kex.perform_key_exchange(state, &msg, &self)?;
 
         write_message(&mut state.sender, writer, &ecdh_reply)?;
 
         write_message(&mut state.sender, writer, &MessageNewKeys {})?;
 
         let server_mac = crypto_algs
-            .server_mac()
+            .server_to_client_mac
             .allocate_with_key(&negotiated_keys.integrity_key_s2c)?;
         let server_cipher = crypto_algs
-            .server_cipher()
+            .server_to_client_cipher
             .from_key(&negotiated_keys.encryption_key_s2c, &negotiated_keys.iv_s2c)?;
         state.sender.crypto_algs = Some(crypto_algs.clone());
         state.sender.crypto_material = Some(SessionCryptoMaterials {
@@ -128,14 +125,14 @@ impl KexReceived {
             next_state: self.next_state.clone(),
         };
 
-        Ok(SessionStateEstablished::KexReplySent(kex_reply_sent))
+        Ok(SessionStateEstablished::KexReplySent(kex_reply_sent).into())
     }
 }
 
 #[declare_session_state(msg_type = MessageType::NewKeys, strict_kex = true)]
 pub struct KexReplySent {
     pub negotiated_keys: KexNegotiatedKeys,
-    pub new_crypto_algs: Arc<Box<dyn ICryptoAlgs>>,
+    pub new_crypto_algs: CryptoAlgs,
     pub(crate) next_state: SessionStateAllowedAfterKex,
 }
 
@@ -146,16 +143,16 @@ impl KexReplySent {
         _writer: &mut W,
         _message_type: MessageType,
         message_data: &[u8],
-    ) -> Result<SessionStateEstablished, Error> {
+    ) -> Result<PacketProcessingDecision, Error> {
         if message_data != [] {
             return Err(Error::DataInNewKeysMessage);
         }
 
         let crypto_algs = self.new_crypto_algs.clone();
         let client_mac = crypto_algs
-            .client_mac()
+            .client_to_server_mac
             .allocate_with_key(&self.negotiated_keys.integrity_key_c2s)?;
-        let client_cipher = crypto_algs.client_cipher().from_key(
+        let client_cipher = crypto_algs.client_to_server_cipher.from_key(
             &self.negotiated_keys.encryption_key_c2s,
             &self.negotiated_keys.iv_c2s,
         )?;
@@ -170,6 +167,6 @@ impl KexReplySent {
 
         debug!("Key setup/rotation done");
 
-        Ok(self.next_state.to_sessionstates())
+        Ok(self.next_state.clone().into())
     }
 }

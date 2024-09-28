@@ -23,7 +23,7 @@ use crate::{
     write_message,
 };
 
-use super::SessionStateEstablished;
+use super::{PacketProcessingDecision, SessionStateEstablished};
 
 #[declare_session_state(msg_type = MessageType::ChannelOpen)]
 pub struct ExpectsChannelOpen {}
@@ -35,7 +35,7 @@ impl ExpectsChannelOpen {
         writer: &mut W,
         _message_type: MessageType,
         message_data: &[u8],
-    ) -> Result<SessionStateEstablished, Error> {
+    ) -> Result<PacketProcessingDecision, Error> {
         let (_, msg) = MessageChannelOpen::deserialize(message_data)?;
 
         if msg.channel_type != "session" {
@@ -79,9 +79,7 @@ impl ExpectsChannelOpen {
         };
         write_message(&mut state.sender, writer, &confirmation)?;
 
-        Ok(SessionStateEstablished::AcceptsChannelMessages(
-            AcceptsChannelMessages {},
-        ))
+        Ok(SessionStateEstablished::AcceptsChannelMessages(AcceptsChannelMessages {}).into())
     }
 }
 
@@ -191,7 +189,7 @@ impl AcceptsChannelMessages {
         writer: &mut W,
         message_type: MessageType,
         message_data: &[u8],
-    ) -> Result<SessionStateEstablished, Error> {
+    ) -> Result<PacketProcessingDecision, Error> {
         match message_type {
             MessageType::ChannelRequest => {
                 let (_, msg) = MessageChannelRequest::deserialize(message_data)?;
@@ -275,8 +273,6 @@ impl AcceptsChannelMessages {
             }
         }
 
-        Ok(SessionStateEstablished::AcceptsChannelMessages(
-            self.clone(),
-        ))
+        Ok(SessionStateEstablished::AcceptsChannelMessages(self.clone()).into())
     }
 }

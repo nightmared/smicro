@@ -1,21 +1,19 @@
 use digest::DynDigest;
 use hmac::Hmac;
 use sha2::{Sha256, Sha512};
+use smicro_macros::{create_wrapper_enum_implementing_trait, declare_crypto_arg};
 use smicro_types::serialize::SerializePacket;
 
 use crate::{crypto::CryptoAlg, error::Error};
 
+#[create_wrapper_enum_implementing_trait(name = MACAllocatorWrapper, implementors = [HmacSha2256, HmacSha2512])]
 pub trait MACAllocator {
-    fn name(&self) -> &'static str;
     fn key_size_bites(&self) -> usize;
 
-    fn allocate_with_key(&self, key: &[u8]) -> Result<Box<dyn MAC>, Error>;
+    fn allocate_with_key(&self, key: &[u8]) -> Result<MACWrapper, Error>;
 }
 
-pub trait MACIdentifier: CryptoAlg + MACAllocator {
-    const NAME: &'static str;
-}
-#[derive(Clone)]
+#[declare_crypto_arg("hmac-sha2-256")]
 pub struct HmacSha2256 {}
 
 impl CryptoAlg for HmacSha2256 {
@@ -24,28 +22,20 @@ impl CryptoAlg for HmacSha2256 {
     }
 }
 
-impl MACIdentifier for HmacSha2256 {
-    const NAME: &'static str = "hmac-sha2-256";
-}
-
 impl MACAllocator for HmacSha2256 {
-    fn name(&self) -> &'static str {
-        Self::NAME
-    }
-
     fn key_size_bites(&self) -> usize {
         256
     }
 
-    fn allocate_with_key(&self, key: &[u8]) -> Result<Box<dyn MAC>, Error> {
-        Ok(Box::new(HmacSha2256Key {
+    fn allocate_with_key(&self, key: &[u8]) -> Result<MACWrapper, Error> {
+        Ok(MACWrapper::HmacSha2256Key(HmacSha2256Key {
             inner: <Hmac<Sha256> as hmac::Mac>::new_from_slice(key)
                 .map_err(|_| Error::InvalidMACKeyLength)?,
         }))
     }
 }
 
-#[derive(Clone)]
+#[declare_crypto_arg("hmac-sha2-512")]
 pub struct HmacSha2512 {}
 
 impl CryptoAlg for HmacSha2512 {
@@ -54,27 +44,20 @@ impl CryptoAlg for HmacSha2512 {
     }
 }
 
-impl MACIdentifier for HmacSha2512 {
-    const NAME: &'static str = "hmac-sha2-512";
-}
-
 impl MACAllocator for HmacSha2512 {
-    fn name(&self) -> &'static str {
-        Self::NAME
-    }
-
     fn key_size_bites(&self) -> usize {
         512
     }
 
-    fn allocate_with_key(&self, key: &[u8]) -> Result<Box<dyn MAC>, Error> {
-        Ok(Box::new(HmacSha2512Key {
+    fn allocate_with_key(&self, key: &[u8]) -> Result<MACWrapper, Error> {
+        Ok(MACWrapper::HmacSha2512Key(HmacSha2512Key {
             inner: <Hmac<Sha512> as hmac::Mac>::new_from_slice(key)
                 .map_err(|_| Error::InvalidMACKeyLength)?,
         }))
     }
 }
 
+#[create_wrapper_enum_implementing_trait(name = MACWrapper, implementors = [HmacSha2256Key, HmacSha2512Key])]
 pub trait MAC {
     fn size_bytes(&self) -> usize;
 
@@ -93,8 +76,8 @@ pub trait MAC {
     ) -> Result<(), Error>;
 }
 
-#[derive(Clone)]
-struct HmacSha2512Key {
+#[declare_crypto_arg("hmac-sha2-512")]
+pub struct HmacSha2512Key {
     inner: Hmac<Sha512>,
 }
 
@@ -138,8 +121,8 @@ impl MAC for HmacSha2512Key {
     }
 }
 
-#[derive(Clone)]
-struct HmacSha2256Key {
+#[declare_crypto_arg("hmac-sha2-256")]
+pub struct HmacSha2256Key {
     inner: Hmac<Sha256>,
 }
 

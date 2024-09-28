@@ -15,9 +15,11 @@ use crate::{
         kex::SessionStateAllowedAfterKex, ExpectsServiceRequest, KexSent, SessionState,
         SessionStateEstablished, SessionStates,
     },
-    state::State,
+    state::{State, IDENTIFIER_STRING},
     write_message,
 };
+
+use super::PacketProcessingDecision;
 
 #[derive(Debug)]
 pub struct UninitializedSession {}
@@ -25,16 +27,18 @@ pub struct UninitializedSession {}
 impl SessionState for UninitializedSession {
     fn process<'a, const SIZE: usize, W: LoopingBufferWriter<SIZE>>(
         &mut self,
-        state: &mut State,
+        _state: &mut State,
         writer: &mut W,
         input: &'a mut [u8],
-    ) -> Result<(&'a [u8], SessionStates), Error> {
+    ) -> Result<(&'a [u8], PacketProcessingDecision), Error> {
         // Write the identification string
-        writer.write(state.my_identifier_string.as_bytes())?;
+        writer.write(IDENTIFIER_STRING.as_bytes())?;
         writer.write(b"\r\n")?;
         Ok((
             input,
-            SessionStates::IdentifierStringSent(IdentifierStringSent {}),
+            PacketProcessingDecision::NewState(SessionStates::IdentifierStringSent(
+                IdentifierStringSent {},
+            )),
         ))
     }
 }
@@ -48,7 +52,7 @@ impl SessionState for IdentifierStringSent {
         state: &mut State,
         _writer: &mut W,
         input: &'a mut [u8],
-    ) -> Result<(&'a [u8], SessionStates), Error> {
+    ) -> Result<(&'a [u8], PacketProcessingDecision), Error> {
         let input = input as &[u8];
         let consume_until_carriage = &take_until(b"\r\n" as &[u8]);
         let consume_carriage = &tag(b"\r\n");
@@ -68,7 +72,7 @@ impl SessionState for IdentifierStringSent {
 
         let (input, _) = consume_carriage(input)?;
 
-        let mut peer_identifier_string = Vec::new();
+        let mut peer_identifier_string = Vec::new_in(state.allocator.clone());
         peer_identifier_string.extend_from_slice(magic);
         peer_identifier_string.extend_from_slice(softwareversion);
         if let Some(comment) = comment {
@@ -85,7 +89,9 @@ impl SessionState for IdentifierStringSent {
         }
         Ok((
             input,
-            SessionStates::IdentifierStringReceived(IdentifierStringReceived {}),
+            PacketProcessingDecision::NewState(SessionStates::IdentifierStringReceived(
+                IdentifierStringReceived {},
+            )),
         ))
     }
 }
@@ -99,19 +105,20 @@ impl SessionState for IdentifierStringReceived {
         state: &mut State,
         writer: &mut W,
         input: &'a mut [u8],
-    ) -> Result<(&'a [u8], SessionStates), Error> {
+    ) -> Result<(&'a [u8], PacketProcessingDecision), Error> {
         debug!("Sending the MessageKeyExchangeInit packet");
         let kex_init_msg = gen_kex_initial_list(state);
         write_message(&mut state.sender, writer, &kex_init_msg)?;
 
         Ok((
             input,
-            SessionStates::SessionStateEstablished(SessionStateEstablished::KexSent(KexSent {
+            SessionStateEstablished::KexSent(KexSent {
                 my_kex_message: kex_init_msg,
                 next_state: SessionStateAllowedAfterKex::ExpectsServiceRequest(
                     ExpectsServiceRequest {},
                 ),
-            })),
+            })
+            .into(),
         ))
     }
 }

@@ -7,7 +7,7 @@ use smicro_common::LoopingBufferWriter;
 use smicro_types::{error::ParsingError, serialize::SerializePacket};
 
 use crate::{
-    crypto::cipher::Cipher,
+    crypto::{cipher::Cipher, mac::MAC},
     error::Error,
     messages::Message,
     state::{SenderState, State},
@@ -32,7 +32,7 @@ pub fn write_message<
     let mut padding = &mut padding as &mut [u8];
 
     let mut crypto_mat = sender.crypto_material.as_mut();
-    let cipher = crypto_mat.as_ref().map(|mat| mat.cipher.as_ref());
+    let cipher = crypto_mat.as_ref().map(|mat| &mat.cipher);
 
     let mut padding_length = 4;
     // length + padding_length + message_type + payload + random_padding, max not included
@@ -64,7 +64,7 @@ pub fn write_message<
         real_packet_length
     };
 
-    let mac = crypto_mat.as_mut().map(|mat| mat.mac.as_mut());
+    let mac = crypto_mat.as_mut().map(|mat| &mut mat.mac);
     let mut mac_len = 0;
     // Do not add a MAC for AEAD ciphers
     if let Some(ref mac) = mac {
@@ -103,7 +103,7 @@ pub fn write_message<
         }
     }
 
-    let cipher = crypto_mat.as_mut().map(|mat| mat.cipher.as_mut());
+    let cipher = crypto_mat.as_mut().map(|mat| &mut mat.cipher);
     if let Some(cipher) = cipher {
         cipher.encrypt(output_buffer, sender.sequence_number.0)?;
     }
@@ -179,7 +179,7 @@ pub fn parse_packet<'a>(
         .receiver
         .crypto_material
         .as_mut()
-        .map(|mat| mat.cipher.as_mut());
+        .map(|mat| &mut mat.cipher);
 
     let mut is_aead = false;
     let (next_data, (full_pkt, pkt_payload)) = if let Some(cipher) = cipher {
@@ -202,7 +202,7 @@ pub fn parse_packet<'a>(
         .receiver
         .crypto_material
         .as_mut()
-        .map(|mat| mat.mac.as_mut());
+        .map(|mat| &mut mat.mac);
 
     // No MAC for AEAD ciphers
     let next_data = if is_aead {

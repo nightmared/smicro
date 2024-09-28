@@ -8,18 +8,19 @@ use elliptic_curve::{
 use nom::AsBytes;
 use p521::NistP521;
 use sha2::Sha512;
+use smicro_macros::{create_wrapper_enum_implementing_trait, declare_crypto_arg};
 use smicro_types::serialize::SerializePacket;
 use smicro_types::ssh::types::{PositiveBigNum, SSHSlice, SharedSSHSlice};
 
-use crate::session::KexReceived;
 use crate::{
     crypto::{
         compute_exchange_hash, derive_encryption_key,
-        sign::{KeyEcdsa, SignatureWithName},
+        sign::{KeyEcdsa, SignatureWithName, Signer},
         CryptoAlg,
     },
     error::Error,
     messages::{MessageKexEcdhInit, MessageKexEcdhReply},
+    session::KexReceived,
     state::State,
 };
 
@@ -33,6 +34,7 @@ pub struct KexNegotiatedKeys {
     pub integrity_key_s2c: Vec<u8>,
 }
 
+#[create_wrapper_enum_implementing_trait(name = KEXWrapper, implementors = [EcdhSha2Nistp521])]
 pub trait KEX {
     fn perform_key_exchange(
         &self,
@@ -42,11 +44,7 @@ pub trait KEX {
     ) -> Result<(MessageKexEcdhReply, KexNegotiatedKeys), Error>;
 }
 
-pub trait KEXIdentifier: CryptoAlg + KEX {
-    const NAME: &'static str;
-}
-
-#[derive(Clone)]
+#[declare_crypto_arg("ecdh-sha2-nistp521")]
 pub struct EcdhSha2Nistp521 {}
 
 impl CryptoAlg for EcdhSha2Nistp521 {
@@ -87,16 +85,16 @@ impl KEX for EcdhSha2Nistp521 {
 
         // Retrieve the host key
         let match_host_key = || {
-            for host_key in state.host_keys {
-                if host_key.key_name() == crypto_algs.host_key_name() {
+            for host_key in state.host_keys.iter() {
+                if host_key.name() == crypto_algs.host_key_alg.name() {
                     return Some(host_key);
                 }
             }
             None
         };
         let matching_host_key =
-            match_host_key().ok_or(Error::NoGoodHostKeyFound(crypto_algs.host_key_name()))?;
-        let key_name = matching_host_key.key_name();
+            match_host_key().ok_or(Error::NoGoodHostKeyFound(crypto_algs.host_key_alg.name()))?;
+        let key_name = matching_host_key.name();
 
         // Print the server host key to a byte string
         let mut k_server = Vec::new();
@@ -123,7 +121,9 @@ impl KEX for EcdhSha2Nistp521 {
 
         // the session identifier is unique for the connection, do not reset it if it is already set
         if state.session_identifier.is_none() {
-            state.session_identifier = Some(exchange_hash.clone());
+            let mut identifier = Vec::new_in(state.allocator.clone());
+            identifier.extend(&exchange_hash);
+            state.session_identifier = Some(identifier);
         }
         let session_id = state.session_identifier.as_ref().unwrap();
 
@@ -151,7 +151,7 @@ impl KEX for EcdhSha2Nistp521 {
                 &exchange_hash,
                 c,
                 session_id,
-                crypto_algs.key_max_length(),
+                crypto_algs.key_max_length,
             )
         };
 
@@ -173,8 +173,4 @@ impl KEX for EcdhSha2Nistp521 {
 
         Ok((res, negotiated_keys))
     }
-}
-
-impl KEXIdentifier for EcdhSha2Nistp521 {
-    const NAME: &'static str = "ecdh-sha2-nistp521";
 }

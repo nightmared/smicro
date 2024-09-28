@@ -9,37 +9,31 @@ use elliptic_curve::{
 use nom::Parser;
 use p521::NistP521;
 use signature::Verifier;
-use smicro_macros::{declare_deserializable_struct, gen_serialize_impl};
+use smicro_macros::{
+    create_wrapper_enum_implementing_trait, declare_crypto_arg, declare_deserializable_struct,
+    gen_serialize_impl,
+};
 use smicro_types::deserialize::DeserializePacket;
 use smicro_types::serialize::SerializePacket;
 use smicro_types::sftp::deserialize::{parse_slice, parse_utf8_slice};
 use smicro_types::ssh::types::{PositiveBigNum, SharedSSHSlice};
 
 use crate::{
-    crypto::CryptoAlg,
+    crypto::{CryptoAlg, CryptoAlgName},
     error::{Error, KeyLoadingError},
 };
 
-pub trait SignerIdentifier: CryptoAlg {
-    const NAME: &'static str;
-    const CURVE_NAME: &'static str;
-    const KEY_SIZE_BITS: usize;
-    const KEY_SIZE_BYTES: usize;
+const ECDSA_SHA2_NISTPR521_CURVE_NAME: &'static str = "nistp521";
+const NISTP521_KEY_SIZE_BYTES: usize = 66;
 
-    type KeyType;
-
-    fn name(&self) -> &'static str {
-        Self::NAME
-    }
-
-    fn curve_name(&self) -> &'static str {
-        Self::CURVE_NAME
-    }
+#[create_wrapper_enum_implementing_trait(name = SignerIdentifierWrapper, implementors = [EcdsaSha2Nistp521])]
+pub trait SignerIdentifier {
+    fn curve_name(&self) -> &'static str;
 
     fn deserialize_buf_to_key<'a>(
         &self,
         buf: &'a [u8],
-    ) -> Result<(&'a [u8], Self::KeyType), KeyLoadingError>;
+    ) -> Result<(&'a [u8], SignerWrapper), KeyLoadingError>;
 
     fn signature_is_valid(
         &self,
@@ -49,7 +43,7 @@ pub trait SignerIdentifier: CryptoAlg {
     ) -> Result<bool, Error>;
 }
 
-#[derive(Clone)]
+#[declare_crypto_arg("ecdsa-sha2-nistp521")]
 pub struct EcdsaSha2Nistp521 {}
 
 impl CryptoAlg for EcdsaSha2Nistp521 {
@@ -59,17 +53,14 @@ impl CryptoAlg for EcdsaSha2Nistp521 {
 }
 
 impl SignerIdentifier for EcdsaSha2Nistp521 {
-    const NAME: &'static str = "ecdsa-sha2-nistp521";
-    const CURVE_NAME: &'static str = "nistp521";
-    const KEY_SIZE_BITS: usize = 521;
-    const KEY_SIZE_BYTES: usize = 66;
-
-    type KeyType = ecdsa::SigningKey<NistP521>;
+    fn curve_name(&self) -> &'static str {
+        ECDSA_SHA2_NISTPR521_CURVE_NAME
+    }
 
     fn deserialize_buf_to_key<'a>(
         &self,
         buf: &'a [u8],
-    ) -> Result<(&'a [u8], Self::KeyType), KeyLoadingError> {
+    ) -> Result<(&'a [u8], SignerWrapper), KeyLoadingError> {
         let (next_data, point_data) = parse_slice(buf)?;
 
         let encoded_point = <EncodedPoint<NistP521>>::from_bytes(point_data)
@@ -85,14 +76,17 @@ impl SignerIdentifier for EcdsaSha2Nistp521 {
         let secret_key = p521::SecretKey::from_slice(secret_key_data)
             .map_err(|_| KeyLoadingError::NotASecretKey)?;
 
-        let signing_key = Self::KeyType::from(&secret_key);
+        let signing_key = <ecdsa::SigningKey<NistP521>>::from(&secret_key);
 
         // ensure the automatically-generated verifying key match the public key provided as input
         if signing_key.verifying_key().as_affine() != &affine_point {
             return Err(KeyLoadingError::VerifyingKeyMismatch);
         }
 
-        Ok((next_data, signing_key))
+        Ok((
+            next_data,
+            SignerWrapper::EcdsaSha2Nistp521Signer(EcdsaSha2Nistp521Signer(signing_key)),
+        ))
     }
 
     fn signature_is_valid(
@@ -110,10 +104,10 @@ impl SignerIdentifier for EcdsaSha2Nistp521 {
 
         let expand_bignum =
             |bignum: PositiveBigNum| -> Result<p521::Scalar, elliptic_curve::Error> {
-                let mut out = [0; Self::KEY_SIZE_BYTES];
+                let mut out = [0; NISTP521_KEY_SIZE_BYTES];
 
-                let slice = if bignum.0.len() < Self::KEY_SIZE_BYTES {
-                    out[Self::KEY_SIZE_BYTES - bignum.0.len()..].copy_from_slice(bignum.0);
+                let slice = if bignum.0.len() < NISTP521_KEY_SIZE_BYTES {
+                    out[NISTP521_KEY_SIZE_BYTES - bignum.0.len()..].copy_from_slice(bignum.0);
                     &out
                 } else {
                     bignum.0
@@ -132,6 +126,7 @@ impl SignerIdentifier for EcdsaSha2Nistp521 {
     }
 }
 
+#[create_wrapper_enum_implementing_trait(name = SignerWrapper, implementors = [EcdsaSha2Nistp521Signer])]
 pub trait Signer {
     fn key_name(&self) -> &'static str;
     fn curve_name(&self) -> &'static str;
@@ -145,21 +140,24 @@ pub trait Signer {
     fn public_key_x(&self) -> Vec<u8>;
 }
 
-impl Signer for <EcdsaSha2Nistp521 as SignerIdentifier>::KeyType {
+#[declare_crypto_arg("ecdsa-sha2-nistp521")]
+pub struct EcdsaSha2Nistp521Signer(ecdsa::SigningKey<NistP521>);
+
+impl Signer for EcdsaSha2Nistp521Signer {
     fn key_name(&self) -> &'static str {
         EcdsaSha2Nistp521::NAME
     }
 
     fn curve_name(&self) -> &'static str {
-        EcdsaSha2Nistp521::CURVE_NAME
+        ECDSA_SHA2_NISTPR521_CURVE_NAME
     }
 
     fn integer_size_bytes(&self) -> usize {
-        EcdsaSha2Nistp521::KEY_SIZE_BYTES
+        NISTP521_KEY_SIZE_BYTES
     }
 
     fn sign(&self, data_to_sign: &[u8], mut output: &mut dyn Write) -> Result<(), Error> {
-        let data = (self as &dyn signature::Signer<Signature<NistP521>>)
+        let data = (&self.0 as &dyn signature::Signer<Signature<NistP521>>)
             .try_sign(data_to_sign)
             .map_err(|_| Error::SigningError)?
             .to_bytes();
@@ -173,14 +171,15 @@ impl Signer for <EcdsaSha2Nistp521 as SignerIdentifier>::KeyType {
     }
 
     fn public_sec1_part(&self) -> Vec<u8> {
-        self.verifying_key()
+        self.0
+            .verifying_key()
             .to_encoded_point(false)
             .as_bytes()
             .to_vec()
     }
 
     fn public_key_x(&self) -> Vec<u8> {
-        self.verifying_key().as_affine().x().to_vec()
+        self.0.verifying_key().as_affine().x().to_vec()
     }
 }
 
