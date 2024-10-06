@@ -72,7 +72,7 @@ impl SessionState for IdentifierStringSent {
 
         let (input, _) = consume_carriage(input)?;
 
-        let mut peer_identifier_string = Vec::new_in(state.allocator.clone());
+        let mut peer_identifier_string = Vec::new();
         peer_identifier_string.extend_from_slice(magic);
         peer_identifier_string.extend_from_slice(softwareversion);
         if let Some(comment) = comment {

@@ -215,17 +215,17 @@ impl ExpectsUserAuthRequest {
                     return Ok(SessionStateEstablished::ExpectsUserAuthRequest(self.clone()).into())
                 }
                 PubkeyAuthDecision::Accepted => {
-                    return Ok(PacketProcessingDecision::NewState(
-                        SessionStates::SessionStateEstablished(
-                            SessionStateEstablished::ExpectsChannelOpen(ExpectsChannelOpen {}),
-                        ),
-                    ));
-
-                    //return Ok(PacketProcessingDecision::SpawnChild(
+                    //return Ok(PacketProcessingDecision::NewState(
                     //    SessionStates::SessionStateEstablished(
                     //        SessionStateEstablished::ExpectsChannelOpen(ExpectsChannelOpen {}),
                     //    ),
                     //));
+
+                    return Ok(PacketProcessingDecision::SpawnChild(
+                        SessionStates::SessionStateEstablished(
+                            SessionStateEstablished::ExpectsChannelOpen(ExpectsChannelOpen {}),
+                        ),
+                    ));
                 }
             }
         }

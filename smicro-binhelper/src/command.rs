@@ -52,6 +52,7 @@ pub trait Command: std::fmt::Debug {
 }
 
 #[declare_deserializable_struct]
+#[derive(Debug)]
 pub struct CommandInit {
     #[field(parser = parse_version)]
     _version: u32,
@@ -76,6 +77,7 @@ impl Command for CommandInit {
 }
 
 #[declare_deserializable_struct]
+#[derive(Debug)]
 pub struct CommandRealpath {
     #[field(parser = parse_pathbuf)]
     original_path: PathBuf,
@@ -97,6 +99,7 @@ impl Command for CommandRealpath {
 }
 
 #[declare_deserializable_struct]
+#[derive(Debug)]
 pub struct CommandOpendir {
     #[field(parser = parse_pathbuf)]
     dir_path: PathBuf,
@@ -119,6 +122,7 @@ impl Command for CommandOpendir {
 }
 
 #[declare_deserializable_struct]
+#[derive(Debug)]
 pub struct CommandReaddir {
     #[field(parser = parse_utf8_string)]
     handle: String,
@@ -161,6 +165,7 @@ impl Command for CommandReaddir {
 }
 
 #[declare_deserializable_struct]
+#[derive(Debug)]
 pub struct CommandLstat {
     #[field(parser = parse_pathbuf)]
     filename: PathBuf,
@@ -176,6 +181,7 @@ impl Command for CommandLstat {
 }
 
 #[declare_deserializable_struct]
+#[derive(Debug)]
 pub struct CommandFstat {
     #[field(parser = parse_utf8_string)]
     handle: String,
@@ -201,6 +207,7 @@ impl Command for CommandFstat {
 }
 
 #[declare_deserializable_struct]
+#[derive(Debug)]
 pub struct CommandStat {
     #[field(parser = parse_pathbuf)]
     filename: PathBuf,
@@ -217,6 +224,7 @@ impl Command for CommandStat {
 }
 
 #[declare_deserializable_struct]
+#[derive(Debug)]
 pub struct CommandOpen {
     #[field(parser = parse_pathbuf)]
     path: PathBuf,
@@ -256,6 +264,7 @@ impl Command for CommandOpen {
 }
 
 #[declare_deserializable_struct]
+#[derive(Debug)]
 pub struct CommandRead {
     #[field(parser = parse_utf8_string)]
     handle: String,
@@ -287,6 +296,7 @@ impl Command for CommandRead {
 }
 
 #[declare_deserializable_struct]
+#[derive(Debug)]
 pub struct CommandWrite<'a> {
     #[field(parser = parse_utf8_slice)]
     handle: &'a str,
@@ -307,6 +317,7 @@ impl<'a> Command for CommandWrite<'a> {
 }
 
 #[declare_deserializable_struct]
+#[derive(Debug)]
 pub struct CommandRename {
     #[field(parser = parse_pathbuf)]
     old_path: PathBuf,
@@ -323,6 +334,7 @@ impl Command for CommandRename {
 }
 
 #[declare_deserializable_struct]
+#[derive(Debug)]
 pub struct CommandReadlink {
     #[field(parser = parse_pathbuf)]
     path: PathBuf,
@@ -352,6 +364,7 @@ impl Command for CommandReadlink {
 }
 
 #[declare_deserializable_struct]
+#[derive(Debug)]
 pub struct CommandSymlink {
     #[field(parser = parse_pathbuf)]
     old_path: PathBuf,
@@ -368,6 +381,7 @@ impl Command for CommandSymlink {
 }
 
 #[declare_deserializable_struct]
+#[derive(Debug)]
 pub struct CommandRemove {
     #[field(parser = parse_pathbuf)]
     path: PathBuf,
@@ -382,6 +396,7 @@ impl Command for CommandRemove {
 }
 
 #[declare_deserializable_struct]
+#[derive(Debug)]
 pub struct CommandMkdir {
     #[field(parser = parse_pathbuf)]
     path: PathBuf,
@@ -400,6 +415,7 @@ impl Command for CommandMkdir {
 }
 
 #[declare_deserializable_struct]
+#[derive(Debug)]
 pub struct CommandRmdir {
     #[field(parser = parse_pathbuf)]
     path: PathBuf,
@@ -414,6 +430,7 @@ impl Command for CommandRmdir {
 }
 
 #[declare_deserializable_struct]
+#[derive(Debug)]
 pub struct CommandSetstat {
     #[field(parser = parse_pathbuf)]
     path: PathBuf,
@@ -470,6 +487,7 @@ impl Command for CommandSetstat {
 }
 
 #[declare_deserializable_struct]
+#[derive(Debug)]
 pub struct CommandFsetstat {
     #[field(parser = parse_utf8_string)]
     handle: String,
@@ -502,6 +520,7 @@ impl Command for CommandFsetstat {
 }
 
 #[declare_deserializable_struct]
+#[derive(Debug)]
 pub struct CommandClose {
     #[field(parser = parse_utf8_string)]
     handle: String,
@@ -516,6 +535,7 @@ impl Command for CommandClose {
 }
 
 #[declare_deserializable_struct]
+#[derive(Debug)]
 pub struct CommandExtended<'a> {
     #[field(parser = parse_utf8_string)]
     extension: String,

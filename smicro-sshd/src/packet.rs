@@ -10,7 +10,7 @@ use crate::{
     crypto::{cipher::Cipher, mac::MAC},
     error::Error,
     messages::Message,
-    state::{SenderState, State},
+    state::{DirectionState, State},
 };
 
 // A tad bit above the SFTP max packet size, so that we do not have too much fragmentation
@@ -23,7 +23,7 @@ pub fn write_message<
     const SIZE: usize,
     S: LoopingBufferWriter<SIZE>,
 >(
-    sender: &mut SenderState,
+    sender: &mut DirectionState,
     stream: &mut S,
     payload: &T,
 ) -> Result<(), Error> {
@@ -39,9 +39,10 @@ pub fn write_message<
     let mut real_packet_length = 4 + 1 + 1 + payload.get_size() + padding_length;
     // BAD: probable timing oracle!
     let (offset, multiple) = if let Some(ref cipher) = cipher {
-        // For AEAD mode, the packet length does not count in the modulus
-        if cipher.is_aead() {
+        if cipher.name() == "chacha20-poly1305@openssh.com" {
             (4, 8)
+        } else if cipher.is_aead() {
+            (4, cipher.block_size_bytes())
         } else {
             (0, cipher.block_size_bytes())
         }
@@ -208,9 +209,7 @@ pub fn parse_packet<'a>(
     let next_data = if is_aead {
         next_data
     } else if let Some(mac) = mac {
-        log::trace!("doing mac");
         let (next_data, packet_mac) = take(mac.size_bytes())(next_data)?;
-        log::trace!("mac={:?}", packet_mac);
 
         mac.verify(&full_pkt, state.receiver.sequence_number.0, packet_mac)
             .map_err(|_| nom::Err::Failure(ParsingError::InvalidMac))?;
@@ -219,7 +218,7 @@ pub fn parse_packet<'a>(
     } else {
         next_data
     };
-    log::trace!("mac done");
+    log::trace!("Packet parsed");
 
     state.receiver.sequence_number += 1;
     if state.receiver.sequence_number.0 == 0 {

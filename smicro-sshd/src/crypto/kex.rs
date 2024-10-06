@@ -8,9 +8,13 @@ use elliptic_curve::{
 use nom::AsBytes;
 use p521::NistP521;
 use sha2::Sha512;
-use smicro_macros::{create_wrapper_enum_implementing_trait, declare_crypto_arg};
-use smicro_types::serialize::SerializePacket;
+
+use smicro_macros::{
+    create_wrapper_enum_implementing_trait, declare_crypto_arg, declare_deserializable_struct,
+    gen_serialize_impl,
+};
 use smicro_types::ssh::types::{PositiveBigNum, SSHSlice, SharedSSHSlice};
+use smicro_types::{deserialize::DeserializePacket, serialize::SerializePacket};
 
 use crate::{
     crypto::{
@@ -34,7 +38,8 @@ pub struct KexNegotiatedKeys {
     pub integrity_key_s2c: Vec<u8>,
 }
 
-#[create_wrapper_enum_implementing_trait(name = KEXWrapper, implementors = [EcdhSha2Nistp521])]
+#[create_wrapper_enum_implementing_trait(name = KEXWrapper, serializable = true, deserializable = true)]
+#[implementors(EcdhSha2Nistp521)]
 pub trait KEX {
     fn perform_key_exchange(
         &self,
@@ -44,7 +49,10 @@ pub trait KEX {
     ) -> Result<(MessageKexEcdhReply, KexNegotiatedKeys), Error>;
 }
 
+#[derive(Debug)]
 #[declare_crypto_arg("ecdh-sha2-nistp521")]
+#[declare_deserializable_struct]
+#[gen_serialize_impl]
 pub struct EcdhSha2Nistp521 {}
 
 impl CryptoAlg for EcdhSha2Nistp521 {
@@ -121,9 +129,7 @@ impl KEX for EcdhSha2Nistp521 {
 
         // the session identifier is unique for the connection, do not reset it if it is already set
         if state.session_identifier.is_none() {
-            let mut identifier = Vec::new_in(state.allocator.clone());
-            identifier.extend(&exchange_hash);
-            state.session_identifier = Some(identifier);
+            state.session_identifier = Some(exchange_hash.clone());
         }
         let session_id = state.session_identifier.as_ref().unwrap();
 

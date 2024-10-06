@@ -41,7 +41,7 @@ pub struct MessageServiceAccept<'a> {
 }
 
 #[repr(u32)]
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub enum DisconnectReason {
     HostNotAllowedToConnect = 1,
     ProtocolError = 2,
@@ -135,7 +135,7 @@ pub struct MessageChannelOpen<'a> {
 }
 
 #[repr(u32)]
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub enum ChannelOpenFailureReason {
     ConnectFailed = 2,
     UnknownChannelType = 3,
@@ -214,7 +214,7 @@ pub struct MessageChannelData<'a> {
 }
 
 #[repr(u32)]
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub enum ChannelExtendedDataCode {
     Stderr = 1,
 }

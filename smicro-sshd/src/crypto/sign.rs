@@ -19,21 +19,22 @@ use smicro_types::sftp::deserialize::{parse_slice, parse_utf8_slice};
 use smicro_types::ssh::types::{PositiveBigNum, SharedSSHSlice};
 
 use crate::{
-    crypto::{CryptoAlg, CryptoAlgName},
+    crypto::{CryptoAlg, CryptoAlgName, KeyWrapper},
     error::{Error, KeyLoadingError},
 };
+
+use super::CryptoAlgWithKey;
 
 const ECDSA_SHA2_NISTPR521_CURVE_NAME: &'static str = "nistp521";
 const NISTP521_KEY_SIZE_BYTES: usize = 66;
 
-#[create_wrapper_enum_implementing_trait(name = SignerIdentifierWrapper, implementors = [EcdsaSha2Nistp521])]
+#[create_wrapper_enum_implementing_trait(name = SignerIdentifierWrapper, serializable = true, deserializable = true)]
+#[implementors(EcdsaSha2Nistp521)]
 pub trait SignerIdentifier {
     fn curve_name(&self) -> &'static str;
 
-    fn deserialize_buf_to_key<'a>(
-        &self,
-        buf: &'a [u8],
-    ) -> Result<(&'a [u8], SignerWrapper), KeyLoadingError>;
+    fn deserialize_buf_to_key<'a>(&self, buf: &'a [u8])
+        -> Result<(&'a [u8], SignerWrapper), Error>;
 
     fn signature_is_valid(
         &self,
@@ -43,7 +44,10 @@ pub trait SignerIdentifier {
     ) -> Result<bool, Error>;
 }
 
+#[derive(Debug)]
 #[declare_crypto_arg("ecdsa-sha2-nistp521")]
+#[declare_deserializable_struct]
+#[gen_serialize_impl]
 pub struct EcdsaSha2Nistp521 {}
 
 impl CryptoAlg for EcdsaSha2Nistp521 {
@@ -60,32 +64,16 @@ impl SignerIdentifier for EcdsaSha2Nistp521 {
     fn deserialize_buf_to_key<'a>(
         &self,
         buf: &'a [u8],
-    ) -> Result<(&'a [u8], SignerWrapper), KeyLoadingError> {
+    ) -> Result<(&'a [u8], SignerWrapper), Error> {
         let (next_data, point_data) = parse_slice(buf)?;
-
-        let encoded_point = <EncodedPoint<NistP521>>::from_bytes(point_data)
-            .map_err(|_| KeyLoadingError::InvalidEncodedPoint)?;
-        if encoded_point.is_identity() {
-            return Err(KeyLoadingError::GotIdentityPoint);
-        }
-        let maybe_affine_point = <AffinePoint<NistP521>>::from_encoded_point(&encoded_point);
-        let affine_point = <Option<AffinePoint<NistP521>>>::from(maybe_affine_point)
-            .ok_or(KeyLoadingError::NotAnAffinePoint)?;
-
         let (next_data, secret_key_data) = parse_slice(next_data)?;
-        let secret_key = p521::SecretKey::from_slice(secret_key_data)
-            .map_err(|_| KeyLoadingError::NotASecretKey)?;
-
-        let signing_key = <ecdsa::SigningKey<NistP521>>::from(&secret_key);
-
-        // ensure the automatically-generated verifying key match the public key provided as input
-        if signing_key.verifying_key().as_affine() != &affine_point {
-            return Err(KeyLoadingError::VerifyingKeyMismatch);
-        }
 
         Ok((
             next_data,
-            SignerWrapper::EcdsaSha2Nistp521Signer(EcdsaSha2Nistp521Signer(signing_key)),
+            SignerWrapper::KeyWrapperEcdsaSha2Nistp521Signer(KeyWrapper::new(&[
+                point_data,
+                secret_key_data,
+            ])?),
         ))
     }
 
@@ -126,7 +114,8 @@ impl SignerIdentifier for EcdsaSha2Nistp521 {
     }
 }
 
-#[create_wrapper_enum_implementing_trait(name = SignerWrapper, implementors = [EcdsaSha2Nistp521Signer])]
+#[create_wrapper_enum_implementing_trait(name = SignerWrapper, serializable = true, deserializable = true)]
+#[implementors(KeyWrapper::<EcdsaSha2Nistp521Signer>)]
 pub trait Signer {
     fn key_name(&self) -> &'static str;
     fn curve_name(&self) -> &'static str;
@@ -142,6 +131,36 @@ pub trait Signer {
 
 #[declare_crypto_arg("ecdsa-sha2-nistp521")]
 pub struct EcdsaSha2Nistp521Signer(ecdsa::SigningKey<NistP521>);
+
+impl CryptoAlgWithKey for EcdsaSha2Nistp521Signer {
+    fn new(keys: &[&[u8]]) -> Result<Self, Error>
+    where
+        Self: Sized,
+    {
+        let point_data = keys[0];
+        let secret_key_data = keys[1];
+        let encoded_point = <EncodedPoint<NistP521>>::from_bytes(point_data)
+            .map_err(|_| KeyLoadingError::InvalidEncodedPoint)?;
+        if encoded_point.is_identity() {
+            return Err(KeyLoadingError::GotIdentityPoint)?;
+        }
+        let maybe_affine_point = <AffinePoint<NistP521>>::from_encoded_point(&encoded_point);
+        let affine_point = <Option<AffinePoint<NistP521>>>::from(maybe_affine_point)
+            .ok_or(KeyLoadingError::NotAnAffinePoint)?;
+
+        let secret_key = p521::SecretKey::from_slice(secret_key_data)
+            .map_err(|_| KeyLoadingError::NotASecretKey)?;
+
+        let signing_key = <ecdsa::SigningKey<NistP521>>::from(&secret_key);
+
+        // ensure the automatically-generated verifying key match the public key provided as input
+        if signing_key.verifying_key().as_affine() != &affine_point {
+            return Err(KeyLoadingError::VerifyingKeyMismatch)?;
+        }
+
+        Ok(Self(signing_key))
+    }
+}
 
 impl Signer for EcdsaSha2Nistp521Signer {
     fn key_name(&self) -> &'static str {
@@ -180,6 +199,32 @@ impl Signer for EcdsaSha2Nistp521Signer {
 
     fn public_key_x(&self) -> Vec<u8> {
         self.0.verifying_key().as_affine().x().to_vec()
+    }
+}
+
+impl<T: Signer> Signer for KeyWrapper<T> {
+    fn key_name(&self) -> &'static str {
+        self.inner.key_name()
+    }
+
+    fn curve_name(&self) -> &'static str {
+        self.inner.curve_name()
+    }
+
+    fn integer_size_bytes(&self) -> usize {
+        self.inner.integer_size_bytes()
+    }
+
+    fn sign(&self, data_to_sign: &[u8], output: &mut dyn Write) -> Result<(), Error> {
+        self.inner.sign(data_to_sign, output)
+    }
+
+    fn public_sec1_part(&self) -> Vec<u8> {
+        self.inner.public_sec1_part()
+    }
+
+    fn public_key_x(&self) -> Vec<u8> {
+        self.inner.public_key_x()
     }
 }
 

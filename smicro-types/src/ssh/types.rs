@@ -62,6 +62,14 @@ where
 #[derive(Clone, Eq, PartialEq)]
 pub struct SharedSSHSlice<'a, T>(pub &'a [T]);
 
+/// Same as SSHSlice, but with very slow serialization/Deserialization, in exchange of support for
+/// arbitrary types
+#[derive(Clone, Eq, PartialEq)]
+pub struct SlowSSHSlice<T>(pub Vec<T>);
+
+#[derive(Clone, Eq, PartialEq)]
+pub struct SharedSlowSSHSlice<'a, T>(pub &'a [T]);
+
 impl<'a, T> std::fmt::Debug for SharedSSHSlice<'a, T>
 where
     T: Debug,

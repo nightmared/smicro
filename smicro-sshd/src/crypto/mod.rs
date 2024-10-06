@@ -1,10 +1,15 @@
+use std::any::type_name;
 use std::fmt::Debug;
 use std::io::Write;
 
 use elliptic_curve::ecdh::SharedSecret;
-use nom::AsBytes;
-use smicro_types::serialize::SerializePacket;
-use smicro_types::ssh::types::{MessageType, PositiveBigNum, SSHSlice, SharedSSHSlice};
+use nom::{AsBytes, Parser};
+
+use smicro_macros::{declare_deserializable_struct, gen_serialize_impl};
+use smicro_types::ssh::types::{
+    MessageType, PositiveBigNum, SSHSlice, SharedSSHSlice, SlowSSHSlice,
+};
+use smicro_types::{deserialize::DeserializePacket, serialize::SerializePacket};
 
 use crate::messages::{MessageKexEcdhInit, MessageKeyExchangeInit};
 use crate::state::IDENTIFIER_STRING;
@@ -29,6 +34,12 @@ pub trait CryptoAlgName {
 
 pub trait CryptoAlg {
     fn new() -> Self
+    where
+        Self: Sized;
+}
+
+pub trait CryptoAlgWithKey {
+    fn new(keys: &[&[u8]]) -> Result<Self, Error>
     where
         Self: Sized;
 }
@@ -139,6 +150,8 @@ fn derive_encryption_key<C: elliptic_curve::Curve>(
     Ok(resulting_key)
 }
 
+#[declare_deserializable_struct]
+#[gen_serialize_impl]
 #[derive(Clone)]
 pub struct CryptoAlgs {
     pub kex: KEXWrapper,
@@ -147,6 +160,7 @@ pub struct CryptoAlgs {
     pub server_to_client_cipher: CipherAllocatorWrapper,
     pub client_to_server_mac: MACAllocatorWrapper,
     pub server_to_client_mac: MACAllocatorWrapper,
+    #[field(parser = nom::number::streaming::be_u64.map(|x| x as usize))]
     pub key_max_length: usize,
 }
 
@@ -166,5 +180,80 @@ impl Debug for CryptoAlgs {
             )
             .field("server_to_client_mac", &self.server_to_client_mac.name())
             .finish()
+    }
+}
+
+pub struct KeyWrapper<T> {
+    keys: SlowSSHSlice<SlowSSHSlice<u8>>,
+    pub inner: T,
+}
+
+impl<T> Debug for KeyWrapper<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KeyWrapper")
+            .field("inner", &type_name::<T>())
+            .finish()
+    }
+}
+
+impl<T: CryptoAlgWithKey> Clone for KeyWrapper<T> {
+    fn clone(&self) -> Self {
+        Self {
+            keys: self.keys.clone(),
+            inner: T::new(
+                &self
+                    .keys
+                    .0
+                    .iter()
+                    .map(|x| x.0.as_ref())
+                    .collect::<Vec<&[u8]>>(),
+            )
+            .expect("Couldn't clone a key from itself!?"),
+        }
+    }
+}
+
+impl<'a, T: CryptoAlgWithKey> DeserializePacket<'a> for KeyWrapper<T> {
+    fn deserialize(
+        input: &'a [u8],
+    ) -> nom::IResult<&'a [u8], Self, smicro_types::error::ParsingError> {
+        let (next_data, keys) = SlowSSHSlice::deserialize(input)?;
+        let inner = T::new(
+            &keys
+                .0
+                .iter()
+                .map(|x: &SlowSSHSlice<u8>| x.0.as_ref())
+                .collect::<Vec<&[u8]>>(),
+        )
+        .expect("Couldn't recreate a key from its serialized representation!?");
+        Ok((next_data, Self { keys, inner }))
+    }
+}
+
+impl<T> SerializePacket for KeyWrapper<T> {
+    fn get_size(&self) -> usize {
+        self.keys.get_size()
+    }
+
+    fn serialize<W: Write>(&self, output: W) -> Result<(), std::io::Error> {
+        self.keys.serialize(output)
+    }
+}
+
+impl<T: CryptoAlgName> CryptoAlgName for KeyWrapper<T> {
+    const NAME: &'static str = <T as CryptoAlgName>::NAME;
+
+    fn name(&self) -> &'static str {
+        self.inner.name()
+    }
+}
+
+impl<T: CryptoAlgWithKey + Sized> CryptoAlgWithKey for KeyWrapper<T> {
+    fn new(keys: &[&[u8]]) -> Result<Self, Error> {
+        let inner = T::new(keys)?;
+        Ok(Self {
+            keys: SlowSSHSlice(keys.iter().map(|x| SlowSSHSlice(x.to_vec())).collect()),
+            inner,
+        })
     }
 }

@@ -18,9 +18,8 @@ use smicro_macros::declare_deserializable_struct;
 use smicro_types::deserialize::DeserializePacket;
 use smicro_types::sftp::deserialize::{parse_slice, parse_utf8_string};
 
-use crate::crypto::sign::SignerIdentifier;
-use crate::error::KeyLoadingError;
-use crate::messages::negotiate_alg_signing_algorithms;
+use crate::{crypto::sign::SignerIdentifier, error::Error};
+use crate::{error::KeyLoadingError, messages::negotiate_alg_signing_algorithms};
 
 use super::sign::SignerWrapper;
 
@@ -38,7 +37,7 @@ pub struct OpenSSHKeySerialized<'a> {
     key_data: &'a [u8],
 }
 
-pub fn load_hostkey(hostkey_file: &Path) -> Result<SignerWrapper, KeyLoadingError> {
+pub fn load_hostkey(hostkey_file: &Path) -> Result<SignerWrapper, Error> {
     let mut f = File::open(hostkey_file)?;
     let mut file_content = Vec::with_capacity(4096);
     f.read_to_end(&mut file_content)?;
@@ -61,7 +60,9 @@ pub fn load_hostkey(hostkey_file: &Path) -> Result<SignerWrapper, KeyLoadingErro
     });
 
     let key_base64encoded = key_parser.parse(file_content.as_slice())?.1;
-    let key_openssh_raw = STANDARD.decode(key_base64encoded)?;
+    let key_openssh_raw = STANDARD
+        .decode(key_base64encoded)
+        .map_err(|e| KeyLoadingError::from(e))?;
 
     let key_openssh_raw_data =
         preceded(tag("openssh-key-v1\0"), rest)(key_openssh_raw.as_slice())?.1;
@@ -71,14 +72,14 @@ pub fn load_hostkey(hostkey_file: &Path) -> Result<SignerWrapper, KeyLoadingErro
     let nb_keys = key_openssh_raw_serialized.key_number as usize;
 
     if nb_keys != 1 {
-        return Err(KeyLoadingError::InvalidNumberOfKeys);
+        return Err(KeyLoadingError::InvalidNumberOfKeys)?;
     }
 
     if key_openssh_raw_serialized.kdfname != "none"
         || key_openssh_raw_serialized.ciphername != "none"
         || key_openssh_raw_serialized.kdfoptions != []
     {
-        return Err(KeyLoadingError::PassphraseProtectedKeyUnsupported);
+        return Err(KeyLoadingError::PassphraseProtectedKeyUnsupported)?;
     }
 
     let next_data = key_openssh_raw_serialized.key_data;
@@ -89,7 +90,7 @@ pub fn load_hostkey(hostkey_file: &Path) -> Result<SignerWrapper, KeyLoadingErro
     let (next_data, checkint2) = be_u32(next_data)?;
 
     if checkint1 != checkint2 {
-        return Err(KeyLoadingError::InvalidIntegersCheck);
+        return Err(KeyLoadingError::InvalidIntegersCheck)?;
     }
 
     let (next_data, private_key_type) = parse_utf8_string(next_data)?;
@@ -99,7 +100,7 @@ pub fn load_hostkey(hostkey_file: &Path) -> Result<SignerWrapper, KeyLoadingErro
     let (next_data, curve_name) = parse_utf8_string(next_data)?;
     // check that the EC curve name matches the key type
     if curve_name != signing_algo.curve_name() {
-        return Err(KeyLoadingError::EcdsaCurveMismatch);
+        return Err(KeyLoadingError::EcdsaCurveMismatch)?;
     }
 
     let (next_data, signing_key) = signing_algo.deserialize_buf_to_key(next_data)?;
@@ -111,7 +112,7 @@ pub fn load_hostkey(hostkey_file: &Path) -> Result<SignerWrapper, KeyLoadingErro
     let mut pad_pos = 1;
     while next_data != [] {
         if next_data[0] != pad_pos {
-            return Err(KeyLoadingError::InvalidBlockPadding);
+            return Err(KeyLoadingError::InvalidBlockPadding)?;
         }
 
         pad_pos += 1;

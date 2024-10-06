@@ -23,7 +23,8 @@ signature = "2.3.0-pre.3"
 sha2 = "0.10"
 digest = "0.10"
 hmac = { version = "0.12", features = ["reset"] }
-#aead = "0.5"
+aead = "0.6.0-rc.0"
+aes-gcm = "0.11.0-pre.1"
 hybrid-array = "0.2.0-pre.9"
 chacha20 = { version = "0.10.0-pre.1", features = ["legacy"], optional = true }
 aes = "0.9.0-pre.1"

@@ -3,6 +3,15 @@
 version = 3
 
 [[package]]
+name = "aead"
+version = "0.6.0-rc.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b5f451b77e2f92932dc411da6ef9f3d33efad68a6f14a7a83e559453458e85ac"
+dependencies = [
+ "crypto-common 0.2.0-rc.1",
+]
+
+[[package]]
 name = "aes"
 version = "0.9.0-pre.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11,6 +20,20 @@ dependencies = [
  "cfg-if",
  "cipher",
  "cpufeatures",
+]
+
+[[package]]
+name = "aes-gcm"
+version = "0.11.0-pre.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c4ca4317859cecdb9849cf94087998a04efc7beedc07855836cb2534fd9aa4db"
+dependencies = [
+ "aead",
+ "aes",
+ "cipher",
+ "ctr",
+ "ghash",
+ "subtle",
 ]
 
 [[package]]
@@ -220,7 +243,18 @@ version = "0.2.0-rc.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b0b8ce8218c97789f16356e7896b3714f26c2ee1079b79c0b7ae7064bb9089fa"
 dependencies = [
+ "getrandom",
  "hybrid-array",
+ "rand_core",
+]
+
+[[package]]
+name = "ctr"
+version = "0.10.0-pre.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7f1637b299862a663dd5af70ee109d53555eff68b99b454fe535ed6599b0e9b3"
+dependencies = [
+ "cipher",
 ]
 
 [[package]]
@@ -345,6 +379,16 @@ dependencies = [
  "cfg-if",
  "libc",
  "wasi",
+]
+
+[[package]]
+name = "ghash"
+version = "0.6.0-rc.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3b92860fda25ab571512af210134cde2c42732cd53253bcee3f21b288b7afbc4"
+dependencies = [
+ "opaque-debug",
+ "polyval",
 ]
 
 [[package]]
@@ -643,6 +687,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "polyval"
+version = "0.7.0-rc.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b01cbf5c028f9f862c6f7f5a5544307d7858634df190488d432ec470c8fbc063"
+dependencies = [
+ "cfg-if",
+ "cpufeatures",
+ "opaque-debug",
+ "universal-hash",
+]
+
+[[package]]
 name = "powerfmt"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -860,7 +916,9 @@ dependencies = [
 name = "smicro-sshd"
 version = "0.1.0"
 dependencies = [
+ "aead",
  "aes",
+ "aes-gcm",
  "argh",
  "base64",
  "chacha20",
@@ -929,6 +987,7 @@ dependencies = [
 name = "smicro_types"
 version = "0.1.0"
 dependencies = [
+ "log",
  "nom",
  "num_enum",
  "smicro_macros",

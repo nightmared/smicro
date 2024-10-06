@@ -118,10 +118,10 @@ const SIGNING_ALGORITHMS: _ = [crate::crypto::sign::EcdsaSha2Nistp521];
 #[declare_crypto_algs_list(wrapper_name = crate::crypto::kex::KEXWrapper, error_value = Error::NoCommonKexAlg)]
 const KEX_ALGORITHMS: _ = [crate::crypto::kex::EcdhSha2Nistp521];
 
-// TODO: add aes256-gcm@openssh.com
 #[declare_crypto_algs_list(wrapper_name = crate::crypto::cipher::CipherAllocatorWrapper, error_value = Error::NoCommonCipher)]
 const CIPHER_ALGORITHMS: _ = [
     crate::crypto::cipher::Chacha20Poly1305,
+    crate::crypto::cipher::Aes256Gcm,
     crate::crypto::cipher::Aes256Ctr,
 ];
 

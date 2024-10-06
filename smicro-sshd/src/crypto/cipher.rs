@@ -1,3 +1,7 @@
+use std::{f64::consts, fmt::Debug, num::Wrapping};
+
+use aead::{AeadMutInPlace, Nonce};
+use aes_gcm::Aes256Gcm as OfficialAes256Gcm;
 #[cfg(feature = "rustcrypto")]
 use chacha20::ChaCha20Legacy;
 use cipher::BlockCipherEncrypt;
@@ -6,34 +10,53 @@ use cipher::{Iv, KeyIvInit, StreamCipher, StreamCipherSeek};
 #[cfg(feature = "rustcrypto")]
 use elliptic_curve::subtle::ConstantTimeEq;
 use hybrid_array::Array;
-use nom::{bytes::streaming::take, IResult};
+use nom::{bytes::streaming::take, number::complete::be_u32, IResult};
 #[cfg(feature = "rustcrypto")]
 use poly1305::Poly1305;
 use universal_hash::KeyInit;
 
-use smicro_macros::{create_wrapper_enum_implementing_trait, declare_crypto_arg};
+use smicro_macros::{
+    create_wrapper_enum_implementing_trait, declare_crypto_arg, declare_deserializable_struct,
+    gen_serialize_impl,
+};
 use smicro_types::{
+    deserialize::{self, DeserializePacket},
     error::ParsingError,
-    ssh::deserialize::{const_take, streaming_const_take},
+    serialize::SerializePacket,
+    ssh::{
+        deserialize::{const_take, streaming_const_take},
+        types::SharedSSHSlice,
+    },
 };
 
-use crate::{crypto::CryptoAlg, error::Error, MAX_PKT_SIZE};
+use crate::{
+    crypto::{CryptoAlg, KeyWrapper},
+    error::Error,
+    MAX_PKT_SIZE,
+};
+
+use super::CryptoAlgWithKey;
 
 #[cfg(all(feature = "rustcrypto", feature = "ring"))]
 compile_error!("Features 'rustcrypto' and 'ring' cannot be enabled at the same time");
 
 const POLY1305_BLOCK_SIZE: usize = 16;
+const AES256GCM_TAG_SIZE: usize = 16;
 
-#[create_wrapper_enum_implementing_trait(name = CipherAllocatorWrapper, implementors = [Chacha20Poly1305, Aes256Ctr])]
+#[create_wrapper_enum_implementing_trait(name = CipherAllocatorWrapper, serializable = true, deserializable = true)]
+#[implementors(Chacha20Poly1305, Aes256Gcm, Aes256Ctr)]
 pub trait CipherAllocator {
     fn key_size_bits(&self) -> usize;
     fn iv_size_bits(&self) -> usize;
     fn block_size_bits(&self) -> usize;
 
-    fn from_key(&self, key: &[u8], raw_iv: &[u8]) -> Result<CipherWrapper, Error>;
+    fn from_key(&self, raw_key: &[u8], raw_iv: &[u8]) -> Result<CipherWrapper, Error>;
 }
 
+#[derive(Debug)]
 #[declare_crypto_arg("chacha20-poly1305@openssh.com")]
+#[declare_deserializable_struct]
+#[gen_serialize_impl]
 pub struct Chacha20Poly1305 {}
 
 impl CryptoAlg for Chacha20Poly1305 {
@@ -61,36 +84,55 @@ impl CipherAllocator for Chacha20Poly1305 {
         Self::BLOCK_SIZE_BYTES * 8
     }
 
-    fn from_key(&self, raw_key: &[u8], _raw_iv: &[u8]) -> Result<CipherWrapper, Error> {
-        #[cfg(feature = "rustcrypto")]
-        {
-            let key = Array::try_from(&raw_key[0..self.key_size_bits() / 8])?;
-            let aad_key =
-                Array::try_from(&raw_key[self.key_size_bits() / 8..2 * self.key_size_bits() / 8])?;
-
-            Ok(CipherWrapper::Chacha20Poly1305Impl(Chacha20Poly1305Impl {
-                key,
-                aad_key,
-            }))
-        }
-
-        #[cfg(feature = "ring")]
-        {
-            let mut fixed_raw_key = [0; 64];
-            if raw_key.len() != 2 * Self::KEY_SIZE_BYTES {
-                return Err(Error::InvalidPrivateKeyLength);
-            }
-            fixed_raw_key.copy_from_slice(raw_key);
-
-            Ok(CipherWrapper::Chacha20Poly1305Impl(Chacha20Poly1305Impl {
-                decrypt: ring::aead::chacha20_poly1305_openssh::OpeningKey::new(&fixed_raw_key),
-                encrypt: ring::aead::chacha20_poly1305_openssh::SealingKey::new(&fixed_raw_key),
-            }))
-        }
+    fn from_key(&self, raw_key: &[u8], raw_iv: &[u8]) -> Result<CipherWrapper, Error> {
+        Ok(CipherWrapper::KeyWrapperChacha20Poly1305Impl(
+            KeyWrapper::new(&[raw_key, raw_iv])?,
+        ))
     }
 }
 
+#[derive(Debug)]
+#[declare_crypto_arg("aes256-gcm@openssh.com")]
+#[declare_deserializable_struct]
+#[gen_serialize_impl]
+pub struct Aes256Gcm {}
+
+impl CryptoAlg for Aes256Gcm {
+    fn new() -> Self {
+        Self {}
+    }
+}
+
+impl Aes256Gcm {
+    const KEY_SIZE_BYTES: usize = 32;
+    const IV_SIZE_BYTES: usize = 12;
+    const BLOCK_SIZE_BYTES: usize = 32;
+}
+
+impl CipherAllocator for Aes256Gcm {
+    fn key_size_bits(&self) -> usize {
+        Self::KEY_SIZE_BYTES * 8
+    }
+
+    fn iv_size_bits(&self) -> usize {
+        Self::IV_SIZE_BYTES * 8
+    }
+
+    fn block_size_bits(&self) -> usize {
+        Self::BLOCK_SIZE_BYTES * 8
+    }
+
+    fn from_key(&self, raw_key: &[u8], raw_iv: &[u8]) -> Result<CipherWrapper, Error> {
+        Ok(CipherWrapper::Aes256GcmImpl(Aes256GcmImpl::new(&[
+            raw_key, raw_iv,
+        ])?))
+    }
+}
+
+#[derive(Debug)]
 #[declare_crypto_arg("aes256-ctr")]
+#[declare_deserializable_struct]
+#[gen_serialize_impl]
 pub struct Aes256Ctr {}
 
 impl CryptoAlg for Aes256Ctr {
@@ -119,14 +161,14 @@ impl CipherAllocator for Aes256Ctr {
     }
 
     fn from_key(&self, raw_key: &[u8], raw_iv: &[u8]) -> Result<CipherWrapper, Error> {
-        let key = Array::try_from(&raw_key[0..Self::KEY_SIZE_BYTES])?;
-        let ctr = Array::try_from(&raw_iv[0..Self::IV_SIZE_BYTES])?;
-
-        Ok(CipherWrapper::Aes256CtrImpl(Aes256CtrImpl { key, ctr }))
+        Ok(CipherWrapper::KeyWrapperAes256CtrImpl(KeyWrapper::new(&[
+            raw_key, raw_iv,
+        ])?))
     }
 }
 
-#[create_wrapper_enum_implementing_trait(name = CipherWrapper, implementors = [Chacha20Poly1305Impl, Aes256CtrImpl])]
+#[create_wrapper_enum_implementing_trait(name = CipherWrapper, serializable = true, deserializable = true)]
+#[implementors(KeyWrapper::<Chacha20Poly1305Impl>, Aes256GcmImpl, KeyWrapper::<Aes256CtrImpl>)]
 pub trait Cipher {
     fn block_size_bytes(&self) -> usize;
 
@@ -145,11 +187,50 @@ pub trait Cipher {
     ) -> IResult<&'a [u8], &'a [u8], ParsingError>;
 }
 
+impl<T: Cipher> Cipher for KeyWrapper<T> {
+    fn block_size_bytes(&self) -> usize {
+        self.inner.block_size_bytes()
+    }
+
+    fn is_aead(&self) -> bool {
+        self.inner.is_aead()
+    }
+
+    fn required_space_to_encrypt(&self, data_len: usize) -> usize {
+        self.inner.required_space_to_encrypt(data_len)
+    }
+
+    fn encrypt(&mut self, data: &mut [u8], sequence_number: u32) -> Result<(), Error> {
+        self.inner.encrypt(data, sequence_number)
+    }
+
+    fn decrypt<'a>(
+        &mut self,
+        input: &'a mut [u8],
+        sequence_number: u32,
+    ) -> IResult<&'a [u8], &'a [u8], ParsingError> {
+        self.inner.decrypt(input, sequence_number)
+    }
+}
+
 #[cfg(feature = "rustcrypto")]
 #[declare_crypto_arg("chacha20-poly1305@openssh.com")]
 pub struct Chacha20Poly1305Impl {
     key: Array<u8, cipher::consts::U32>,
     aad_key: Array<u8, cipher::consts::U32>,
+}
+
+#[cfg(feature = "rustcrypto")]
+impl CryptoAlgWithKey for Chacha20Poly1305Impl {
+    fn new(keys: &[&[u8]]) -> Result<Self, Error> {
+        let raw_key = keys[0];
+        let key = Array::try_from(&raw_key[..Chacha20Poly1305::KEY_SIZE_BYTES])?;
+        let aad_key = Array::try_from(
+            &raw_key[Chacha20Poly1305::KEY_SIZE_BYTES..2 * Chacha20Poly1305::KEY_SIZE_BYTES],
+        )?;
+
+        Ok(Self { key, aad_key })
+    }
 }
 
 #[cfg(feature = "rustcrypto")]
@@ -275,11 +356,48 @@ impl Chacha20Poly1305Impl {
 #[cfg(feature = "ring")]
 #[declare_crypto_arg("chacha20-poly1305@openssh.com")]
 pub struct Chacha20Poly1305Impl {
-    // slight loss of space (we store the key twice instead of once), but that's only a waste of 64
+    inner: Chacha20Poly1305ImplRingInner,
+}
+
+#[cfg(feature = "ring")]
+impl CryptoAlgWithKey for Chacha20Poly1305Impl {
+    fn new(keys: &[&[u8]]) -> Result<Self, Error> {
+        let raw_key = keys[0];
+        let mut fixed_raw_key = [0; 64];
+        if raw_key.len() != 2 * Chacha20Poly1305::KEY_SIZE_BYTES {
+            return Err(Error::InvalidPrivateKeyLength);
+        }
+        fixed_raw_key.copy_from_slice(raw_key);
+
+        Ok(Self {
+            inner: Chacha20Poly1305ImplRingInner {
+                raw_key: fixed_raw_key,
+                decrypt: ring::aead::chacha20_poly1305_openssh::OpeningKey::new(&fixed_raw_key),
+                encrypt: ring::aead::chacha20_poly1305_openssh::SealingKey::new(&fixed_raw_key),
+            },
+        })
+    }
+}
+
+#[cfg(feature = "ring")]
+struct Chacha20Poly1305ImplRingInner {
+    // slight loss of space (we store the key thrice instead of once), but that's only a waste of 128
     // bytes, which I can accept as a tradeoff for not having to redesign the API to separate the
     // sender and receiver side
+    raw_key: [u8; 64],
     decrypt: ring::aead::chacha20_poly1305_openssh::OpeningKey,
     encrypt: ring::aead::chacha20_poly1305_openssh::SealingKey,
+}
+
+#[cfg(feature = "ring")]
+impl Clone for Chacha20Poly1305ImplRingInner {
+    fn clone(&self) -> Self {
+        Self {
+            raw_key: self.raw_key.clone(),
+            decrypt: ring::aead::chacha20_poly1305_openssh::OpeningKey::new(&self.raw_key),
+            encrypt: ring::aead::chacha20_poly1305_openssh::SealingKey::new(&self.raw_key),
+        }
+    }
 }
 
 #[cfg(feature = "ring")]
@@ -299,7 +417,8 @@ impl Cipher for Chacha20Poly1305Impl {
     fn encrypt(&mut self, data: &mut [u8], sequence_number: u32) -> Result<(), Error> {
         let mut tmp_auth_block = [0; POLY1305_BLOCK_SIZE];
         let (plaintext, auth_block) = data.split_at_mut(data.len() - POLY1305_BLOCK_SIZE);
-        self.encrypt
+        self.inner
+            .encrypt
             .seal_in_place(sequence_number, plaintext, &mut tmp_auth_block);
         auth_block.copy_from_slice(&tmp_auth_block);
 
@@ -315,6 +434,7 @@ impl Cipher for Chacha20Poly1305Impl {
         // beforehand
         let (next_data, size_field) = streaming_const_take::<4>(input)?;
         let pkt_size_bytes = self
+            .inner
             .decrypt
             .decrypt_packet_length(sequence_number, size_field);
         let pkt_size = u32::from_be_bytes(pkt_size_bytes);
@@ -333,7 +453,8 @@ impl Cipher for Chacha20Poly1305Impl {
         let mut auth_block = [0; POLY1305_BLOCK_SIZE];
         auth_block.copy_from_slice(&input[auth_block_pos..next_data_pos]);
 
-        self.decrypt
+        self.inner
+            .decrypt
             .open_in_place(sequence_number, &mut input[..auth_block_pos], &auth_block)
             .map_err(|_| nom::Err::Failure(ParsingError::DecipheringError))?;
         input[0..4].copy_from_slice(&pkt_size_bytes);
@@ -342,10 +463,169 @@ impl Cipher for Chacha20Poly1305Impl {
     }
 }
 
+#[declare_crypto_arg("aes256-gcm@openssh.com")]
+pub struct Aes256GcmImpl {
+    raw_key: Array<u8, cipher::consts::U32>,
+    inner: OfficialAes256Gcm,
+    nonce: Array<u8, cipher::consts::U12>,
+}
+
+impl Debug for Aes256GcmImpl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Aes256GcmImpl").finish()
+    }
+}
+
+impl<'a> DeserializePacket<'a> for Aes256GcmImpl {
+    fn deserialize(input: &'a [u8]) -> IResult<&'a [u8], Self, ParsingError> {
+        let (input, raw_key) = SharedSSHSlice::deserialize(input)?;
+        let (input, nonce) = SharedSSHSlice::deserialize(input)?;
+
+        Ok((
+            input,
+            Aes256GcmImpl::new(&[raw_key.0, nonce.0])
+                .expect("Couldn't recreate a key from its serialized representation!?"),
+        ))
+    }
+}
+
+impl SerializePacket for Aes256GcmImpl {
+    fn get_size(&self) -> usize {
+        SharedSSHSlice(self.raw_key.as_slice()).get_size()
+            + SharedSSHSlice(self.nonce.as_slice()).get_size()
+    }
+
+    fn serialize<W: std::io::Write>(&self, mut output: W) -> Result<(), std::io::Error> {
+        SharedSSHSlice(self.raw_key.as_slice()).serialize(&mut output)?;
+        SharedSSHSlice(self.nonce.as_slice()).serialize(output)
+    }
+}
+
+impl CryptoAlgWithKey for Aes256GcmImpl {
+    fn new(keys: &[&[u8]]) -> Result<Self, Error> {
+        let raw_key = keys[0];
+        let raw_iv = keys[1];
+        let key = Array::try_from(&raw_key[0..Aes256Gcm::KEY_SIZE_BYTES])?;
+        let nonce = Array::try_from(&raw_iv[0..Aes256Gcm::IV_SIZE_BYTES])?;
+
+        Ok(Self {
+            raw_key: key,
+            inner: OfficialAes256Gcm::new(&key),
+            nonce,
+        })
+    }
+}
+
+impl Cipher for Aes256GcmImpl {
+    fn block_size_bytes(&self) -> usize {
+        Aes256Gcm::BLOCK_SIZE_BYTES
+    }
+
+    fn is_aead(&self) -> bool {
+        true
+    }
+
+    fn required_space_to_encrypt(&self, data_len: usize) -> usize {
+        // size of the data itself + the authentication tag size
+        data_len + AES256GCM_TAG_SIZE
+    }
+
+    fn encrypt(&mut self, data: &mut [u8], _sequence_number: u32) -> Result<(), Error> {
+        // this is a cipher with authenticated encryptions, so we need to extract the packet length
+        // beforehand
+        let (_, size_field) = const_take::<4>(data).map_err(|_| Error::EncryptionError)?;
+
+        // encrypt in place
+        let cleartext_data_end = data.len() - AES256GCM_TAG_SIZE;
+
+        let tag = self
+            .inner
+            .encrypt_in_place_detached(&self.nonce, &size_field, &mut data[4..cleartext_data_end])
+            .map_err(|_| Error::EncryptionError)?;
+
+        // succeeded -> let's update the nonce
+        self.nonce = self.get_next_nonce_value();
+
+        data[cleartext_data_end..].copy_from_slice(tag.as_slice());
+
+        Ok(())
+    }
+
+    fn decrypt<'a>(
+        &mut self,
+        input: &'a mut [u8],
+        _sequence_number: u32,
+    ) -> IResult<&'a [u8], &'a [u8], ParsingError> {
+        // this is a cipher with authenticated encryptions, so we need to extract the packet length
+        // beforehand
+        let (next_data, size_field) = streaming_const_take::<4>(input)?;
+        let (_, pkt_size) = be_u32(size_field.as_slice())?;
+        // 5 = padding_length field + 4 bytes as this is the minimum possible padding
+        if pkt_size < 5 || pkt_size as usize > MAX_PKT_SIZE {
+            return Err(nom::Err::Failure(ParsingError::InvalidPacketLength(
+                pkt_size as usize,
+            )));
+        }
+        // ensure there is enought data in the input slice
+        let (next_data, _) = take(pkt_size)(next_data)?;
+
+        let (_, expected_tag) = streaming_const_take::<AES256GCM_TAG_SIZE>(next_data)?;
+        let expected_tag = Array::from(expected_tag);
+
+        self.inner
+            .decrypt_in_place_detached(
+                &self.nonce,
+                &size_field,
+                &mut input[4..4 + pkt_size as usize],
+                &expected_tag,
+            )
+            .map_err(|_| nom::Err::Failure(ParsingError::InvalidMac))?;
+
+        // valid decryption: update the nonce
+        self.nonce = self.get_next_nonce_value();
+
+        let next_data = &input[AES256GCM_TAG_SIZE + 4 + pkt_size as usize..];
+        let cur_pkt_plaintext = &input[..4 + pkt_size as usize];
+
+        Ok((next_data, cur_pkt_plaintext))
+    }
+}
+
+impl Aes256GcmImpl {
+    fn get_next_nonce_value(&self) -> Array<u8, cipher::consts::U12> {
+        // TODO: is this constant-time?
+        let mut next_nonce = self.nonce;
+        let next_invocation_counter = Wrapping(u64::from_be_bytes([
+            self.nonce[4],
+            self.nonce[5],
+            self.nonce[6],
+            self.nonce[7],
+            self.nonce[8],
+            self.nonce[9],
+            self.nonce[10],
+            self.nonce[11],
+        ])) + Wrapping(1u64);
+        next_nonce[4..].clone_from_slice(&next_invocation_counter.0.to_be_bytes());
+
+        next_nonce
+    }
+}
+
 #[declare_crypto_arg("aes256-ctr")]
 pub struct Aes256CtrImpl {
     key: Array<u8, cipher::consts::U32>,
     ctr: Array<u8, cipher::consts::U16>,
+}
+
+impl CryptoAlgWithKey for Aes256CtrImpl {
+    fn new(keys: &[&[u8]]) -> Result<Self, Error> {
+        let raw_key = keys[0];
+        let raw_iv = keys[1];
+        let key = Array::try_from(&raw_key[0..Aes256Ctr::KEY_SIZE_BYTES])?;
+        let ctr = Array::try_from(&raw_iv[0..Aes256Ctr::IV_SIZE_BYTES])?;
+
+        Ok(Self { key, ctr })
+    }
 }
 
 impl Cipher for Aes256CtrImpl {

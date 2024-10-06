@@ -28,14 +28,21 @@ use mio::{
     Events, Interest, Poll, Token,
 };
 use nix::sys::eventfd::EventFd;
-use session::PacketProcessingDecision;
+use session::{ExpectsChannelOpen, PacketProcessingDecision, SessionStateEstablished};
 use state::channel::{Channel, ChannelCommand, ChannelState};
 use syslog::Facility;
 
-use smicro_common::{LoopingBuffer, LoopingBufferReader, LoopingBufferWriter};
-use smicro_types::ssh::{
-    deserialize::parse_message_type,
-    types::{MessageType, SharedSSHSlice},
+use smicro_common::{
+    receive_fd_over_socket, send_fd_over_socket, LoopingBuffer, LoopingBufferReader,
+    LoopingBufferWriter,
+};
+use smicro_types::{
+    deserialize::DeserializePacket,
+    serialize::SerializePacket,
+    ssh::{
+        deserialize::parse_message_type,
+        types::{MessageType, SharedSSHSlice},
+    },
 };
 
 pub mod crypto;
@@ -53,7 +60,7 @@ use crate::{
     },
     packet::{write_message, MAX_PKT_SIZE},
     session::{SessionState, SessionStates, UninitializedSession},
-    state::{SenderState, State},
+    state::{DirectionState, State},
 };
 
 enum KeepProcessing {
@@ -230,7 +237,7 @@ fn flush_data_to_channel<
     recipient_channel: u32,
     max_chan_pkt_size: u32,
     window_size: &mut u32,
-    sender: &mut SenderState,
+    sender: &mut DirectionState,
     is_stderr: bool,
 ) -> Result<(), Error> {
     let readable_data = input_buf.get_readable_data();
@@ -397,7 +404,7 @@ impl BitOrAssign for NonIOProgress {
 
 fn flush_channel<const SIZE: usize, T: LoopingBufferWriter<SIZE>>(
     chan: &mut Channel,
-    sender: &mut SenderState,
+    sender: &mut DirectionState,
     output_buf: &mut T,
 ) -> Result<NonIOProgress, Error> {
     let mut res = NonIOProgress::Done;
@@ -541,13 +548,23 @@ fn process_channel_states<const SIZE: usize, W: LoopingBufferWriter<SIZE>>(
     Ok(())
 }
 
-fn handle_stream(mut stream: TcpStream) -> Result<(), Error> {
-    let mut reader_buf = <LoopingBuffer<MAX_PKT_SIZE>>::new()?;
-    let mut sender_buf = <LoopingBuffer<MAX_PKT_SIZE>>::new()?;
+fn handle_stream(stream: TcpStream) -> Result<(), Error> {
+    let reader_buf = <LoopingBuffer<MAX_PKT_SIZE>>::new()?;
+    let sender_buf = <LoopingBuffer<MAX_PKT_SIZE>>::new()?;
 
-    let mut state = State::new()?;
-    let mut session = SessionStates::UninitializedSession(UninitializedSession {});
+    let state = State::new()?;
+    let session = SessionStates::UninitializedSession(UninitializedSession {});
 
+    handle_stream_with_preexisting_state(stream, reader_buf, sender_buf, state, session)
+}
+
+fn handle_stream_with_preexisting_state(
+    mut stream: TcpStream,
+    mut reader_buf: LoopingBuffer<MAX_PKT_SIZE>,
+    mut sender_buf: LoopingBuffer<MAX_PKT_SIZE>,
+    mut state: State,
+    mut session: SessionStates,
+) -> Result<(), Error> {
     let mut poll = Poll::new()?;
     let mut events = Events::with_capacity(128);
 
@@ -611,7 +628,7 @@ fn handle_stream(mut stream: TcpStream) -> Result<(), Error> {
                 let socket_path = "/tmp/wip";
                 let socket = UnixListener::bind(socket_path)?;
 
-                let mut cmd = Command::new(
+                Command::new(
                     std::env::current_exe()?
                         .parent()
                         .unwrap()
@@ -620,14 +637,16 @@ fn handle_stream(mut stream: TcpStream) -> Result<(), Error> {
                 .arg("--master-socket")
                 .arg(socket_path)
                 .spawn()?;
-                let (mut stream, _) = socket.accept()?;
+                let (mut slave_stream, _) = socket.accept()?;
 
                 unsafe {
-                    reader_buf.send_over_socket(&mut stream)?;
-                    sender_buf.send_over_socket(&mut stream)?;
+                    reader_buf.send_over_socket(&mut slave_stream)?;
+                    sender_buf.send_over_socket(&mut slave_stream)?;
+                    send_fd_over_socket(&mut slave_stream, stream)?;
                 };
+                state.serialize(&mut slave_stream)?;
+                slave_stream.shutdown(std::net::Shutdown::Both)?;
 
-                cmd.wait()?;
                 drop(socket);
 
                 return Ok(());
@@ -732,7 +751,31 @@ fn main() -> Result<(), Error> {
         unsafe {
             let reader_buf = <LoopingBuffer<MAX_PKT_SIZE>>::receive_over_socket(&mut stream)?;
             let sender_buf = <LoopingBuffer<MAX_PKT_SIZE>>::receive_over_socket(&mut stream)?;
+
+            let client_socket = receive_fd_over_socket(&mut stream)?;
+
+            let mut buf = Vec::new();
+            stream.read_to_end(&mut buf)?;
+
+            let state = match State::deserialize(buf.as_slice()) {
+                Err(e) => {
+                    println!("{:?}", e);
+                    return Err(e.into());
+                }
+                Ok((_, state)) => state,
+            };
+
             println!("{:?} {:?}", reader_buf, sender_buf);
+
+            handle_stream_with_preexisting_state(
+                client_socket,
+                reader_buf,
+                sender_buf,
+                state,
+                SessionStates::SessionStateEstablished(
+                    SessionStateEstablished::ExpectsChannelOpen(ExpectsChannelOpen {}),
+                ),
+            )?;
         };
 
         Ok(())

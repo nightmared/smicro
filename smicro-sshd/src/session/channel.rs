@@ -11,7 +11,7 @@ use smicro_types::ssh::types::MessageType;
 
 use crate::messages::{MessageChannelClose, MessageChannelEof};
 use crate::state::channel::{Channel, ChannelState};
-use crate::state::{SenderState, State};
+use crate::state::{DirectionState, State};
 use crate::{
     error::Error,
     messages::{
@@ -131,7 +131,7 @@ fn spawn_command(command: &str, with_env: bool) -> Result<ChannelCommand, Error>
 }
 
 fn handle_channel_request<const SIZE: usize, W: LoopingBufferWriter<SIZE>>(
-    sender: &mut SenderState,
+    sender: &mut DirectionState,
     writer: &mut W,
     msg: MessageChannelRequest,
     chan: &mut Channel,

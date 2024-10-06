@@ -29,6 +29,7 @@ pub trait Extension: std::fmt::Debug {
 }
 
 #[declare_deserializable_struct]
+#[derive(Debug)]
 pub struct ExtensionPosixRename {
     #[field(parser = parse_pathbuf)]
     old_path: PathBuf,
@@ -47,6 +48,7 @@ impl Extension for ExtensionPosixRename {
 }
 
 #[declare_deserializable_struct]
+#[derive(Debug)]
 pub struct ExtensionCopyData {
     #[field(parser = parse_utf8_string)]
     read_handle: String,

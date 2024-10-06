@@ -1,9 +1,13 @@
 use proc_macro::{Span, TokenStream};
-use proc_macro2::Ident;
 use proc_macro_error::{abort, proc_macro_error};
 use quote::{quote, quote_spanned, ToTokens};
 
-use syn::{parse, FnArg, LitStr, Pat, PatType, PathSegment};
+use syn::parse::{Parse, ParseStream};
+use syn::token::{Brace, Group, Token};
+use syn::{
+    parse, AngleBracketedGenericArguments, FnArg, GenericArgument, Ident, LitStr, Macro, MetaList,
+    Pat, PatType, PathArguments, PathSegment, TypePath,
+};
 use syn::{
     parse::Parser, punctuated::Punctuated, spanned::Spanned, token::Comma, Attribute, Expr,
     ExprLit, ExprPath, Fields, GenericParam, ItemConst, ItemEnum, ItemStruct, ItemTrait,
@@ -62,7 +66,7 @@ pub fn gen_serialize_impl(_attrs: TokenStream, item: TokenStream) -> TokenStream
     let mut fields = Vec::with_capacity(ast.fields.len());
 
     for field in ast.fields.iter() {
-        fields.push(field.ident.as_ref().expect("Should be a names struct"));
+        fields.push(field.ident.as_ref().expect("Should be a named struct"));
     }
 
     let write_entries = fields.iter().map(|field| {
@@ -135,13 +139,23 @@ struct Field<'a> {
 struct FieldArgs {
     optional: bool,
     vec: bool,
-    parser: Expr,
+    default_deserialize: bool,
+    parser: Option<Expr>,
+}
+
+impl Default for FieldArgs {
+    fn default() -> Self {
+        Self {
+            optional: false,
+            default_deserialize: true,
+            vec: false,
+            parser: None,
+        }
+    }
 }
 
 fn parse_field_args(input: TokenStream) -> syn::Result<FieldArgs> {
-    let mut optional = false;
-    let mut vec = false;
-    let mut parser = None;
+    let mut res = FieldArgs::default();
     let attribute_args = Punctuated::<Meta, Token![,]>::parse_terminated.parse(input)?;
     for arg in attribute_args.iter() {
         match arg {
@@ -158,7 +172,7 @@ fn parse_field_args(input: TokenStream) -> syn::Result<FieldArgs> {
                             ..
                         }) = &namevalue.value
                         {
-                            optional = boolean.value;
+                            res.optional = boolean.value;
                         } else {
                             abort!(&namevalue.span(), "Expected a boolean");
                         }
@@ -169,13 +183,24 @@ fn parse_field_args(input: TokenStream) -> syn::Result<FieldArgs> {
                             ..
                         }) = &namevalue.value
                         {
-                            vec = boolean.value;
+                            res.vec = boolean.value;
+                        } else {
+                            abort!(&namevalue.span(), "Expected a boolean");
+                        }
+                    }
+                    "default_deserialize" => {
+                        if let Expr::Lit(ExprLit {
+                            lit: Lit::Bool(boolean),
+                            ..
+                        }) = &namevalue.value
+                        {
+                            res.default_deserialize = boolean.value;
                         } else {
                             abort!(&namevalue.span(), "Expected a boolean");
                         }
                     }
                     "parser" => {
-                        parser = Some(namevalue.value.clone());
+                        res.parser = Some(namevalue.value.clone());
                     }
                     _ => abort!(arg.span(), "Unsupported macro parameter"),
                 }
@@ -184,22 +209,18 @@ fn parse_field_args(input: TokenStream) -> syn::Result<FieldArgs> {
         }
     }
 
-    if parser.is_none() {
+    if !res.default_deserialize && res.parser.is_none() {
         abort!(attribute_args.span(), "A parser must be provided");
     }
 
-    Ok(FieldArgs {
-        optional,
-        vec,
-        parser: parser.unwrap(),
-    })
+    Ok(res)
 }
 
 fn get_fields(fields: &Fields) -> Vec<Field> {
     let mut res = Vec::with_capacity(fields.len());
 
     for field in fields.iter() {
-        let mut args = None;
+        let mut args = Some(FieldArgs::default());
         let mut additional_attributes = Vec::new();
         for attr in field.attrs.iter() {
             match &attr.meta {
@@ -225,12 +246,8 @@ fn get_fields(fields: &Fields) -> Vec<Field> {
             additional_attributes.push(attr);
         }
 
-        if args.is_none() {
-            abort!(field.span(), "Missing a required #[field] argument");
-        }
-
         res.push(Field {
-            name: field.ident.as_ref().expect("Should be a names struct"),
+            name: field.ident.as_ref().expect("Should be a named struct"),
             ty: &field.ty,
             args: args.unwrap(),
             attrs: additional_attributes,
@@ -263,16 +280,22 @@ pub fn declare_deserializable_struct(_attrs: TokenStream, item: TokenStream) -> 
         .zip(new_field_idents)
         .map(|(field, new_field_ident)| {
             let field_name = &field.name;
-            let parser = &field.args.parser;
+            let field_type = &field.ty;
+            let parser_call = if let Some(parser) = &field.args.parser {
+                quote!(#parser.parse)
+            } else {
+                assert!(field.args.default_deserialize);
+                quote!(<#field_type>::deserialize)
+            };
 
             let mut parsing_code = quote!(
-                let (next_data, new_field_value) = #parser.parse(remaining_data)?;
+                let (next_data, new_field_value) = #parser_call(remaining_data)?;
                 remaining_data = next_data;
             );
 
             if field.args.vec {
                 parsing_code = quote!(
-                    let mut iter = nom::combinator::iterator(remaining_data, #parser);
+                    let mut iter = nom::combinator::iterator(remaining_data, #parser_call);
                     let new_field_value = iter.collect::<Vec<_>>();
                     let (next_data, _) = iter.finish()?;
                     remaining_data = next_data;
@@ -319,6 +342,7 @@ pub fn declare_deserializable_struct(_attrs: TokenStream, item: TokenStream) -> 
     let deserialize_impl = quote!(
         impl<'a  , #fake_lifetime> DeserializePacket<'a> for #name<#fake_lifetime> where Self: Sized  #lifetime_constraint {
             fn deserialize(input: &'a [u8]) -> nom::IResult<&'a [u8], Self, ::smicro_types::error::ParsingError>  {
+                log::trace!("Deserializing {}", std::any::type_name::<Self>());
                 let mut remaining_data = input;
                 #(#deserialize_fields) *
 
@@ -344,7 +368,6 @@ pub fn declare_deserializable_struct(_attrs: TokenStream, item: TokenStream) -> 
     });
 
     quote! {
-        #[derive(Debug)]
         #(#attrs) * #vis struct #name #generics {
             #(#new_fields)*
         }
@@ -556,6 +579,7 @@ pub fn declare_message(attrs: TokenStream, item: TokenStream) -> TokenStream {
     }
 
     quote! {
+        #[derive(Debug)]
         #[::smicro_macros::gen_serialize_impl]
         #ast
 
@@ -716,7 +740,8 @@ pub fn declare_session_state(attrs: TokenStream, item: TokenStream) -> TokenStre
 
 struct WrapperDeclarationArgs {
     name: Ident,
-    implementors: Vec<Path>,
+    serializable: bool,
+    deserializable: bool,
 }
 
 fn parse_wrapper_declaration_args(input: TokenStream) -> WrapperDeclarationArgs {
@@ -727,7 +752,8 @@ fn parse_wrapper_declaration_args(input: TokenStream) -> WrapperDeclarationArgs 
     };
 
     let mut name = None;
-    let mut implementors = Vec::new();
+    let mut serializable = false;
+    let mut deserializable = false;
 
     for arg in attribute_args.iter() {
         if let Meta::NameValue(namevalue) = arg {
@@ -747,18 +773,26 @@ fn parse_wrapper_declaration_args(input: TokenStream) -> WrapperDeclarationArgs 
                         abort!(Span::call_site(), "Invalid type for the key {}", key);
                     }
                 }
-                "implementors" => {
-                    if let Expr::Array(arr) = &namevalue.value {
-                        for item in &arr.elems {
-                            match item {
-                                Expr::Path(ExprPath { path, .. }) => {
-                                    implementors.push(path.clone())
-                                }
-                                _ => abort!(namevalue.span(), "Not a path"),
-                            }
-                        }
+                "serializable" => {
+                    if let Expr::Lit(ExprLit {
+                        lit: Lit::Bool(boolean),
+                        ..
+                    }) = &namevalue.value
+                    {
+                        serializable = boolean.value;
                     } else {
-                        abort!(Span::call_site(), "Invalid type for the key {}", key);
+                        abort!(&namevalue.span(), "Expected a boolean");
+                    }
+                }
+                "deserializable" => {
+                    if let Expr::Lit(ExprLit {
+                        lit: Lit::Bool(boolean),
+                        ..
+                    }) = &namevalue.value
+                    {
+                        deserializable = boolean.value;
+                    } else {
+                        abort!(&namevalue.span(), "Expected a boolean");
                     }
                 }
                 _ => abort!(arg.span(), "Unsupported macro parameter"),
@@ -774,7 +808,8 @@ fn parse_wrapper_declaration_args(input: TokenStream) -> WrapperDeclarationArgs 
 
     WrapperDeclarationArgs {
         name: name.unwrap().clone(),
-        implementors,
+        serializable,
+        deserializable,
     }
 }
 
@@ -784,12 +819,62 @@ pub fn create_wrapper_enum_implementing_trait(
     attrs: TokenStream,
     item: TokenStream,
 ) -> TokenStream {
-    let ast: ItemTrait = parse(item).expect("Not a trait");
+    let mut ast: ItemTrait = parse(item).expect("Not a trait");
     let args = parse_wrapper_declaration_args(attrs);
-    let implementors = args.implementors;
-    let implementors_ident: Vec<&PathSegment> = implementors
+
+    let mut implementors = Vec::new();
+    let mut attrs = Vec::new();
+    for attr in &ast.attrs {
+        if let Meta::List(MetaList { path, tokens, .. }) = &attr.meta {
+            if path.segments.last().map(|s| s.ident.to_string())
+                == Some(String::from("implementors"))
+            {
+                let res = match (<Punctuated<Path, Token![,]>>::parse_terminated)
+                    .parse2(tokens.clone())
+                {
+                    Ok(res) => res,
+                    Err(_) => abort!(tokens.span(), "Invalid list of paths"),
+                };
+                for v in res {
+                    implementors.push(v);
+                }
+                break;
+            }
+        }
+        attrs.push(attr.clone());
+    }
+    if implementors.len() == 0 {
+        abort!(
+            ast.span(),
+            "Missing implementors attribute or no implementors"
+        );
+    }
+
+    let implementors_ident: Vec<Ident> = implementors
         .iter()
-        .map(|x| x.segments.last().unwrap())
+        .map(|x| {
+            let last = x.segments.last().unwrap();
+
+            let mut name = last.ident.to_string();
+
+            fn recurse_path(name: &mut String, arguments: &PathArguments) {
+                if let PathArguments::AngleBracketed(AngleBracketedGenericArguments {
+                    args, ..
+                }) = arguments
+                {
+                    for arg in args {
+                        if let GenericArgument::Type(Type::Path(TypePath { path, .. })) = arg {
+                            let last = path.segments.last().unwrap();
+                            name.push_str(&last.ident.to_string());
+                            recurse_path(name, &last.arguments);
+                        }
+                    }
+                }
+            }
+            recurse_path(&mut name, &last.arguments);
+
+            Ident::new(&name, last.span())
+        })
         .collect();
 
     let mut new_items = Vec::new();
@@ -842,15 +927,68 @@ pub fn create_wrapper_enum_implementing_trait(
         }
     );
 
+    let deserialize_impl = if args.deserializable {
+        quote!(
+            impl<'a> smicro_types::deserialize::DeserializePacket<'a> for #enum_name {
+                fn deserialize(input: &'a [u8]) -> nom::IResult<&'a [u8], Self, smicro_types::error::ParsingError> {
+                    use smicro_types::deserialize::DeserializePacket;
+                    use crate::crypto::CryptoAlgName;
+                    log::trace!("Deserializing {}", std::any::type_name::<Self>());
+                    let (input, name) = smicro_types::sftp::deserialize::parse_slice(input)?;
+
+                    #(
+                        if name == <#implementors>::NAME.as_bytes() {
+                            return #implementors::deserialize(input).map(|(input, v)| (input, Self::#implementors_ident(v)));
+                        }
+                    )*
+
+                    Err(nom::Err::Failure(smicro_types::error::ParsingError::InvalidEnumVariant))
+                }
+            }
+        )
+    } else {
+        quote!()
+    };
+
+    let serialize_impl = if args.serializable {
+        quote!(
+            impl smicro_types::serialize::SerializePacket for #enum_name {
+                fn get_size(&self) -> usize {
+                    use smicro_types::serialize::SerializePacket;
+                    self.name().get_size() +
+                    match self {
+                        #(Self::#implementors_ident(e) => e.get_size()),*
+                    }
+                }
+
+                fn serialize<W: std::io::Write>(&self, mut writer: W) -> Result<(), std::io::Error> {
+                    use smicro_types::serialize::SerializePacket;
+                    self.name().serialize(&mut writer)?;
+                    match self {
+                        #(Self::#implementors_ident(e) => e.serialize(&mut writer)),*
+                    }
+                }
+            }
+        )
+    } else {
+        quote!()
+    };
+
+    ast.attrs = attrs;
+
     quote! {
         #ast
 
-        #[derive(Clone)]
+        #[derive(Clone, Debug)]
         pub enum #enum_name {
             #(#implementors_ident(#implementors)),*
         }
 
         #name_impl
+
+        #deserialize_impl
+
+        #serialize_impl
 
         impl #trait_name for #enum_name {
             #(#new_items)*

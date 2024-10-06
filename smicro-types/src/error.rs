@@ -10,6 +10,8 @@ pub enum ParsingError {
     InvalidVersionNumber(u32),
     #[error("Invalid UTF-8 input from the client")]
     NonUTF8String(#[from] std::str::Utf8Error),
+    #[error("Invalid UTF-8 input from the client")]
+    NonUTF8StringFromVec(#[from] std::string::FromUtf8Error),
     #[error("Invalid value for the attribute flags")]
     InvalidAttrsFlags(u32),
     #[error("Invalid value for the open modes of a file")]
@@ -18,6 +20,10 @@ pub enum ParsingError {
     InvalidPacketLength(usize),
     #[error("Invalid MAC field")]
     InvalidMac,
+    #[error("Invalid discriminator for an Option<T>")]
+    InvalidOptionDiscriminator,
+    #[error("Invalid discriminator for an enum")]
+    InvalidEnumVariant,
     #[error("Could not decipher data")]
     DecipheringError,
     #[error("Overflow: the sequence number wrapped")]

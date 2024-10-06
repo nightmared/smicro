@@ -1,11 +1,9 @@
-use std::io::Write;
-
 use smicro_macros::{
     declare_response_packet, implement_responsepacket_on_enum, serialize_variants_in_enum,
 };
 use smicro_types::serialize::SerializePacket;
 use smicro_types::sftp::types::{Attrs, Extension, ResponseType, Stat, StatusCode};
-use smicro_types::ssh::types::{SSHSlice, SharedSSHSlice};
+use smicro_types::ssh::types::SharedSSHSlice;
 
 #[derive(Debug)]
 #[implement_responsepacket_on_enum]

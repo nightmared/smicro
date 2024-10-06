@@ -6,9 +6,7 @@ use std::{
 
 use log::{debug, error, info, trace, LevelFilter};
 use nom::{Err, IResult};
-use smicro_common::{
-    create_circular_buffer, LoopingBuffer, LoopingBufferReader, LoopingBufferWriter,
-};
+use smicro_common::{LoopingBuffer, LoopingBufferReader, LoopingBufferWriter};
 use syslog::Facility;
 
 use smicro_types::{

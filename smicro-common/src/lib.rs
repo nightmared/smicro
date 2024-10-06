@@ -1,15 +1,12 @@
 #![feature(unix_socket_ancillary_data)]
 #![feature(allocator_api)]
 
-use std::alloc::Allocator;
-use std::cell::UnsafeCell;
 use std::fmt::Debug;
 use std::io::{Error, ErrorKind};
-use std::ptr::{slice_from_raw_parts_mut, NonNull};
-use std::sync::Arc;
 #[cfg(feature = "share_loop")]
 use std::{
     io::{IoSlice, IoSliceMut},
+    os::fd::{AsRawFd, FromRawFd},
     os::unix::net::{AncillaryData, AncillaryError, SocketAncillary, UnixStream},
 };
 
@@ -395,94 +392,52 @@ impl<'a, const SIZE: usize> LoopingBufferWriter<SIZE> for AtomicLoopingBufferWri
     }
 }
 
-pub struct BumpAllocatorOnMemfdInner {
-    fd: i32,
-    buf: *mut u8,
-    size: usize,
-    last_alloc_end: usize,
-    cur_alignment: usize,
+#[cfg(feature = "share_loop")]
+pub unsafe fn send_fd_over_socket<T: AsRawFd>(
+    stream: &mut UnixStream,
+    fd: T,
+) -> std::io::Result<()> {
+    let buf = IoSlice::new(&[1u8]);
+
+    let mut ancillary_buffer = [0; 128];
+    let mut ancillary = SocketAncillary::new(&mut ancillary_buffer[..]);
+    ancillary.add_fds(&[fd.as_raw_fd()]);
+
+    stream.send_vectored_with_ancillary(&mut [buf], &mut ancillary)?;
+
+    Ok(())
 }
 
-#[derive(Clone)]
-pub struct BumpAllocatorOnMemfd {
-    inner: Arc<UnsafeCell<BumpAllocatorOnMemfdInner>>,
-}
+#[cfg(feature = "share_loop")]
+pub unsafe fn receive_fd_over_socket<T: FromRawFd>(stream: &mut UnixStream) -> std::io::Result<T> {
+    let mut ancillary_buffer = [0; 128];
+    let mut ancillary = SocketAncillary::new(&mut ancillary_buffer[..]);
 
-impl BumpAllocatorOnMemfd {
-    pub fn new(size: usize) -> Result<Self, BufferCreationError> {
-        let fd = create_memfd(size)?;
+    let mut recv_buffer = [0; 1];
 
-        unsafe {
-            let buf = libc::mmap(
-                std::ptr::null_mut(),
-                size,
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_ANONYMOUS | libc::MAP_SHARED,
-                fd,
-                0,
-            );
-            if fd as usize == usize::MAX {
-                return Err(BufferCreationError::AllocationFailed(
-                    std::io::Error::last_os_error(),
-                ));
-            }
-
-            Ok(BumpAllocatorOnMemfd {
-                inner: Arc::new(UnsafeCell::new(BumpAllocatorOnMemfdInner {
-                    fd,
-                    buf: buf as *mut u8,
-                    size,
-                    last_alloc_end: 0,
-                    // mmap allocations are page-aligned
-                    cur_alignment: libc::sysconf(libc::_SC_PAGESIZE) as usize,
-                })),
-            })
-        }
+    let nb_read = stream
+        .recv_vectored_with_ancillary(&mut [IoSliceMut::new(&mut recv_buffer)], &mut ancillary)?;
+    if nb_read != 1 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "Missing data in ancillary message",
+        ));
     }
-}
 
-unsafe impl Allocator for BumpAllocatorOnMemfd {
-    fn allocate(
-        &self,
-        layout: std::alloc::Layout,
-    ) -> Result<std::ptr::NonNull<[u8]>, std::alloc::AllocError> {
-        let inner = self.inner.get();
-        unsafe {
-            let inner = &mut *inner;
-            let required_align = layout.align();
-            let cur_align = inner.cur_alignment;
-            let padding_alignment_bytes = if cur_align % required_align == 0 {
-                0
-            } else {
-                let next_aligned_pos = (cur_align + required_align) & !(required_align - 1);
-                next_aligned_pos - cur_align
-            };
-
-            // not enought bytes available in the allocator
-            let next_end_pos = inner.last_alloc_end + padding_alignment_bytes + layout.size();
-            if next_end_pos > inner.size {
-                return Err(std::alloc::AllocError);
-            }
-
-            let ptr = (*inner).buf.byte_offset(inner.last_alloc_end as isize);
-            let ptr = NonNull::new_unchecked(slice_from_raw_parts_mut(ptr, layout.size()));
-
-            let mut new_align = 1;
-            while next_end_pos & !((1 << (new_align + 1)) - 1) == 0 {
-                new_align += 1;
-            }
-
-            inner.last_alloc_end = next_end_pos;
-            inner.cur_alignment = new_align;
-
-            Ok(ptr)
+    let mut fd = None;
+    for ancillary_result in ancillary.messages() {
+        if let AncillaryData::ScmRights(mut scm_rights) = ancillary_result.map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid ancillary data")
+        })? {
+            fd = scm_rights.next();
         }
     }
 
-    unsafe fn deallocate(&self, ptr: std::ptr::NonNull<u8>, layout: std::alloc::Layout) {
-        // deallocating is a no-op, but we zero out the memory in case it was sensitive
-        for i in 0..(layout.size() as isize) {
-            ptr.byte_offset(i).write(0);
-        }
+    match fd {
+        Some(fd) => Ok(T::from_raw_fd(fd)),
+        None => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Missing socket descriptor",
+        )),
     }
 }
