@@ -109,9 +109,13 @@ impl KexReceived {
         let server_mac = crypto_algs
             .server_to_client_mac
             .allocate_with_key(&negotiated_keys.integrity_key_s2c)?;
-        let server_cipher = crypto_algs
-            .server_to_client_cipher
-            .from_key(&negotiated_keys.encryption_key_s2c, &negotiated_keys.iv_s2c)?;
+        let server_cipher = crypto_algs.server_to_client_cipher.from_key(
+            &negotiated_keys.encryption_key_s2c,
+            &negotiated_keys.iv_s2c[..crypto_algs
+                .server_to_client_cipher
+                .iv_size_bits()
+                .div_ceil(8)],
+        )?;
         state.sender.crypto_algs = Some(crypto_algs.clone());
         state.sender.crypto_material = Some(SessionCryptoMaterials {
             mac: server_mac,
@@ -154,7 +158,10 @@ impl KexReplySent {
             .allocate_with_key(&self.negotiated_keys.integrity_key_c2s)?;
         let client_cipher = crypto_algs.client_to_server_cipher.from_key(
             &self.negotiated_keys.encryption_key_c2s,
-            &self.negotiated_keys.iv_c2s,
+            &self.negotiated_keys.iv_c2s[..crypto_algs
+                .client_to_server_cipher
+                .iv_size_bits()
+                .div_ceil(8)],
         )?;
 
         state.receiver.crypto_algs = Some(self.new_crypto_algs.clone());
