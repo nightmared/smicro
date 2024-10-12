@@ -30,12 +30,9 @@ use crate::{
 
 use super::CryptoAlgWithKey;
 
-#[cfg(all(feature = "rustcrypto", feature = "ring"))]
-compile_error!("Features 'rustcrypto' and 'ring' cannot be enabled at the same time");
-
-#[cfg(feature = "ring")]
+#[cfg(not(feature = "rustcrypto"))]
 pub mod ring;
-#[cfg(feature = "ring")]
+#[cfg(not(feature = "rustcrypto"))]
 pub use ring::{Aes256GcmImpl, Chacha20Poly1305Impl};
 
 #[cfg(feature = "rustcrypto")]

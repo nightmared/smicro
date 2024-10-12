@@ -156,13 +156,14 @@ impl ExpectsUserAuthRequest {
         msg.user_name.serialize(&mut message)?;
         msg.service_name.serialize(&mut message)?;
         "publickey".serialize(&mut message)?;
+        // the signature is present
         true.serialize(&mut message)?;
         req.public_key_alg_name.serialize(&mut message)?;
         SharedSSHSlice(&authorized_key.key_data).serialize(&mut message)?;
 
         if !verifier.signature_is_valid(&authorized_key.key_data, &message, sig)? {
             info!(
-                "Attempted authentication for user {} with invalid public key",
+                "Attempted authentication for user {} with invalid signature",
                 msg.user_name
             );
             return Ok(PubkeyAuthDecision::Rejected);

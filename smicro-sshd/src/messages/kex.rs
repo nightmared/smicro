@@ -113,7 +113,10 @@ pub struct MessageKeyExchangeInit {
 }
 
 #[declare_crypto_algs_list(wrapper_name = crate::crypto::sign::SignerIdentifierWrapper, error_value = Error::NoCommonSigningAlg)]
-const SIGNING_ALGORITHMS: _ = [crate::crypto::sign::EcdsaSha2Nistp521];
+const SIGNING_ALGORITHMS: _ = [
+    crate::crypto::sign::EcdsaSha2Nistp521,
+    crate::crypto::sign::Ed25519,
+];
 
 #[declare_crypto_algs_list(wrapper_name = crate::crypto::kex::KEXWrapper, error_value = Error::NoCommonKexAlg)]
 const KEX_ALGORITHMS: _ = [crate::crypto::kex::EcdhSha2Nistp521];

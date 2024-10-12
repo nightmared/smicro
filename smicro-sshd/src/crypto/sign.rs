@@ -6,17 +6,21 @@ use elliptic_curve::{
     sec1::{EncodedPoint, FromEncodedPoint},
     AffinePoint,
 };
-use nom::Parser;
+use nom::{bytes::streaming::take, Parser};
 use p521::NistP521;
+use ring::signature::{VerificationAlgorithm, ED25519};
 use signature::Verifier;
 use smicro_macros::{
     create_wrapper_enum_implementing_trait, declare_crypto_arg, declare_deserializable_struct,
     gen_serialize_impl,
 };
-use smicro_types::deserialize::DeserializePacket;
 use smicro_types::serialize::SerializePacket;
 use smicro_types::sftp::deserialize::{parse_slice, parse_utf8_slice};
 use smicro_types::ssh::types::{PositiveBigNum, SharedSSHSlice};
+use smicro_types::{
+    deserialize::DeserializePacket,
+    ssh::deserialize::{const_take, streaming_const_take},
+};
 
 use crate::{
     crypto::{CryptoAlg, CryptoAlgName, KeyWrapper},
@@ -26,10 +30,11 @@ use crate::{
 use super::CryptoAlgWithKey;
 
 const ECDSA_SHA2_NISTPR521_CURVE_NAME: &'static str = "nistp521";
+const ED25519_CURVE_NAME: &'static str = "ed25519";
 const NISTP521_KEY_SIZE_BYTES: usize = 66;
 
 #[create_wrapper_enum_implementing_trait(name = SignerIdentifierWrapper, serializable = true, deserializable = true)]
-#[implementors(EcdsaSha2Nistp521)]
+#[implementors(EcdsaSha2Nistp521, Ed25519)]
 pub trait SignerIdentifier {
     fn curve_name(&self) -> &'static str;
 
@@ -111,6 +116,48 @@ impl SignerIdentifier for EcdsaSha2Nistp521 {
             .map_err(|_| Error::InvalidSignature)?;
 
         Ok(signer.verify(message, &ecdsa_sig).is_ok())
+    }
+}
+
+#[derive(Debug)]
+#[declare_crypto_arg("ssh-ed25519")]
+#[declare_deserializable_struct]
+#[gen_serialize_impl]
+pub struct Ed25519 {}
+
+impl CryptoAlg for Ed25519 {
+    fn new() -> Self {
+        Self {}
+    }
+}
+
+impl SignerIdentifier for Ed25519 {
+    fn curve_name(&self) -> &'static str {
+        ED25519_CURVE_NAME
+    }
+
+    fn deserialize_buf_to_key<'a>(
+        &self,
+        buf: &'a [u8],
+    ) -> Result<(&'a [u8], SignerWrapper), Error> {
+        let (next_data, point_data) = parse_slice(buf)?;
+        let (next_data, secret_key_data) = parse_slice(next_data)?;
+
+        unimplemented!()
+    }
+
+    fn signature_is_valid(
+        &self,
+        key: &[u8],
+        message: &[u8],
+        signature: &[u8],
+    ) -> Result<bool, Error> {
+        let (_, key) = Ed25519Key::deserialize(key)?;
+        let (_, sig) = SignatureWithName::deserialize(signature)?;
+
+        Ok(ED25519
+            .verify(key.key.0.into(), message.into(), sig.key.0.into())
+            .is_ok())
     }
 }
 
@@ -237,6 +284,14 @@ pub struct KeyEcdsa<'a> {
     curve_name: &'a str,
     #[field(parser = parse_slice.map(|x| PositiveBigNum(x)))]
     key: PositiveBigNum<'a>,
+}
+
+#[gen_serialize_impl]
+#[declare_deserializable_struct]
+pub struct Ed25519Key<'a> {
+    #[field(parser = parse_utf8_slice)]
+    name: &'a str,
+    key: SharedSSHSlice<'a, u8>,
 }
 
 #[gen_serialize_impl]

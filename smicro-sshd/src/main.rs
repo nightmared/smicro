@@ -589,7 +589,11 @@ fn handle_stream_with_preexisting_state(
     let mut channels_to_remove: HashSet<u32> = HashSet::new();
 
     loop {
-        poll.poll(&mut events, None)?;
+        match poll.poll(&mut events, None) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e.into()),
+        }
 
         let mut non_io_backed_progress = NonIOProgress::Done;
 
@@ -700,7 +704,11 @@ fn master_process() -> Result<(), Error> {
         .register(&mut listener, Token(0), Interest::READABLE)?;
 
     loop {
-        poll.poll(&mut events, None)?;
+        match poll.poll(&mut events, None) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e.into()),
+        }
 
         for _event in events.iter() {
             loop {
