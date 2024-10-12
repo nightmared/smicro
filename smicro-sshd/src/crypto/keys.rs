@@ -93,19 +93,9 @@ pub fn load_hostkey(hostkey_file: &Path) -> Result<SignerWrapper, Error> {
         return Err(KeyLoadingError::InvalidIntegersCheck)?;
     }
 
-    let (mut next_data, private_key_type) = parse_utf8_string(next_data)?;
+    let (next_data, private_key_type) = parse_utf8_string(next_data)?;
     let signing_algo = &negotiate_alg_signing_algorithms(&[&private_key_type])
         .map_err(|_| KeyLoadingError::UnsupportedSigningAlgorithm)?[0];
-
-    if let Some(expected_curve_name) = signing_algo.curve_name() {
-        let (n, curve_name) = parse_utf8_string(next_data)?;
-        // check that the EC curve name matches the key type
-        if curve_name != expected_curve_name {
-            return Err(KeyLoadingError::EcdsaCurveMismatch)?;
-        }
-
-        next_data = n;
-    }
 
     let (next_data, signing_key) = signing_algo.deserialize_buf_to_key(next_data)?;
 
