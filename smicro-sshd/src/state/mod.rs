@@ -1,5 +1,6 @@
-use std::{num::Wrapping, path::Path};
+use std::{fs::read_dir, num::Wrapping, os::unix::ffi::OsStrExt};
 
+use log::info;
 use nom::Parser;
 use rand::{rngs::ThreadRng, thread_rng};
 
@@ -8,7 +9,7 @@ use smicro_types::{
     deserialize::DeserializePacket,
     error::ParsingError,
     serialize::SerializePacket,
-    ssh::types::{SSHSlice, SharedSSHSlice, SharedSlowSSHSlice, SlowSSHSlice},
+    ssh::types::{SharedSSHSlice, SharedSlowSSHSlice, SlowSSHSlice},
 };
 
 use crate::{
@@ -138,8 +139,18 @@ impl std::fmt::Debug for SessionCryptoMaterials {
 impl State {
     pub fn new() -> Result<Self, Error> {
         let mut host_keys = Vec::new();
-        let test_hostkey = load_hostkey(&Path::new("/home/sthoby/dev-fast/smicro/host_key"))?;
-        host_keys.push(test_hostkey);
+        let files = read_dir("/etc/smicro")?;
+        for file in files {
+            let file = file?;
+            let filename = file.file_name();
+            let filename = filename.as_bytes();
+            if filename.starts_with(b"host_key") && !filename.ends_with(b".pub") {
+                match load_hostkey(&file.path()) {
+                    Ok(k) => host_keys.push(k),
+                    Err(_) => info!("Could not open or parse key file {:?}", file.path()),
+                }
+            }
+        }
 
         Ok(Self {
             sender: DirectionState {

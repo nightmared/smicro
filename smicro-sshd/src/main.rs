@@ -773,8 +773,6 @@ fn main() -> Result<(), Error> {
                 Ok((_, state)) => state,
             };
 
-            println!("{:?} {:?}", reader_buf, sender_buf);
-
             handle_stream_with_preexisting_state(
                 client_socket,
                 reader_buf,

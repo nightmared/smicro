@@ -1,25 +1,15 @@
-use std::{f64::consts, fmt::Debug, num::Wrapping};
+use std::fmt::Debug;
 
-use aead::{AeadMutInPlace, Nonce};
-use aes_gcm::Aes256Gcm as OfficialAes256Gcm;
-use cipher::BlockCipherEncrypt;
-use cipher::{Iv, KeyIvInit, StreamCipher, StreamCipherSeek};
+use cipher::{BlockCipherEncrypt, KeyInit};
 use hybrid_array::Array;
-use nom::{bytes::streaming::take, number::complete::be_u32, IResult};
-use universal_hash::KeyInit;
+use nom::{bytes::streaming::take, IResult};
 
 use smicro_macros::{
     create_wrapper_enum_implementing_trait, declare_crypto_arg, declare_deserializable_struct,
     gen_serialize_impl,
 };
 use smicro_types::{
-    deserialize::{self, DeserializePacket},
-    error::ParsingError,
-    serialize::SerializePacket,
-    ssh::{
-        deserialize::{const_take, streaming_const_take},
-        types::SharedSSHSlice,
-    },
+    deserialize::DeserializePacket, error::ParsingError, serialize::SerializePacket,
 };
 
 use crate::{
@@ -53,7 +43,7 @@ pub trait CipherAllocator {
     fn from_key(&self, raw_key: &[u8], raw_iv: &[u8]) -> Result<CipherWrapper, Error>;
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 #[declare_crypto_arg("chacha20-poly1305@openssh.com")]
 #[declare_deserializable_struct]
 #[gen_serialize_impl]
@@ -91,7 +81,7 @@ impl CipherAllocator for Chacha20Poly1305 {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 #[declare_crypto_arg("aes256-gcm@openssh.com")]
 #[declare_deserializable_struct]
 #[gen_serialize_impl]
@@ -129,7 +119,7 @@ impl CipherAllocator for Aes256Gcm {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 #[declare_crypto_arg("aes256-ctr")]
 #[declare_deserializable_struct]
 #[gen_serialize_impl]

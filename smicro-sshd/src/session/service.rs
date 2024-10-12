@@ -109,7 +109,7 @@ impl ExpectsUserAuthRequest {
         let verifier = match negotiate_alg_signing_algorithms(&[&String::from_utf8_lossy(
             &authorized_key.key_type,
         )]) {
-            Ok(v) => v,
+            Ok(v) => v[0].clone(),
             Err(_) => {
                 info!("Unsupported key type {}", req.public_key_alg_name);
                 return Ok(PubkeyAuthDecision::Rejected);

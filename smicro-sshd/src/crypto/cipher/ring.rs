@@ -201,7 +201,7 @@ impl Cipher for Aes256GcmImpl {
             )));
         }
         // ensure there is enought data in the input slice
-        let (next_data, _) = take(pkt_size as usize + AES256GCM_TAG_SIZE)(next_data)?;
+        let _ = take(pkt_size as usize + AES256GCM_TAG_SIZE)(next_data)?;
 
         let nonce = Nonce::try_assume_unique_for_key(&self.keys.0[1].0)
             .expect("Invalid nonce size: impossible!?");

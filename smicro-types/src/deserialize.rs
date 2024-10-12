@@ -6,7 +6,7 @@ use nom::{
 
 use crate::{
     error::ParsingError,
-    ssh::types::{SSHSlice, SharedSSHSlice, SlowSSHSlice},
+    ssh::types::{SharedSSHSlice, SlowSSHSlice},
 };
 
 pub trait DeserializePacket<'a>: Sized {

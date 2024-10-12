@@ -17,7 +17,6 @@ pub(crate) fn declare_crypto_arg_inner(
     let struct_name = &ast.ident;
 
     Ok(quote! {
-        #[derive(Clone)]
         #ast
 
         impl crate::crypto::CryptoAlgName for #struct_name {
@@ -111,7 +110,7 @@ pub(crate) fn declare_crypto_algs_list_inner(
             let ident = path.segments.last().unwrap();
             match_list.push(quote! {
                 if <#e>::NAME == client_alg.as_ref() {
-                    return Ok(#wrapper_name::#ident(<#e>::new()));
+                    res.push(#wrapper_name::#ident(<#e>::new()));
                 }
             });
         } else {
@@ -125,13 +124,18 @@ pub(crate) fn declare_crypto_algs_list_inner(
             [#name_list_values]
         };
 
-        pub fn #negotiate_alg_ident<T: AsRef<str>>(choices: &[T]) -> Result<#wrapper_name, crate::error::Error> {
+        pub fn #negotiate_alg_ident<T: AsRef<str>>(choices: &[T]) -> Result<Vec<#wrapper_name>, crate::error::Error> {
             use crate::crypto::CryptoAlgName;
+            let mut res = Vec::with_capacity(4);
             for client_alg in choices {
                 #(#match_list)*
             }
 
-            return Err(#error_value);
+            if res.len() == 0  {
+                return Err(#error_value);
+            }
+
+            Ok(res)
         }
     }
     .into())

@@ -12,7 +12,6 @@ thiserror = "1.0.50"
 smicro_common = { path = "../smicro-common", features = ["share_loop"] }
 smicro_macros = { path = "../smicro-macros" }
 smicro_types = { path = "../smicro-types" }
-chrono = "0.4.31"
 libc = "0.2.149"
 elliptic-curve = { version = "0.14.0-pre.5", features = ["ecdh", "sec1", "std"] }
 p521 = { version = "0.14.0-pre", features = ["sha512", "digest", "ecdh"] }
@@ -23,18 +22,19 @@ signature = "2.3.0-pre.3"
 sha2 = "0.10"
 digest = "0.10"
 hmac = { version = "0.12", features = ["reset"] }
-aead = "0.6.0-rc.0"
-aes-gcm = "0.11.0-pre.1"
 hybrid-array = "0.2.0-pre.9"
-chacha20 = { version = "0.10.0-pre.1", features = ["legacy"], optional = true }
 aes = "0.9.0-pre.1"
 cipher = "0.5.0-pre.6"
-poly1305 = { version = "0.9.0-pre", optional = true }
 universal-hash = "0.6.0-pre.0"
 mio = { version = "1.0.0", features = ["os-ext", "net"] }
 nix = { version = "0.29", features = ["event", "user"] }
 ring = { version = "0.17.8" }
 argh = { version = "0.1.12", features = ["help"], default-features = false }
 
+aead = { version = "0.6.0-rc.0", optional = true }
+chacha20 = { version = "0.10.0-pre.1", features = ["legacy"], optional = true }
+poly1305 = { version = "0.9.0-pre", optional = true }
+aes-gcm = { version = "0.11.0-pre.1", optional = true }
+
 [features]
-rustcrypto = ["dep:chacha20", "dep:poly1305"]
+rustcrypto = ["dep:aead", "dep:chacha20", "dep:poly1305", "dep:aes-gcm"]

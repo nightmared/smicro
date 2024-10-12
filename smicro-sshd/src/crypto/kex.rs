@@ -13,13 +13,13 @@ use smicro_macros::{
     create_wrapper_enum_implementing_trait, declare_crypto_arg, declare_deserializable_struct,
     gen_serialize_impl,
 };
-use smicro_types::ssh::types::{PositiveBigNum, SSHSlice, SharedSSHSlice};
+use smicro_types::ssh::types::{SSHSlice, SharedSSHSlice};
 use smicro_types::{deserialize::DeserializePacket, serialize::SerializePacket};
 
 use crate::{
     crypto::{
         compute_exchange_hash, derive_encryption_key,
-        sign::{KeyEcdsa, SignatureWithName, Signer},
+        sign::{SignatureWithName, Signer},
         CryptoAlg,
     },
     error::Error,
@@ -49,7 +49,7 @@ pub trait KEX {
     ) -> Result<(MessageKexEcdhReply, KexNegotiatedKeys), Error>;
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 #[declare_crypto_arg("ecdh-sha2-nistp521")]
 #[declare_deserializable_struct]
 #[gen_serialize_impl]
@@ -105,14 +105,7 @@ impl KEX for EcdhSha2Nistp521 {
         let key_name = matching_host_key.name();
 
         // Print the server host key to a byte string
-        let mut k_server = Vec::new();
-        KeyEcdsa {
-            name: key_name,
-            curve_name: matching_host_key.curve_name(),
-            key: PositiveBigNum(matching_host_key.public_sec1_part().as_bytes()),
-        }
-        .serialize(&mut k_server)?;
-        let k_server = SSHSlice(k_server);
+        let k_server = SSHSlice(matching_host_key.serialize_key()?);
 
         let q_server = SSHSlice(my_pubkey.to_sec1_bytes().to_vec());
 

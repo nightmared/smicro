@@ -31,7 +31,7 @@ pub trait MACAllocator {
     fn allocate_with_key(&self, key: &[u8]) -> Result<MACWrapper, Error>;
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 #[declare_crypto_arg("hmac-sha2-256")]
 #[declare_deserializable_struct]
 #[gen_serialize_impl]
@@ -53,7 +53,7 @@ impl MACAllocator for HmacSha2256 {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 #[declare_crypto_arg("hmac-sha2-512")]
 #[declare_deserializable_struct]
 #[gen_serialize_impl]

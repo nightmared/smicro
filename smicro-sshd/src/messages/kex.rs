@@ -1,4 +1,5 @@
 use std::cmp::max;
+use std::collections::HashSet;
 
 use log::{debug, error};
 use nom::number::complete::be_u32;
@@ -15,6 +16,7 @@ use smicro_types::ssh::{
     types::NameList,
 };
 
+use crate::crypto::sign::SignerWrapper;
 use crate::{
     crypto::{cipher::CipherAllocator, mac::MACAllocator, CryptoAlg, CryptoAlgs},
     error::Error,
@@ -33,8 +35,12 @@ pub fn gen_kex_initial_list(state: &mut State) -> MessageKeyExchangeInit {
         entries: kex_algorithms,
     };
 
+    let mut available_host_key_types = HashSet::new();
+    for host_key in &state.host_keys {
+        available_host_key_types.insert(host_key.name());
+    }
     let server_host_key_algorithms = NameList {
-        entries: SIGNING_ALGORITHMS_NAMES
+        entries: available_host_key_types
             .iter()
             .map(|x| x.to_string())
             .collect(),
@@ -135,23 +141,42 @@ pub const MAC_ALGORITHMS: _ = [
 ];
 
 impl MessageKeyExchangeInit {
-    pub fn compute_crypto_algs(&self) -> Result<CryptoAlgs, Error> {
+    pub fn compute_crypto_algs(&self, host_keys: &[SignerWrapper]) -> Result<CryptoAlgs, Error> {
         if self.first_kex_packet_follows {
             error!("first_kex_packet_follows is not supported");
             return Err(Error::Unsupported);
         }
 
-        let kex = negotiate_alg_kex_algorithms(&self.kex_algorithms.entries)?;
-        let host_key_alg =
+        let kex = negotiate_alg_kex_algorithms(&self.kex_algorithms.entries)?[0].clone();
+        let supported_host_key_algs =
             negotiate_alg_signing_algorithms(&self.server_host_key_algorithms.entries)?;
+        let host_key_alg = {
+            let mut host_key_alg = None;
+            'outer: for alg in supported_host_key_algs {
+                for host_key in host_keys {
+                    if host_key.name() == alg.name() {
+                        host_key_alg = Some(alg);
+                        break 'outer;
+                    }
+                }
+            }
+            match host_key_alg {
+                Some(x) => x,
+                None => return Err(Error::NoCommonSigningAlg),
+            }
+        };
         let client_to_server_cipher =
-            negotiate_alg_cipher_algorithms(&self.encryption_algorithms_client_to_server.entries)?;
+            negotiate_alg_cipher_algorithms(&self.encryption_algorithms_client_to_server.entries)?
+                [0]
+            .clone();
         let server_to_client_cipher =
-            negotiate_alg_cipher_algorithms(&self.encryption_algorithms_server_to_client.entries)?;
+            negotiate_alg_cipher_algorithms(&self.encryption_algorithms_server_to_client.entries)?
+                [0]
+            .clone();
         let client_to_server_mac =
-            negotiate_alg_mac_algorithms(&self.mac_algorithms_client_to_server.entries)?;
+            negotiate_alg_mac_algorithms(&self.mac_algorithms_client_to_server.entries)?[0].clone();
         let server_to_client_mac =
-            negotiate_alg_mac_algorithms(&self.mac_algorithms_server_to_client.entries)?;
+            negotiate_alg_mac_algorithms(&self.mac_algorithms_server_to_client.entries)?[0].clone();
 
         let cipher_max_length = |cipher: &dyn CipherAllocator| -> usize {
             max(

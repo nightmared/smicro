@@ -2,25 +2,21 @@ use std::io::Write;
 
 use ecdsa::Signature;
 use elliptic_curve::{
-    point::AffineCoordinates,
     sec1::{EncodedPoint, FromEncodedPoint},
     AffinePoint,
 };
-use nom::{bytes::streaming::take, Parser};
+use nom::Parser;
 use p521::NistP521;
-use ring::signature::{VerificationAlgorithm, ED25519};
+use ring::signature::{Ed25519KeyPair, KeyPair, VerificationAlgorithm, ED25519};
 use signature::Verifier;
 use smicro_macros::{
     create_wrapper_enum_implementing_trait, declare_crypto_arg, declare_deserializable_struct,
     gen_serialize_impl,
 };
+use smicro_types::deserialize::DeserializePacket;
 use smicro_types::serialize::SerializePacket;
 use smicro_types::sftp::deserialize::{parse_slice, parse_utf8_slice};
 use smicro_types::ssh::types::{PositiveBigNum, SharedSSHSlice};
-use smicro_types::{
-    deserialize::DeserializePacket,
-    ssh::deserialize::{const_take, streaming_const_take},
-};
 
 use crate::{
     crypto::{CryptoAlg, CryptoAlgName, KeyWrapper},
@@ -30,13 +26,13 @@ use crate::{
 use super::CryptoAlgWithKey;
 
 const ECDSA_SHA2_NISTPR521_CURVE_NAME: &'static str = "nistp521";
-const ED25519_CURVE_NAME: &'static str = "ed25519";
+const ED25519_SIZE_BYTES: usize = 32;
 const NISTP521_KEY_SIZE_BYTES: usize = 66;
 
 #[create_wrapper_enum_implementing_trait(name = SignerIdentifierWrapper, serializable = true, deserializable = true)]
 #[implementors(EcdsaSha2Nistp521, Ed25519)]
 pub trait SignerIdentifier {
-    fn curve_name(&self) -> &'static str;
+    fn curve_name(&self) -> Option<&'static str>;
 
     fn deserialize_buf_to_key<'a>(&self, buf: &'a [u8])
         -> Result<(&'a [u8], SignerWrapper), Error>;
@@ -49,7 +45,7 @@ pub trait SignerIdentifier {
     ) -> Result<bool, Error>;
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 #[declare_crypto_arg("ecdsa-sha2-nistp521")]
 #[declare_deserializable_struct]
 #[gen_serialize_impl]
@@ -62,8 +58,8 @@ impl CryptoAlg for EcdsaSha2Nistp521 {
 }
 
 impl SignerIdentifier for EcdsaSha2Nistp521 {
-    fn curve_name(&self) -> &'static str {
-        ECDSA_SHA2_NISTPR521_CURVE_NAME
+    fn curve_name(&self) -> Option<&'static str> {
+        Some(ECDSA_SHA2_NISTPR521_CURVE_NAME)
     }
 
     fn deserialize_buf_to_key<'a>(
@@ -119,7 +115,7 @@ impl SignerIdentifier for EcdsaSha2Nistp521 {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 #[declare_crypto_arg("ssh-ed25519")]
 #[declare_deserializable_struct]
 #[gen_serialize_impl]
@@ -132,18 +128,24 @@ impl CryptoAlg for Ed25519 {
 }
 
 impl SignerIdentifier for Ed25519 {
-    fn curve_name(&self) -> &'static str {
-        ED25519_CURVE_NAME
+    fn curve_name(&self) -> Option<&'static str> {
+        None
     }
 
     fn deserialize_buf_to_key<'a>(
         &self,
         buf: &'a [u8],
     ) -> Result<(&'a [u8], SignerWrapper), Error> {
-        let (next_data, point_data) = parse_slice(buf)?;
+        let (next_data, public_key_data) = parse_slice(buf)?;
         let (next_data, secret_key_data) = parse_slice(next_data)?;
 
-        unimplemented!()
+        Ok((
+            next_data,
+            SignerWrapper::KeyWrapperEd25519Signer(KeyWrapper::new(&[
+                public_key_data,
+                secret_key_data,
+            ])?),
+        ))
     }
 
     fn signature_is_valid(
@@ -162,18 +164,16 @@ impl SignerIdentifier for Ed25519 {
 }
 
 #[create_wrapper_enum_implementing_trait(name = SignerWrapper, serializable = true, deserializable = true)]
-#[implementors(KeyWrapper::<EcdsaSha2Nistp521Signer>)]
+#[implementors(KeyWrapper::<EcdsaSha2Nistp521Signer>, KeyWrapper::<Ed25519Signer>)]
 pub trait Signer {
     fn key_name(&self) -> &'static str;
-    fn curve_name(&self) -> &'static str;
+    fn curve_name(&self) -> Option<&'static str>;
 
     fn integer_size_bytes(&self) -> usize;
 
     fn sign(&self, data_to_sign: &[u8], output: &mut dyn Write) -> Result<(), Error>;
 
-    fn public_sec1_part(&self) -> Vec<u8>;
-
-    fn public_key_x(&self) -> Vec<u8>;
+    fn serialize_key(&self) -> Result<Vec<u8>, Error>;
 }
 
 #[declare_crypto_arg("ecdsa-sha2-nistp521")]
@@ -214,8 +214,8 @@ impl Signer for EcdsaSha2Nistp521Signer {
         EcdsaSha2Nistp521::NAME
     }
 
-    fn curve_name(&self) -> &'static str {
-        ECDSA_SHA2_NISTPR521_CURVE_NAME
+    fn curve_name(&self) -> Option<&'static str> {
+        Some(ECDSA_SHA2_NISTPR521_CURVE_NAME)
     }
 
     fn integer_size_bytes(&self) -> usize {
@@ -236,16 +236,68 @@ impl Signer for EcdsaSha2Nistp521Signer {
         Ok(())
     }
 
-    fn public_sec1_part(&self) -> Vec<u8> {
-        self.0
-            .verifying_key()
-            .to_encoded_point(false)
-            .as_bytes()
-            .to_vec()
+    fn serialize_key(&self) -> Result<Vec<u8>, Error> {
+        let mut k_server = Vec::new();
+        KeyEcdsa {
+            name: self.key_name(),
+            curve_name: ECDSA_SHA2_NISTPR521_CURVE_NAME,
+            key: PositiveBigNum(self.0.verifying_key().to_encoded_point(false).as_bytes()),
+        }
+        .serialize(&mut k_server)?;
+
+        Ok(k_server)
+    }
+}
+
+#[declare_crypto_arg("ssh-ed25519")]
+pub struct Ed25519Signer(Ed25519KeyPair);
+
+impl CryptoAlgWithKey for Ed25519Signer {
+    fn new(keys: &[&[u8]]) -> Result<Self, Error>
+    where
+        Self: Sized,
+    {
+        let public_key_data = keys[0];
+        let secret_key_data = keys[1];
+
+        // secret_key_data contains the 32 bytes prefix and then a copy of the public key
+        // Extract the private key
+        let private_key_seed = &secret_key_data[..ED25519_SIZE_BYTES];
+        let key_pair = Ed25519KeyPair::from_seed_and_public_key(private_key_seed, public_key_data)
+            .map_err(|_| Error::KeyLoadingError(KeyLoadingError::NotASecretKey))?;
+
+        Ok(Ed25519Signer(key_pair))
+    }
+}
+
+impl Signer for Ed25519Signer {
+    fn key_name(&self) -> &'static str {
+        Ed25519::NAME
     }
 
-    fn public_key_x(&self) -> Vec<u8> {
-        self.0.verifying_key().as_affine().x().to_vec()
+    fn curve_name(&self) -> Option<&'static str> {
+        None
+    }
+
+    fn integer_size_bytes(&self) -> usize {
+        ED25519_SIZE_BYTES
+    }
+
+    fn sign(&self, data_to_sign: &[u8], output: &mut dyn Write) -> Result<(), Error> {
+        let signature = self.0.sign(data_to_sign);
+
+        Ok(signature.as_ref().serialize(output)?)
+    }
+
+    fn serialize_key(&self) -> Result<Vec<u8>, Error> {
+        let mut k_server = Vec::new();
+        Ed25519Key {
+            name: self.key_name(),
+            key: SharedSSHSlice(self.0.public_key().as_ref()),
+        }
+        .serialize(&mut k_server)?;
+
+        Ok(k_server)
     }
 }
 
@@ -254,7 +306,7 @@ impl<T: Signer> Signer for KeyWrapper<T> {
         self.inner.key_name()
     }
 
-    fn curve_name(&self) -> &'static str {
+    fn curve_name(&self) -> Option<&'static str> {
         self.inner.curve_name()
     }
 
@@ -266,12 +318,8 @@ impl<T: Signer> Signer for KeyWrapper<T> {
         self.inner.sign(data_to_sign, output)
     }
 
-    fn public_sec1_part(&self) -> Vec<u8> {
-        self.inner.public_sec1_part()
-    }
-
-    fn public_key_x(&self) -> Vec<u8> {
-        self.inner.public_key_x()
+    fn serialize_key(&self) -> Result<Vec<u8>, Error> {
+        self.inner.serialize_key()
     }
 }
 

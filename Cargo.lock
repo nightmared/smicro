@@ -911,7 +911,6 @@ dependencies = [
  "argh",
  "base64",
  "chacha20",
- "chrono",
  "cipher",
  "digest 0.10.7",
  "ecdsa",

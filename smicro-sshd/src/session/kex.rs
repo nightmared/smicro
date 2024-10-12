@@ -58,7 +58,7 @@ pub struct KexSent {
 impl KexSent {
     pub fn inner_process<const SIZE: usize, W: LoopingBufferWriter<SIZE>>(
         &self,
-        _state: &mut State,
+        state: &mut State,
         _writer: &mut W,
         _message_type: MessageType,
         message_data: &[u8],
@@ -66,7 +66,7 @@ impl KexSent {
         let (_, msg) = MessageKeyExchangeInit::deserialize(message_data)?;
         debug!("Received a key exchange init message: {:?}", msg);
 
-        let crypto_algs = msg.compute_crypto_algs()?;
+        let crypto_algs = msg.compute_crypto_algs(state.host_keys.as_slice())?;
         debug!("Cryptographic algorithms exchanged");
 
         let next_state = KexReceived {
