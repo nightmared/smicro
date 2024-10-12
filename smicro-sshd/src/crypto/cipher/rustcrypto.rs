@@ -241,7 +241,7 @@ impl Cipher for Aes256GcmImpl {
             .map_err(|_| Error::EncryptionError)?;
 
         // succeeded -> let's update the nonce
-        self.nonce = self.get_next_nonce_value();
+        self.increment_nonce();
 
         data[cleartext_data_end..].copy_from_slice(tag.as_slice());
 
@@ -279,7 +279,7 @@ impl Cipher for Aes256GcmImpl {
             .map_err(|_| nom::Err::Failure(ParsingError::InvalidMac))?;
 
         // valid decryption: update the nonce
-        self.nonce = self.get_next_nonce_value();
+        self.increment_nonce();
 
         let next_data = &input[AES256GCM_TAG_SIZE + 4 + pkt_size as usize..];
         let cur_pkt_plaintext = &input[..4 + pkt_size as usize];
@@ -289,9 +289,8 @@ impl Cipher for Aes256GcmImpl {
 }
 
 impl Aes256GcmImpl {
-    fn get_next_nonce_value(&self) -> Array<u8, cipher::consts::U12> {
+    fn increment_nonce(&mut self) {
         // TODO: is this constant-time?
-        let mut next_nonce = self.nonce;
         let next_invocation_counter = Wrapping(u64::from_be_bytes([
             self.nonce[4],
             self.nonce[5],
@@ -302,8 +301,6 @@ impl Aes256GcmImpl {
             self.nonce[10],
             self.nonce[11],
         ])) + Wrapping(1u64);
-        next_nonce[4..].clone_from_slice(&next_invocation_counter.0.to_be_bytes());
-
-        next_nonce
+        self.nonce[4..].clone_from_slice(&next_invocation_counter.0.to_be_bytes());
     }
 }
