@@ -53,7 +53,7 @@ struct Chacha20Poly1305ImplRingInner {
 impl Clone for Chacha20Poly1305ImplRingInner {
     fn clone(&self) -> Self {
         Self {
-            raw_key: self.raw_key.clone(),
+            raw_key: self.raw_key,
             decrypt: chacha20_poly1305_openssh::OpeningKey::new(&self.raw_key),
             encrypt: chacha20_poly1305_openssh::SealingKey::new(&self.raw_key),
         }

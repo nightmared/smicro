@@ -60,7 +60,7 @@ pub fn gen_serialize_impl(_attrs: TokenStream, item: TokenStream) -> TokenStream
 #[proc_macro_attribute]
 pub fn declare_response_packet(attrs: TokenStream, item: TokenStream) -> TokenStream {
     match response::declare_response_packet_inner(attrs, item) {
-        Ok(tokens) => tokens.into(),
+        Ok(tokens) => tokens,
         Err(diag) => diag.emit_as_item_tokens().into(),
     }
 }
@@ -68,7 +68,7 @@ pub fn declare_response_packet(attrs: TokenStream, item: TokenStream) -> TokenSt
 #[proc_macro_attribute]
 pub fn declare_deserializable_struct(_attrs: TokenStream, item: TokenStream) -> TokenStream {
     match deserialize::declare_deserializable_struct_inner(item) {
-        Ok(tokens) => tokens.into(),
+        Ok(tokens) => tokens,
         Err(diag) => diag.emit_as_item_tokens().into(),
     }
 }
@@ -183,7 +183,7 @@ pub fn declare_message(attrs: TokenStream, item: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn declare_session_state(attrs: TokenStream, item: TokenStream) -> TokenStream {
     match session_states::declare_session_state_inner(attrs, item) {
-        Ok(tokens) => tokens.into(),
+        Ok(tokens) => tokens,
         Err(diag) => diag.emit_as_item_tokens().into(),
     }
 }
@@ -194,7 +194,7 @@ pub fn create_wrapper_enum_implementing_trait(
     item: TokenStream,
 ) -> TokenStream {
     match wrapper_enum::create_wrapper_enum_implementing_trait_inner(attrs, item) {
-        Ok(tokens) => tokens.into(),
+        Ok(tokens) => tokens,
         Err(diag) => diag.emit_as_item_tokens().into(),
     }
 }
@@ -202,7 +202,7 @@ pub fn create_wrapper_enum_implementing_trait(
 #[proc_macro_attribute]
 pub fn declare_crypto_arg(attrs: TokenStream, item: TokenStream) -> TokenStream {
     match crypto_arg::declare_crypto_arg_inner(attrs, item) {
-        Ok(tokens) => tokens.into(),
+        Ok(tokens) => tokens,
         Err(diag) => diag.emit_as_item_tokens().into(),
     }
 }
@@ -210,7 +210,7 @@ pub fn declare_crypto_arg(attrs: TokenStream, item: TokenStream) -> TokenStream 
 #[proc_macro_attribute]
 pub fn declare_crypto_algs_list(attrs: TokenStream, item: TokenStream) -> TokenStream {
     match crypto_arg::declare_crypto_algs_list_inner(attrs, item) {
-        Ok(tokens) => tokens.into(),
+        Ok(tokens) => tokens,
         Err(diag) => diag.emit_as_item_tokens().into(),
     }
 }

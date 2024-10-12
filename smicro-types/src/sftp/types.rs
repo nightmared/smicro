@@ -44,7 +44,7 @@ pub enum AttrsFlags {
     Time = 8,
 }
 
-#[derive(Debug)]
+#[derive(Default, Debug)]
 pub struct Attrs {
     pub attribute_flags: u32,
     pub size: Option<u64>,
@@ -56,20 +56,8 @@ pub struct Attrs {
 }
 
 impl Attrs {
-    pub fn new() -> Self {
-        Self {
-            attribute_flags: 0,
-            size: None,
-            uid: None,
-            gid: None,
-            permissions: None,
-            atime: None,
-            mtime: None,
-        }
-    }
-
     pub fn from_metadata(meta: &Metadata) -> Self {
-        let mut res = Self::new();
+        let mut res = Self::default();
 
         res.attribute_flags |= AttrsFlags::Permissions as u32;
         res.permissions = Some(meta.permissions().mode());

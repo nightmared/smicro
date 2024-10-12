@@ -25,7 +25,7 @@ use crate::{
 
 use super::CryptoAlgWithKey;
 
-const ECDSA_SHA2_NISTPR521_CURVE_NAME: &'static str = "nistp521";
+const ECDSA_SHA2_NISTPR521_CURVE_NAME: &str = "nistp521";
 const ED25519_SIZE_BYTES: usize = 32;
 const NISTP521_KEY_SIZE_BYTES: usize = 66;
 
@@ -108,7 +108,7 @@ impl SignerIdentifier for EcdsaSha2Nistp521 {
         let r = expand_bignum(raw_ecdsa_sig.r)?;
         let s = expand_bignum(raw_ecdsa_sig.s)?;
 
-        let ecdsa_sig = <ecdsa::Signature<NistP521>>::from_scalars(&r, &s)
+        let ecdsa_sig = <ecdsa::Signature<NistP521>>::from_scalars(r, s)
             .map_err(|_| Error::InvalidSignature)?;
 
         Ok(signer.verify(message, &ecdsa_sig).is_ok())
@@ -213,7 +213,7 @@ impl Signer for EcdsaSha2Nistp521Signer {
         NISTP521_KEY_SIZE_BYTES
     }
 
-    fn sign(&self, data_to_sign: &[u8], mut output: &mut dyn Write) -> Result<(), Error> {
+    fn sign(&self, data_to_sign: &[u8], output: &mut dyn Write) -> Result<(), Error> {
         let data = (&self.0 as &dyn signature::Signer<Signature<NistP521>>)
             .try_sign(data_to_sign)
             .map_err(|_| Error::SigningError)?
@@ -222,7 +222,7 @@ impl Signer for EcdsaSha2Nistp521Signer {
         let r = PositiveBigNum(&data[0..self.integer_size_bytes()]);
         let s = PositiveBigNum(&data[self.integer_size_bytes()..]);
 
-        EcdsaSignature { r, s }.serialize(&mut output)?;
+        EcdsaSignature { r, s }.serialize(output)?;
 
         Ok(())
     }
@@ -313,7 +313,7 @@ pub struct KeyEcdsa<'a> {
     name: &'a str,
     #[field(parser = parse_utf8_slice)]
     curve_name: &'a str,
-    #[field(parser = parse_slice.map(|x| PositiveBigNum(x)))]
+    #[field(parser = parse_slice.map(PositiveBigNum))]
     key: PositiveBigNum<'a>,
 }
 

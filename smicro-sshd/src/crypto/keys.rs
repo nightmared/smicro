@@ -62,7 +62,7 @@ pub fn load_hostkey(hostkey_file: &Path) -> Result<SignerWrapper, Error> {
     let key_base64encoded = key_parser.parse(file_content.as_slice())?.1;
     let key_openssh_raw = STANDARD
         .decode(key_base64encoded)
-        .map_err(|e| KeyLoadingError::from(e))?;
+        .map_err(KeyLoadingError::from)?;
 
     let key_openssh_raw_data =
         preceded(tag("openssh-key-v1\0"), rest)(key_openssh_raw.as_slice())?.1;
@@ -72,14 +72,14 @@ pub fn load_hostkey(hostkey_file: &Path) -> Result<SignerWrapper, Error> {
     let nb_keys = key_openssh_raw_serialized.key_number as usize;
 
     if nb_keys != 1 {
-        return Err(KeyLoadingError::InvalidNumberOfKeys)?;
+        Err(KeyLoadingError::InvalidNumberOfKeys)?;
     }
 
     if key_openssh_raw_serialized.kdfname != "none"
         || key_openssh_raw_serialized.ciphername != "none"
-        || key_openssh_raw_serialized.kdfoptions != []
+        || !key_openssh_raw_serialized.kdfoptions.is_empty()
     {
-        return Err(KeyLoadingError::PassphraseProtectedKeyUnsupported)?;
+        Err(KeyLoadingError::PassphraseProtectedKeyUnsupported)?;
     }
 
     let next_data = key_openssh_raw_serialized.key_data;
@@ -90,7 +90,7 @@ pub fn load_hostkey(hostkey_file: &Path) -> Result<SignerWrapper, Error> {
     let (next_data, checkint2) = be_u32(next_data)?;
 
     if checkint1 != checkint2 {
-        return Err(KeyLoadingError::InvalidIntegersCheck)?;
+        Err(KeyLoadingError::InvalidIntegersCheck)?;
     }
 
     let (next_data, private_key_type) = parse_utf8_string(next_data)?;
@@ -104,9 +104,9 @@ pub fn load_hostkey(hostkey_file: &Path) -> Result<SignerWrapper, Error> {
 
     // ensure a proper padding
     let mut pad_pos = 1;
-    while next_data != [] {
+    while !next_data.is_empty() {
         if next_data[0] != pad_pos {
-            return Err(KeyLoadingError::InvalidBlockPadding)?;
+            Err(KeyLoadingError::InvalidBlockPadding)?;
         }
 
         pad_pos += 1;
@@ -130,14 +130,14 @@ pub struct AuthorizedKey {
 }
 
 pub fn load_public_key_list(allowed_keys: &Path) -> Result<Vec<AuthorizedKey>, KeyLoadingError> {
-    let mut f = File::open(&allowed_keys)?;
+    let mut f = File::open(allowed_keys)?;
     let mut file_content = Vec::with_capacity(4096);
     f.read_to_end(&mut file_content)?;
 
     let mut results = Vec::new();
 
     let mut next_data = file_content.as_slice();
-    while next_data.len() > 0 {
+    while !next_data.is_empty() {
         let (remain, entry) = terminated(take_while(|c| c != b'\n'), tag("\n"))(next_data)?;
         next_data = remain;
 
@@ -201,10 +201,8 @@ pub fn load_public_key_list(allowed_keys: &Path) -> Result<Vec<AuthorizedKey>, K
         let mut parser =
             key_parser().or(tuple((opts_parser, key_parser())).map(|(options, key)| {
                 key.map(|mut key| {
-                    for opt in options {
-                        if let Some(opt) = opt {
-                            key.options.push(opt);
-                        }
+                    for opt in options.into_iter().flatten() {
+                        key.options.push(opt);
                     }
                     key
                 })

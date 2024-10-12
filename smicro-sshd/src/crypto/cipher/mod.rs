@@ -267,7 +267,7 @@ impl Cipher for Aes256CtrImpl {
 
 impl Aes256CtrImpl {
     fn cipher_main_message(&mut self, mut bytes: &mut [u8]) {
-        while bytes.len() > 0 {
+        while !bytes.is_empty() {
             let (block, next_bytes) = bytes.split_at_mut(Aes256Ctr::BLOCK_SIZE_BYTES);
             self.cipher_block(block);
             bytes = next_bytes;
@@ -275,7 +275,7 @@ impl Aes256CtrImpl {
     }
 
     fn get_and_increment_ctr(&mut self) -> Array<u8, cipher::consts::U16> {
-        let original_ctr = self.ctr.clone();
+        let original_ctr = self.ctr;
 
         // increment the counter in a constant-time manner: copied from openssh
         // (https://github.com/openssh/openssh-portable/blob/c276672fc0e99f0c4389988d54a84c203ce325b6/cipher-aesctr.c#L42-L52)

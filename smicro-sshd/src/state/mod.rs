@@ -23,7 +23,7 @@ pub mod channel;
 
 use self::channel::ChannelManager;
 
-pub const IDENTIFIER_STRING: &'static str = "SSH-2.0-smicro_ssh";
+pub const IDENTIFIER_STRING: &str = "SSH-2.0-smicro_ssh";
 
 // We cannot serialize/deserialize a ThreadRng, so let's just recreate one from scratch
 fn create_rng(input: &[u8]) -> nom::IResult<&[u8], ThreadRng, ParsingError> {

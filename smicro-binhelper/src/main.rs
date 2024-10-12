@@ -48,7 +48,7 @@ fn process_command(
             debug!("Got the status code {status:?} handling a packet");
             ResponseWrapper::Status(ResponseStatus::new(status))
         }
-        Err(Error::IoError(e)) => {
+        Err(Error::Io(e)) => {
             let code = match e.kind() {
                 IOErrorKind::NotFound => StatusCode::NoSuchFile,
                 IOErrorKind::InvalidData => StatusCode::BadMessage,

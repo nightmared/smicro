@@ -9,7 +9,7 @@ pub enum Error {
     #[error("Couldn't set a logger")]
     SetLoggerFailed(#[from] log::SetLoggerError),
     #[error("An error occured during an IO operation")]
-    IoError(#[from] std::io::Error),
+    Io(#[from] std::io::Error),
     #[error("Received an invalid packet")]
     InvalidPacket,
     #[error("Invalid UTF-8 input from the client")]
@@ -21,9 +21,9 @@ pub enum Error {
     )]
     Infallible(#[from] Infallible),
     #[error("An error ocurred parsing a packet")]
-    ParsingError(#[from] nom::Err<ParsingError>),
+    Parsing(#[from] nom::Err<ParsingError>),
     #[error("As a path contains a null byte, it cannot be converted to a CString")]
-    NulError(#[from] NulError),
+    Nul(#[from] NulError),
     #[error("Could not create a buffer")]
-    BufferCreationError(#[from] smicro_common::BufferCreationError),
+    BufferCreation(#[from] smicro_common::BufferCreationError),
 }

@@ -196,7 +196,7 @@ impl AcceptsChannelMessages {
 
                 let chan = state.channels.get_channel(msg.recipient_channel)?;
 
-                if let Err(_) = handle_channel_request(&mut state.sender, writer, msg, chan) {
+                if handle_channel_request(&mut state.sender, writer, msg, chan).is_err() {
                     let failure = MessageChannelFailure {
                         recipient_channel: chan.remote_channel_number,
                     };
@@ -220,7 +220,7 @@ impl AcceptsChannelMessages {
                         return Err(Error::ExceededChannelLength);
                     }
 
-                    if let Err(_) = cmd.stdin_buffer.write(msg.data.0) {
+                    if cmd.stdin_buffer.write(msg.data.0).is_err() {
                         return Err(Error::IoError(std::io::Error::new(
                             std::io::ErrorKind::WouldBlock,
                             "Could not write data to the stdin buffer",

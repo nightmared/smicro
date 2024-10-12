@@ -27,13 +27,21 @@ pub(crate) enum SessionStateAllowedAfterKex {
     AcceptsChannelMessages(super::AcceptsChannelMessages),
 }
 
-impl Into<PacketProcessingDecision> for SessionStateAllowedAfterKex {
-    fn into(self) -> PacketProcessingDecision {
-        PacketProcessingDecision::NewState(SessionStates::SessionStateEstablished(match self {
-            Self::ExpectsServiceRequest(x) => SessionStateEstablished::ExpectsServiceRequest(x),
-            Self::ExpectsUserAuthRequest(x) => SessionStateEstablished::ExpectsUserAuthRequest(x),
-            Self::ExpectsChannelOpen(x) => SessionStateEstablished::ExpectsChannelOpen(x),
-            Self::AcceptsChannelMessages(x) => SessionStateEstablished::AcceptsChannelMessages(x),
+impl From<SessionStateAllowedAfterKex> for PacketProcessingDecision {
+    fn from(obj: SessionStateAllowedAfterKex) -> Self {
+        PacketProcessingDecision::NewState(SessionStates::SessionStateEstablished(match obj {
+            SessionStateAllowedAfterKex::ExpectsServiceRequest(x) => {
+                SessionStateEstablished::ExpectsServiceRequest(x)
+            }
+            SessionStateAllowedAfterKex::ExpectsUserAuthRequest(x) => {
+                SessionStateEstablished::ExpectsUserAuthRequest(x)
+            }
+            SessionStateAllowedAfterKex::ExpectsChannelOpen(x) => {
+                SessionStateEstablished::ExpectsChannelOpen(x)
+            }
+            SessionStateAllowedAfterKex::AcceptsChannelMessages(x) => {
+                SessionStateEstablished::AcceptsChannelMessages(x)
+            }
         }))
     }
 }
@@ -100,7 +108,7 @@ impl KexReceived {
         debug!("Received an ECDH key exchange request: {:?}", msg);
         let crypto_algs = self.new_crypto_algs.clone();
         let (ecdh_reply, negotiated_keys) =
-            crypto_algs.kex.perform_key_exchange(state, &msg, &self)?;
+            crypto_algs.kex.perform_key_exchange(state, &msg, self)?;
 
         write_message(&mut state.sender, writer, &ecdh_reply)?;
 
@@ -148,7 +156,7 @@ impl KexReplySent {
         _message_type: MessageType,
         message_data: &[u8],
     ) -> Result<PacketProcessingDecision, Error> {
-        if message_data != [] {
+        if !message_data.is_empty() {
             return Err(Error::DataInNewKeysMessage);
         }
 

@@ -72,7 +72,7 @@ impl KEX for EcdhSha2Nistp521 {
 
         // Compute the shared secret
         let peer_pubkey: EcPublicKey<p521::NistP521> =
-            EcPublicKey::from_sec1_bytes(&ecdh_init.q_client)?;
+            EcPublicKey::from_sec1_bytes(ecdh_init.q_client)?;
 
         // Elliptic Curve Public Key Validation Primitive (see https://www.secg.org/sec1-v2.pdf)
         // `from_sec1_bytes` checks for us that the point is not "at infinity" and that the
@@ -92,16 +92,11 @@ impl KEX for EcdhSha2Nistp521 {
         let my_pubkey = my_secret.public_key();
 
         // Retrieve the host key
-        let match_host_key = || {
-            for host_key in state.host_keys.iter() {
-                if host_key.name() == crypto_algs.host_key_alg.name() {
-                    return Some(host_key);
-                }
-            }
-            None
-        };
-        let matching_host_key =
-            match_host_key().ok_or(Error::NoGoodHostKeyFound(crypto_algs.host_key_alg.name()))?;
+        let matching_host_key = state
+            .host_keys
+            .iter()
+            .find(|host_key| host_key.name() == crypto_algs.host_key_alg.name())
+            .ok_or(Error::NoGoodHostKeyFound(crypto_algs.host_key_alg.name()))?;
         let key_name = matching_host_key.name();
 
         // Print the server host key to a byte string

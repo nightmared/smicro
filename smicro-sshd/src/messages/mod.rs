@@ -66,7 +66,7 @@ pub struct MessageDisconnect<'a> {
     language: &'a str,
 }
 
-impl<'a> MessageDisconnect<'a> {
+impl MessageDisconnect<'_> {
     pub fn new(reason: DisconnectReason) -> MessageDisconnect<'static> {
         MessageDisconnect {
             reason,
@@ -159,7 +159,7 @@ pub struct MessageChannelOpenFailure<'a> {
     language: &'a str,
 }
 
-impl<'a> MessageChannelOpenFailure<'a> {
+impl MessageChannelOpenFailure<'_> {
     pub fn new(
         recipient_channel: u32,
         reason: ChannelOpenFailureReason,

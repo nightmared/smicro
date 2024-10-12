@@ -79,7 +79,7 @@ pub fn create_circular_buffer_from_existing_fd(
         }
 
         let second_map = libc::mmap(
-            overwritable_mapping.offset(buf_size as isize),
+            overwritable_mapping.add(buf_size),
             buf_size,
             libc::PROT_READ | libc::PROT_WRITE,
             libc::MAP_FIXED | libc::MAP_SHARED,
@@ -117,7 +117,7 @@ pub fn create_circular_buffer_from_existing_fd(
 
 pub fn create_memfd(buf_size: usize) -> Result<i32, BufferCreationError> {
     unsafe {
-        let fd = libc::memfd_create(b"read_buffer\0".as_ptr() as *const i8, 0);
+        let fd = libc::memfd_create(c"read_buffer".as_ptr(), 0);
         if fd == -1 {
             return Err(BufferCreationError::VirtualFileCreationFailed(
                 std::io::Error::last_os_error(),
@@ -156,7 +156,7 @@ pub trait LoopingBufferWriter<const SIZE: usize> {
 
 pub trait LoopingBufferReader<const SIZE: usize> {
     /// Return a buffer that contains initialized data
-    fn get_readable_data<'a>(&'a mut self) -> &'a mut [u8];
+    fn get_readable_data(&mut self) -> &mut [u8];
 
     /// Decrease the buffer length by `offset` bytes (`offset` being
     /// the number of bytes that were consumed in the buffer and can be discarded).
@@ -218,7 +218,7 @@ impl<const SIZE: usize> LoopingBuffer<SIZE> {
     /// to the backing LoopingBuffer when calling `commit()`. This means that
     /// all writes will be registered at once, or will not be (if an error happened
     /// at some point).
-    pub fn get_atomic_writer<'a>(&'a mut self) -> AtomicLoopingBufferWriter<'a, SIZE> {
+    pub fn get_atomic_writer(&mut self) -> AtomicLoopingBufferWriter<'_, SIZE> {
         let end_pos = self.end_pos;
         AtomicLoopingBufferWriter {
             inner: self,
@@ -301,7 +301,7 @@ impl<const SIZE: usize> LoopingBuffer<SIZE> {
 }
 
 impl<const SIZE: usize> LoopingBufferReader<SIZE> for LoopingBuffer<SIZE> {
-    fn get_readable_data<'a>(&'a mut self) -> &'a mut [u8] {
+    fn get_readable_data(&mut self) -> &mut [u8] {
         &mut self.buf[self.start_pos..self.end_pos]
     }
 
@@ -356,14 +356,14 @@ pub struct AtomicLoopingBufferWriter<'a, const SIZE: usize> {
     end_pos: usize,
 }
 
-impl<'a, const SIZE: usize> AtomicLoopingBufferWriter<'a, SIZE> {
+impl<const SIZE: usize> AtomicLoopingBufferWriter<'_, SIZE> {
     pub fn commit(self) {
         self.inner
             .advance_writer_pos(self.end_pos - self.inner.end_pos);
     }
 }
 
-impl<'a, const SIZE: usize> LoopingBufferWriter<SIZE> for AtomicLoopingBufferWriter<'a, SIZE> {
+impl<const SIZE: usize> LoopingBufferWriter<SIZE> for AtomicLoopingBufferWriter<'_, SIZE> {
     fn advance_writer_pos(&mut self, offset: usize) {
         let new_size = self.end_pos + offset - self.inner.start_pos;
         if new_size > SIZE {

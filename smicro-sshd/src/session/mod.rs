@@ -62,9 +62,9 @@ define_state_list!(
     AcceptsChannelMessages
 );
 
-impl Into<PacketProcessingDecision> for SessionStateEstablished {
-    fn into(self) -> PacketProcessingDecision {
-        PacketProcessingDecision::NewState(SessionStates::SessionStateEstablished(self))
+impl From<SessionStateEstablished> for PacketProcessingDecision {
+    fn from(obj: SessionStateEstablished) -> Self {
+        PacketProcessingDecision::NewState(SessionStates::SessionStateEstablished(obj))
     }
 }
 

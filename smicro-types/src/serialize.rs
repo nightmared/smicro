@@ -71,7 +71,7 @@ impl SerializePacket for usize {
     }
 }
 
-impl<'a> SerializePacket for &'a str {
+impl SerializePacket for &str {
     fn get_size(&self) -> usize {
         4 + self.len()
     }
@@ -124,7 +124,7 @@ macro_rules! serializepacket_iterator_over_elements {
 
 serializepacket_iterator_over_elements!([T; N], T: SerializePacket, const N: usize);
 
-impl<'a> SerializePacket for &'a [u8] {
+impl SerializePacket for &[u8] {
     fn get_size(&self) -> usize {
         self.len()
     }
@@ -159,9 +159,9 @@ where
     }
 }
 
-impl<'a, T: SerializePacket> SerializePacket for SharedSSHSlice<'a, T>
+impl<T: SerializePacket> SerializePacket for SharedSSHSlice<'_, T>
 where
-    &'a [T]: SerializePacket,
+    for<'a> &'a [T]: SerializePacket,
 {
     fn get_size(&self) -> usize {
         4 + self.0.get_size()
@@ -173,7 +173,7 @@ where
     }
 }
 
-impl<'a, T: SerializePacket> SerializePacket for SharedSlowSSHSlice<'a, T> {
+impl<T: SerializePacket> SerializePacket for SharedSlowSSHSlice<'_, T> {
     fn get_size(&self) -> usize {
         4 + self.0.iter().fold(0, |acc, elem| acc + elem.get_size())
     }
@@ -210,7 +210,7 @@ impl<T: SerializePacket> SerializePacket for Option<T> {
 
     fn serialize<W: Write>(&self, mut output: W) -> Result<(), std::io::Error> {
         if let Some(obj) = self {
-            output.write(&[1])?;
+            let _ = output.write(&[1])?;
             obj.serialize(output)
         } else {
             output.write(&[0]).map(|_| ())

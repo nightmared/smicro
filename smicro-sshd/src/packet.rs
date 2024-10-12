@@ -38,7 +38,7 @@ pub fn write_message<
     // length + padding_length + message_type + payload + random_padding, max not included
     let mut real_packet_length = 4 + 1 + 1 + payload.get_size() + padding_length;
     // BAD: probable timing oracle!
-    let (offset, multiple) = if let Some(ref cipher) = cipher {
+    let (offset, multiple) = if let Some(cipher) = cipher {
         if cipher.name() == "chacha20-poly1305@openssh.com" {
             (4, 8)
         } else if cipher.is_aead() {
@@ -58,7 +58,7 @@ pub fn write_message<
     sender.rng.fill(padding);
 
     let mut cipher_is_aead = false;
-    let required_space = if let Some(ref cipher) = cipher {
+    let required_space = if let Some(cipher) = cipher {
         cipher_is_aead = cipher.is_aead();
         cipher.required_space_to_encrypt(real_packet_length)
     } else {
@@ -91,7 +91,7 @@ pub fn write_message<
 
         // the packet_length field does not count in the packet size)
         ((real_packet_length - 4) as u32).serialize(&mut output_buffer)?;
-        output_buffer.write(&[padding_length as u8, T::get_message_type() as u8])?;
+        let _ = output_buffer.write(&[padding_length as u8, T::get_message_type() as u8])?;
         payload.serialize(&mut output_buffer)?;
         padding.as_ref().serialize(&mut output_buffer)?;
     }
@@ -100,7 +100,7 @@ pub fn write_message<
     if mac_len != 0 {
         if let Some(mac) = mac {
             let mac_buffer = &mut mac_buffer[..mac_len];
-            mac.compute(&output_buffer, sender.sequence_number.0, mac_buffer)?;
+            mac.compute(output_buffer, sender.sequence_number.0, mac_buffer)?;
         }
     }
 
@@ -188,7 +188,7 @@ pub fn parse_packet<'a>(
         let (next_data, full_pkt) = cipher.decrypt(input, state.receiver.sequence_number.0)?;
 
         let (should_be_empty, (_, pkt_payload)) = parse_plaintext_packet(full_pkt, Some(cipher))?;
-        if should_be_empty != [] {
+        if !should_be_empty.is_empty() {
             return Err(nom::Err::Failure(
                 ParsingError::RemainingDataAfterDecryption,
             ));
@@ -211,7 +211,7 @@ pub fn parse_packet<'a>(
     } else if let Some(mac) = mac {
         let (next_data, packet_mac) = take(mac.size_bytes())(next_data)?;
 
-        mac.verify(&full_pkt, state.receiver.sequence_number.0, packet_mac)
+        mac.verify(full_pkt, state.receiver.sequence_number.0, packet_mac)
             .map_err(|_| nom::Err::Failure(ParsingError::InvalidMac))?;
 
         next_data

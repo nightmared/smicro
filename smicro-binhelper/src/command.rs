@@ -91,7 +91,7 @@ impl Command for CommandRealpath {
             names: vec![Stat {
                 filename: canonicalized_path.clone(),
                 long_filename: canonicalized_path,
-                attrs: Attrs::new(),
+                attrs: Attrs::default(),
             }],
             end_of_list: true,
         }))
@@ -281,8 +281,8 @@ impl Command for CommandRead {
     fn process(self, global_state: &mut GlobalState) -> Result<ResponseWrapper, Error> {
         let (_name, file) = global_state.get_file_handle(&self.handle)?;
 
-        let mut buf = unsafe { &mut READ_BUF[..min(MAX_READ_LENGTH, self.len as usize)] };
-        let nb_read = file.read_at(&mut buf, self.offset)?;
+        let buf = unsafe { &mut READ_BUF[..min(MAX_READ_LENGTH, self.len as usize)] };
+        let nb_read = file.read_at(buf, self.offset)?;
         if nb_read == 0 {
             return Ok(ResponseWrapper::Status(ResponseStatus::new(
                 StatusCode::Eof,
@@ -306,11 +306,11 @@ pub struct CommandWrite<'a> {
     data: &'a [u8],
 }
 
-impl<'a> Command for CommandWrite<'a> {
+impl Command for CommandWrite<'_> {
     fn process(self, global_state: &mut GlobalState) -> Result<ResponseWrapper, Error> {
-        let (_name, file) = global_state.get_file_handle(&self.handle)?;
+        let (_name, file) = global_state.get_file_handle(self.handle)?;
 
-        file.write_all_at(&self.data, self.offset)?;
+        file.write_all_at(self.data, self.offset)?;
 
         Ok(ResponseWrapper::Status(ResponseStatus::new(StatusCode::Ok)))
     }
@@ -352,7 +352,7 @@ impl Command for CommandReadlink {
         let stat = Stat {
             filename: target.clone(),
             long_filename: target,
-            attrs: Attrs::new(),
+            attrs: Attrs::default(),
         };
 
         Ok(ResponseWrapper::Name(ResponseName {
@@ -543,17 +543,17 @@ pub struct CommandExtended<'a> {
     req: &'a [u8],
 }
 
-impl<'a> Command for CommandExtended<'a> {
+impl Command for CommandExtended<'_> {
     fn process(self, global_state: &mut GlobalState) -> Result<ResponseWrapper, Error> {
         // TODO: if I find enought motivation to do so, create a dedicated macro like
         // `generate_command_wrapper!` below
         Ok(match self.extension.as_str() {
             POSIX_RENAME_EXT => {
-                let (_next_data, ext) = ExtensionPosixRename::deserialize(&self.req)?;
+                let (_next_data, ext) = ExtensionPosixRename::deserialize(self.req)?;
                 ext.process(global_state)?
             }
             COPY_DATA_EXT => {
-                let (_next_data, ext) = ExtensionCopyData::deserialize(&self.req)?;
+                let (_next_data, ext) = ExtensionCopyData::deserialize(self.req)?;
                 ext.process(global_state)?
             }
             _ => ResponseWrapper::Status(ResponseStatus::new(StatusCode::OpUnsupported)),

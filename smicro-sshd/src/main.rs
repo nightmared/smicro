@@ -152,7 +152,7 @@ fn read_stream_to_buffer<const SIZE: usize, R: Read + ?Sized>(
         // Read enough data to hold *at least* a packet, but without overwriting previous
         // data
         let writeable_buffer = reader_buf.get_writable_buffer();
-        if writeable_buffer.len() == 0 {
+        if writeable_buffer.is_empty() {
             return Ok(NonIOProgress::Continue);
         }
         match stream.read(writeable_buffer) {
@@ -180,7 +180,7 @@ fn write_buffer_to_stream<const SIZE: usize, W: Write + ?Sized>(
 ) -> Result<(), Error> {
     loop {
         let read_buffer = sender_buf.get_readable_data();
-        if read_buffer.len() == 0 {
+        if read_buffer.is_empty() {
             break;
         }
         match stream.write(read_buffer) {
@@ -243,7 +243,7 @@ fn flush_data_to_channel<
     let readable_data = input_buf.get_readable_data();
 
     // 72 is chosen arbitrarily to represent the packet overhead
-    if readable_data.len() == 0 || max_chan_pkt_size <= 72 {
+    if readable_data.is_empty() || max_chan_pkt_size <= 72 {
         return Ok(());
     }
     let max_write_size = max_chan_pkt_size - 72;
@@ -432,7 +432,7 @@ fn flush_channel<const SIZE: usize, T: LoopingBufferWriter<SIZE>>(
             }
         }
 
-        if cmd.stderr_buffer.get_readable_data().len() > 0 {
+        if !cmd.stderr_buffer.get_readable_data().is_empty() {
             flush_data_to_channel(
                 output_buf,
                 &mut cmd.stderr_buffer,
@@ -443,7 +443,7 @@ fn flush_channel<const SIZE: usize, T: LoopingBufferWriter<SIZE>>(
                 true,
             )?;
         }
-        if cmd.stdout_buffer.get_readable_data().len() > 0 {
+        if !cmd.stdout_buffer.get_readable_data().is_empty() {
             flush_data_to_channel(
                 output_buf,
                 &mut cmd.stdout_buffer,
@@ -457,9 +457,9 @@ fn flush_channel<const SIZE: usize, T: LoopingBufferWriter<SIZE>>(
 
         write_buffer_to_stream(&mut cmd.stdin_buffer, &mut cmd.stdin)?;
 
-        res |= if cmd.stdin_buffer.get_readable_data().len() > 0
-            || cmd.stdout_buffer.get_readable_data().len() > 0
-            || cmd.stderr_buffer.get_readable_data().len() > 0
+        res |= if !cmd.stdin_buffer.get_readable_data().is_empty()
+            || !cmd.stdout_buffer.get_readable_data().is_empty()
+            || !cmd.stderr_buffer.get_readable_data().is_empty()
         {
             NonIOProgress::Continue
         } else {
@@ -483,7 +483,7 @@ fn process_channel_states<const SIZE: usize, W: LoopingBufferWriter<SIZE>>(
                 if let Some(cmd) = &chan.command {
                     if registered_channels.insert(chan_number) {
                         register_channel(poll, chan_number, cmd)
-                            .map_err(|e| Error::RegistrationManagementError(e))?;
+                            .map_err(Error::RegistrationManagementError)?;
                     }
                 }
             }
@@ -520,14 +520,13 @@ fn process_channel_states<const SIZE: usize, W: LoopingBufferWriter<SIZE>>(
                 // stop receiving data from that end
                 if registered_channels.remove(&chan_number) {
                     debug!("Unregistering channel {}", chan_number);
-                    unregister_channel(poll, chan)
-                        .map_err(|e| Error::RegistrationManagementError(e))?;
+                    unregister_channel(poll, chan).map_err(Error::RegistrationManagementError)?;
                 } else {
                     let mut remove = true;
                     if let Some(cmd) = &mut chan.command {
                         // inhibit the removal until all data was transferred
-                        remove = cmd.stdout_buffer.get_readable_data().len() == 0
-                            && cmd.stderr_buffer.get_readable_data().len() == 0;
+                        remove = cmd.stdout_buffer.get_readable_data().is_empty()
+                            && cmd.stderr_buffer.get_readable_data().is_empty();
                         // ensure that the process was waited for
                         let _ = cmd.command.try_wait();
                     }
@@ -617,7 +616,7 @@ fn handle_stream_with_preexisting_state(
             }
         }
 
-        if sender_buf.get_readable_data().len() > 0 {
+        if !sender_buf.get_readable_data().is_empty() {
             trace!("Data is available on the output stream, flushing it to the output stream");
             write_buffer_to_stream(&mut sender_buf, &mut stream)?;
         }
@@ -682,7 +681,7 @@ fn handle_stream_with_preexisting_state(
             non_io_backed_progress |= flush_channel(chan, &mut state.sender, &mut sender_buf)?;
         }
 
-        if sender_buf.get_readable_data().len() > 0 {
+        if !sender_buf.get_readable_data().is_empty() {
             non_io_backed_progress = NonIOProgress::Continue;
         }
 

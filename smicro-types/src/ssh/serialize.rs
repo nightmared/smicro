@@ -6,11 +6,11 @@ use super::types::{NameList, PositiveBigNum};
 
 impl SerializePacket for NameList {
     fn get_size(&self) -> usize {
-        // self.entries.len() - 1 is the number of ',' characters in the output
-        let comma_number = if self.entries.len() > 0 {
-            self.entries.len() - 1
-        } else {
+        let comma_number = if self.entries.is_empty() {
             0
+        } else {
+            // self.entries.len() - 1 is the number of ',' characters in the output
+            self.entries.len() - 1
         };
         4 + self.entries.iter().map(|entry| entry.len()).sum::<usize>() + comma_number
     }
@@ -20,7 +20,7 @@ impl SerializePacket for NameList {
         (self.get_size() as u32 - 4).serialize(&mut output)?;
         for (pos, entry) in self.entries.iter().enumerate() {
             if pos != 0 {
-                output.write_all(&[b','])?;
+                output.write_all(b",")?;
             }
             output.write_all(entry.as_bytes())?;
         }
@@ -28,7 +28,7 @@ impl SerializePacket for NameList {
     }
 }
 
-impl<'a> SerializePacket for PositiveBigNum<'a> {
+impl SerializePacket for PositiveBigNum<'_> {
     fn get_size(&self) -> usize {
         let mut number_of_zero_bytes = self.0.iter().take_while(|&&b| b == 0).count();
         // prepend a NULL byte if the MSB could indicate a negative number

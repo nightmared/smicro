@@ -191,6 +191,6 @@ where
 
 impl<T: digest::Mac + digest::KeyInit> CryptoAlgWithKey for T {
     fn new(keys: &[&[u8]]) -> Result<Self, Error> {
-        Ok(<T as digest::Mac>::new_from_slice(keys[0]).map_err(|_| Error::InvalidMACKeyLength)?)
+        <T as digest::Mac>::new_from_slice(keys[0]).map_err(|_| Error::InvalidMACKeyLength)
     }
 }

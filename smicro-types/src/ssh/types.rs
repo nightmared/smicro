@@ -70,7 +70,7 @@ pub struct SlowSSHSlice<T>(pub Vec<T>);
 #[derive(Clone, Eq, PartialEq)]
 pub struct SharedSlowSSHSlice<'a, T>(pub &'a [T]);
 
-impl<'a, T> std::fmt::Debug for SharedSSHSlice<'a, T>
+impl<T> std::fmt::Debug for SharedSSHSlice<'_, T>
 where
     T: Debug,
 {

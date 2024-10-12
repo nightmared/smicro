@@ -46,7 +46,7 @@ pub trait CryptoAlgWithKey {
 
 struct HashAdaptor<'a>(&'a mut dyn digest::DynDigest);
 
-impl<'a> Write for HashAdaptor<'a> {
+impl Write for HashAdaptor<'_> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         self.0.update(buf);
         Ok(buf.len())
@@ -71,7 +71,7 @@ fn compute_exchange_hash<C: elliptic_curve::Curve>(
 
     // Hash the identification strings
     SharedSSHSlice(
-        &state
+        state
             .peer_identifier_string
             .as_ref()
             .expect("The client identifier string should have been set by now"),
@@ -241,7 +241,7 @@ impl<T> SerializePacket for KeyWrapper<T> {
 }
 
 impl<T: CryptoAlgName> CryptoAlgName for KeyWrapper<T> {
-    const NAME: &'static str = <T as CryptoAlgName>::NAME;
+    const NAME: &str = <T as CryptoAlgName>::NAME;
 
     fn name(&self) -> &'static str {
         self.inner.name()

@@ -112,7 +112,7 @@ pub(crate) fn create_wrapper_enum_implementing_trait_inner(
         }
         attrs.push(attr.clone());
     }
-    if implementors.len() == 0 {
+    if implementors.is_empty() {
         return Err(ast
             .span()
             .error("Missing implementors attribute or no implementors"));
