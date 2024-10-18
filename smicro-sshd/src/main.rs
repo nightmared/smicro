@@ -20,7 +20,7 @@ use std::{
 };
 
 use argh::FromArgs;
-use log::{debug, error, info, trace, warn, LevelFilter};
+use log::{debug, error, info, trace, warn, Level};
 use messages::{MessageChannelClose, MessageChannelWindowAdjust};
 use mio::{
     net::{TcpListener, TcpStream},
@@ -28,7 +28,9 @@ use mio::{
     Events, Interest, Poll, Token,
 };
 use nix::sys::eventfd::EventFd;
-use session::{ExpectsChannelOpen, PacketProcessingDecision, SessionStateEstablished};
+use session::{
+    kex::renegotiate_kex, ExpectsChannelOpen, PacketProcessingDecision, SessionStateEstablished,
+};
 use state::channel::{Channel, ChannelCommand, ChannelState};
 use syslog::Facility;
 
@@ -79,6 +81,7 @@ fn handle_packet<const SIZE: usize>(
     let available_data_len = available_data.len();
     let mut atomic_writer = writer.get_atomic_writer();
     let res = session.process(state, &mut atomic_writer, available_data);
+
     match res {
         Err(e) => match e {
             Error::ParsingError(nom::Err::Incomplete(_)) => {
@@ -120,10 +123,12 @@ fn handle_packet<const SIZE: usize>(
         },
         Ok((next_data, processing_decision)) => {
             // register the writes so they can be sent to the client
-            atomic_writer.commit();
+            let written_data = atomic_writer.commit();
+            state.sender.bytes_counter += written_data;
 
             let read_data = available_data_len - next_data.len();
             buf.advance_reader_pos(read_data);
+            state.receiver.bytes_counter += read_data as u64;
 
             match processing_decision {
                 PacketProcessingDecision::NewState(new_session) => {
@@ -149,8 +154,6 @@ fn read_stream_to_buffer<const SIZE: usize, R: Read + ?Sized>(
     reader_buf: &mut LoopingBuffer<SIZE>,
 ) -> Result<NonIOProgress, Error> {
     loop {
-        // Read enough data to hold *at least* a packet, but without overwriting previous
-        // data
         let writeable_buffer = reader_buf.get_writable_buffer();
         if writeable_buffer.is_empty() {
             return Ok(NonIOProgress::Continue);
@@ -209,6 +212,20 @@ fn handle_packets<const SIZE: usize>(
     state: &mut State,
 ) -> Result<KeepProcessing, Error> {
     loop {
+        // rekey every two gigabytes
+        let rekey_limit = 2 * 1024 * 1024 * 1024;
+        if state.rekeying.is_none()
+            && (state.sender.bytes_counter > rekey_limit
+                || state.receiver.bytes_counter > rekey_limit)
+        {
+            info!("Initiating rekeying");
+            match renegotiate_kex(state, sender_buf) {
+                Ok(x) => state.rekeying = Some(x),
+                Err(e) => debug!("Failed to trigger rekeying ({:?}, retrying later", e),
+            }
+
+            return Ok(KeepProcessing::Continue);
+        }
         match handle_packet(reader_buf, sender_buf, session, state) {
             Ok(KeepProcessing::Continue) => {}
             Ok(x) => return Ok(x),
@@ -249,6 +266,7 @@ fn flush_data_to_channel<
     let max_write_size = max_chan_pkt_size - 72;
     let data_len = min(readable_data.len() as u32, max_write_size);
     if *window_size < data_len {
+        debug!("Waiting for a window size increase");
         // we must wait for the client to increase the windows size
         return Ok(());
     }
@@ -277,6 +295,7 @@ fn flush_data_to_channel<
         Ok(()) => {
             input_buf.advance_reader_pos(data_len as usize);
             *window_size -= data_len;
+            sender.bytes_counter += data_len as u64;
             Ok(())
         }
         Err(Error::IoError(e)) if e.kind() == ErrorKind::WouldBlock => Ok(()),
@@ -378,7 +397,7 @@ fn unregister_channel(poll: &mut Poll, chan: &Channel) -> Result<(), std::io::Er
     Ok(())
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum NonIOProgress {
     Continue,
     Done,
@@ -411,6 +430,7 @@ fn flush_channel<const SIZE: usize, T: LoopingBufferWriter<SIZE>>(
     if let Some(ref mut cmd) = chan.command {
         // bump the receiver window size, if required
         if chan.receiver_window_size < MAX_PKT_SIZE as u32 {
+            debug!("Bumping the receiver window size");
             match write_message(
                 sender,
                 output_buf,
@@ -455,16 +475,16 @@ fn flush_channel<const SIZE: usize, T: LoopingBufferWriter<SIZE>>(
             )?;
         }
 
-        write_buffer_to_stream(&mut cmd.stdin_buffer, &mut cmd.stdin)?;
+        if !cmd.stdin_buffer.get_readable_data().is_empty() {
+            write_buffer_to_stream(&mut cmd.stdin_buffer, &mut cmd.stdin)?;
+        }
 
-        res |= if !cmd.stdin_buffer.get_readable_data().is_empty()
+        if !cmd.stdin_buffer.get_readable_data().is_empty()
             || !cmd.stdout_buffer.get_readable_data().is_empty()
             || !cmd.stderr_buffer.get_readable_data().is_empty()
         {
-            NonIOProgress::Continue
-        } else {
-            NonIOProgress::Done
-        };
+            res = NonIOProgress::Continue;
+        }
     }
     Ok(res)
 }
@@ -639,6 +659,8 @@ fn handle_stream_with_preexisting_state(
                 )
                 .arg("--master-socket")
                 .arg(socket_path)
+                .arg("--log-level")
+                .arg(log::max_level().to_string())
                 .spawn()?;
                 let (mut slave_stream, _) = socket.accept()?;
 
@@ -737,20 +759,28 @@ fn master_process() -> Result<(), Error> {
 #[argh(description = "Smicro SSHD server")]
 struct Options {
     #[argh(option, description = "level of logging")]
-    log_level: Option<LevelFilter>,
+    log_level: Option<Level>,
 
     #[argh(option, description = "socket to talk to a master instance")]
     master_socket: Option<PathBuf>,
+
+    #[argh(option, description = "log to syslog", default = "false")]
+    log_to_syslog: bool,
 }
 
 fn main() -> Result<(), Error> {
     let options: Options = argh::from_env();
 
-    syslog::init(
-        Facility::LOG_USER,
-        options.log_level.unwrap_or(LevelFilter::Info),
-        Some("smicro_ssh"),
-    )?;
+    let log_level = options.log_level.unwrap_or(Level::Info);
+    if options.log_to_syslog {
+        syslog::init(
+            Facility::LOG_USER,
+            log_level.to_level_filter(),
+            Some("smicro_ssh"),
+        )?;
+    } else {
+        simple_logger::init_with_level(log_level)?;
+    }
 
     if let Some(socket_path) = options.master_socket {
         let mut stream = UnixStream::connect(socket_path)?;

@@ -357,9 +357,10 @@ pub struct AtomicLoopingBufferWriter<'a, const SIZE: usize> {
 }
 
 impl<const SIZE: usize> AtomicLoopingBufferWriter<'_, SIZE> {
-    pub fn commit(self) {
-        self.inner
-            .advance_writer_pos(self.end_pos - self.inner.end_pos);
+    pub fn commit(self) -> u64 {
+        let nb_written = self.end_pos - self.inner.end_pos;
+        self.inner.advance_writer_pos(nb_written);
+        nb_written as u64
     }
 }
 

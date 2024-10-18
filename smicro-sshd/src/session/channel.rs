@@ -177,6 +177,7 @@ fn handle_channel_request<const SIZE: usize, W: LoopingBufferWriter<SIZE>>(
     }
 }
 
+// TODO: handle ChannelExtendedData
 #[declare_session_state(
     msg_type = [MessageType::ChannelRequest, MessageType::ChannelData, MessageType::ChannelWindowAdjust, MessageType::ChannelEof, MessageType::ChannelClose]
 )]

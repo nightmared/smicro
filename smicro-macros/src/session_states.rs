@@ -82,22 +82,20 @@ pub(crate) fn declare_session_state_inner(
         || struct_name == "AcceptsChannelMessages";
 
     let renegotiation_part = if allowed_renegotiation {
-        quote!(if message_type == MessageType::KexInit {
-            log::info!("Renegotiating a new key");
-            let kex_sent = crate::session::KexSent {
-                my_kex_message: crate::session::kex::renegotiate_kex(state, writer)?,
-                next_state: crate::session::kex::SessionStateAllowedAfterKex::#struct_name(self.clone()),
-            };
-            return Ok((
-                next,
-                kex_sent.inner_process(
-                    state,
-                    writer,
-                    message_type,
-                    message_data,
-                )?.into(),
-            ));
-        })
+        quote!(
+            if message_type == MessageType::KexInit {
+                // We received the request from the client "out of the blue", not in response to
+                // our own request
+                if state.rekeying.is_none() {
+                    log::info!("Received a key renegotiation request");
+                    state.rekeying = Some(crate::session::kex::renegotiate_kex(state, writer)?);
+                }
+                let kex_sent = crate::session::KexSent {
+                    next_state: crate::session::kex::SessionStateAllowedAfterKex::#struct_name(self.clone()),
+                };
+                return Ok((next, kex_sent.inner_process(state, writer, message_type, message_data)?.into()));
+            }
+        )
     } else {
         quote!()
     };
@@ -144,12 +142,14 @@ pub(crate) fn declare_session_state_inner(
                 };
 
                 if message_type == MessageType::Disconnect {
+                    log::info!("Received a disconnection message");
                     return Ok((next, crate::session::PacketProcessingDecision::PeerTriggeredDisconnection));
                 }
 
                 #handle_messages_part
 
                 if !#allowed_types.contains(&message_type) {
+                    log::error!("Received unauthorized message (type={:?})", message_type);
                     return Err(crate::error::Error::DisallowedMessageType(message_type));
                 }
 

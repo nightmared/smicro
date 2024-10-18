@@ -3,7 +3,7 @@ use smicro_common::LoopingBufferWriter;
 use crate::{error::Error, state::State};
 
 mod channel;
-mod kex;
+pub(crate) mod kex;
 mod service;
 mod session_establishment;
 

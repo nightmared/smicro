@@ -17,6 +17,7 @@ use crate::{
         cipher::CipherWrapper, keys::load_hostkey, mac::MACWrapper, sign::SignerWrapper, CryptoAlgs,
     },
     error::Error,
+    messages::MessageKeyExchangeInit,
 };
 
 pub mod channel;
@@ -39,6 +40,8 @@ pub struct DirectionState {
     pub crypto_material: Option<SessionCryptoMaterials>,
     #[field(parser = nom::number::streaming::be_u32.map(Wrapping))]
     pub sequence_number: Wrapping<u32>,
+    #[field(parser = nom::number::streaming::be_u64)]
+    pub bytes_counter: u64,
 }
 
 impl SerializePacket for DirectionState {
@@ -46,12 +49,14 @@ impl SerializePacket for DirectionState {
         self.crypto_algs.get_size()
             + self.crypto_material.get_size()
             + self.sequence_number.0.get_size()
+            + self.bytes_counter.get_size()
     }
 
     fn serialize<W: std::io::Write>(&self, mut output: W) -> Result<(), std::io::Error> {
         self.crypto_algs.serialize(&mut output)?;
         self.crypto_material.serialize(&mut output)?;
         self.sequence_number.0.serialize(&mut output)?;
+        self.bytes_counter.serialize(&mut output)?;
 
         Ok(())
     }
@@ -78,6 +83,10 @@ fn parse_option_string(input: &[u8]) -> nom::IResult<&[u8], Option<String>, Pars
     }
 }
 
+fn create_option_none<T>(input: &[u8]) -> nom::IResult<&[u8], Option<T>, ParsingError> {
+    Ok((input, None))
+}
+
 #[derive(Debug)]
 #[declare_deserializable_struct]
 pub struct State {
@@ -93,6 +102,8 @@ pub struct State {
     pub authentified_user: Option<String>,
     #[field(parser = create_channel_manager)]
     pub channels: ChannelManager,
+    #[field(parser = create_option_none)]
+    pub rekeying: Option<MessageKeyExchangeInit>,
 }
 
 impl SerializePacket for State {
@@ -103,6 +114,7 @@ impl SerializePacket for State {
             + self.peer_identifier_string.get_size()
             + self.session_identifier.get_size()
             + self.authentified_user.get_size()
+            + self.rekeying.get_size()
     }
 
     fn serialize<W: std::io::Write>(&self, mut output: W) -> Result<(), std::io::Error> {
@@ -117,7 +129,8 @@ impl SerializePacket for State {
             .as_ref()
             .map(|v| SharedSSHSlice(v))
             .serialize(&mut output)?;
-        self.authentified_user.serialize(output)?;
+        self.authentified_user.serialize(&mut output)?;
+        self.rekeying.serialize(output)?;
 
         Ok(())
     }
@@ -158,18 +171,21 @@ impl State {
                 crypto_algs: None,
                 crypto_material: None,
                 sequence_number: Wrapping(0),
+                bytes_counter: 0,
             },
             receiver: DirectionState {
                 rng: thread_rng(),
                 crypto_algs: None,
                 crypto_material: None,
                 sequence_number: Wrapping(0),
+                bytes_counter: 0,
             },
             host_keys,
             peer_identifier_string: None,
             session_identifier: None,
             authentified_user: None,
             channels: ChannelManager::new(),
+            rekeying: None,
         })
     }
 }

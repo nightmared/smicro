@@ -87,6 +87,7 @@ impl SessionState for IdentifierStringSent {
                 trace!("Got client with software '{}'", software_version);
             }
         }
+
         Ok((
             input,
             PacketProcessingDecision::NewState(SessionStates::IdentifierStringReceived(
@@ -110,10 +111,11 @@ impl SessionState for IdentifierStringReceived {
         let kex_init_msg = gen_kex_initial_list(state);
         write_message(&mut state.sender, writer, &kex_init_msg)?;
 
+        state.rekeying = Some(kex_init_msg);
+
         Ok((
             input,
             SessionStateEstablished::KexSent(KexSent {
-                my_kex_message: kex_init_msg,
                 next_state: SessionStateAllowedAfterKex::ExpectsServiceRequest(
                     ExpectsServiceRequest {},
                 ),

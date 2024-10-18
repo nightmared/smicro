@@ -111,7 +111,10 @@ impl KEX for EcdhSha2Nistp521 {
             &q_server,
             &shared_secret,
             ecdh_init,
-            &received_kex_msg.my_kex_message,
+            state
+                .rekeying
+                .as_ref()
+                .expect("Missing rekeying information!?"),
             &received_kex_msg.peer_kex_message,
         )?;
 

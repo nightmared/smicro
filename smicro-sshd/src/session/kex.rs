@@ -50,7 +50,7 @@ pub(crate) fn renegotiate_kex<const SIZE: usize, W: LoopingBufferWriter<SIZE>>(
     state: &mut State,
     writer: &mut W,
 ) -> Result<MessageKeyExchangeInit, Error> {
-    debug!("Received a key rotation message, sending a MessageKeyExchangeInit packet");
+    debug!("Sending a MessageKeyExchangeInit packet");
     let kex_init_msg = gen_kex_initial_list(state);
     write_message(&mut state.sender, writer, &kex_init_msg)?;
 
@@ -59,7 +59,6 @@ pub(crate) fn renegotiate_kex<const SIZE: usize, W: LoopingBufferWriter<SIZE>>(
 
 #[declare_session_state(msg_type = MessageType::KexInit, strict_kex = true)]
 pub struct KexSent {
-    pub my_kex_message: MessageKeyExchangeInit,
     pub(crate) next_state: SessionStateAllowedAfterKex,
 }
 
@@ -78,7 +77,6 @@ impl KexSent {
         debug!("Cryptographic algorithms exchanged");
 
         let next_state = KexReceived {
-            my_kex_message: self.my_kex_message.clone(),
             peer_kex_message: msg,
             new_crypto_algs: crypto_algs,
             next_state: self.next_state.clone(),
@@ -90,7 +88,6 @@ impl KexSent {
 
 #[declare_session_state(msg_type = MessageType::KexEcdhInit, strict_kex = true)]
 pub struct KexReceived {
-    pub my_kex_message: MessageKeyExchangeInit,
     pub peer_kex_message: MessageKeyExchangeInit,
     pub new_crypto_algs: CryptoAlgs,
     pub(crate) next_state: SessionStateAllowedAfterKex,
@@ -129,6 +126,7 @@ impl KexReceived {
             mac: server_mac,
             cipher: server_cipher,
         });
+        state.sender.bytes_counter = 0;
         state.sender.sequence_number.0 = 0;
 
         let kex_reply_sent = KexReplySent {
@@ -160,6 +158,8 @@ impl KexReplySent {
             return Err(Error::DataInNewKeysMessage);
         }
 
+        debug!("Received a NewKeys request");
+
         let crypto_algs = self.new_crypto_algs.clone();
         let client_mac = crypto_algs
             .client_to_server_mac
@@ -178,7 +178,9 @@ impl KexReplySent {
             cipher: client_cipher,
         });
 
+        state.receiver.bytes_counter = 0;
         state.receiver.sequence_number.0 = 0;
+        state.rekeying = None;
 
         debug!("Key setup/rotation done");
 
