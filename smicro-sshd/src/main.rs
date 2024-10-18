@@ -1,20 +1,17 @@
 #![feature(linux_pidfd)]
 #![feature(unix_socket_ancillary_data)]
-#![feature(allocator_api)]
 
 use std::{
     cmp::min,
     collections::HashSet,
-    io::{ErrorKind, Read, Write},
-    net::SocketAddr,
+    io::{stdin, ErrorKind, Read, Write},
     ops::{BitOr, BitOrAssign},
     os::{
         fd::AsRawFd,
-        linux::process::ChildExt,
-        unix::net::{UnixListener, UnixStream},
+        linux::{net::SocketAddrExt, process::ChildExt},
+        unix::net::{SocketAddr, UnixListener, UnixStream},
     },
-    path::PathBuf,
-    process::Command,
+    process::{Command, Stdio},
     str::FromStr,
     thread,
 };
@@ -28,6 +25,7 @@ use mio::{
     Events, Interest, Poll, Token,
 };
 use nix::sys::eventfd::EventFd;
+use rand::random;
 use session::{
     kex::renegotiate_kex, ExpectsChannelOpen, PacketProcessingDecision, SessionStateEstablished,
 };
@@ -648,20 +646,28 @@ fn handle_stream_with_preexisting_state(
             KeepProcessing::StopDisconnected => return Ok(()),
             KeepProcessing::StopAndTransferToChild => {
                 println!("Transferring!");
-                let socket_path = "/tmp/wip";
-                let socket = UnixListener::bind(socket_path)?;
+                let mut random_name = [0u8; 48];
+                for i in 0..random_name.len() {
+                    // generate a printable ascii character
+                    random_name[i] = random::<u8>() % 96 + 32;
+                }
+                let socket_secret = format!(
+                    "smicro-{}",
+                    std::str::from_utf8(&random_name).expect("invalid character in ascii!?")
+                );
+                let socket_path = SocketAddr::from_abstract_name(&socket_secret)?;
+                let socket = UnixListener::bind_addr(&socket_path)?;
 
-                Command::new(
-                    std::env::current_exe()?
-                        .parent()
-                        .unwrap()
-                        .join("smicro-sshd"),
-                )
-                .arg("--master-socket")
-                .arg(socket_path)
-                .arg("--log-level")
-                .arg(log::max_level().to_string())
-                .spawn()?;
+                let mut cmd = Command::new(&std::env::current_exe()?)
+                    .args(std::env::args().skip(1))
+                    .arg("--master-socket")
+                    .stdin(Stdio::piped())
+                    .spawn()?;
+
+                let mut stdin = cmd.stdin.take().unwrap();
+                stdin.write_all(socket_secret.as_bytes())?;
+                stdin.write_all(b"\n")?;
+
                 let (mut slave_stream, _) = socket.accept()?;
 
                 unsafe {
@@ -716,7 +722,7 @@ fn handle_stream_with_preexisting_state(
 }
 
 fn master_process() -> Result<(), Error> {
-    let mut listener = TcpListener::bind(SocketAddr::from_str("127.0.0.1:2222")?)?;
+    let mut listener = TcpListener::bind(std::net::SocketAddr::from_str("127.0.0.1:2222")?)?;
 
     let mut poll = Poll::new()?;
     let mut events = Events::with_capacity(128);
@@ -761,10 +767,13 @@ struct Options {
     #[argh(option, description = "level of logging")]
     log_level: Option<Level>,
 
-    #[argh(option, description = "socket to talk to a master instance")]
-    master_socket: Option<PathBuf>,
+    #[argh(
+        switch,
+        description = "receive via stdin the socket path through which the connection will be transferred"
+    )]
+    master_socket: bool,
 
-    #[argh(option, description = "log to syslog", default = "false")]
+    #[argh(switch, description = "log to syslog")]
     log_to_syslog: bool,
 }
 
@@ -782,8 +791,13 @@ fn main() -> Result<(), Error> {
         simple_logger::init_with_level(log_level)?;
     }
 
-    if let Some(socket_path) = options.master_socket {
-        let mut stream = UnixStream::connect(socket_path)?;
+    if options.master_socket {
+        let mut abstract_addr = String::with_capacity(64);
+        let _ = stdin().read_line(&mut abstract_addr)?;
+        // drop the newline character
+        abstract_addr.pop();
+        let socket_addr = SocketAddr::from_abstract_name(&abstract_addr.as_bytes())?;
+        let mut stream = UnixStream::connect_addr(&socket_addr)?;
 
         unsafe {
             let reader_buf = <LoopingBuffer<MAX_PKT_SIZE>>::receive_over_socket(&mut stream)?;
