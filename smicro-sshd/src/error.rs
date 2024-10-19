@@ -102,6 +102,8 @@ pub enum Error {
     UnknownUserName,
     #[error("Key type whose support is not implemented")]
     UnsupportedKeyType,
+    #[error("Fork of the child process failed")]
+    ForkFailed,
 }
 
 #[derive(thiserror::Error, Debug)]

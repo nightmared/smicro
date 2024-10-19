@@ -24,7 +24,10 @@ use mio::{
     unix::SourceFd,
     Events, Interest, Poll, Token,
 };
-use nix::sys::eventfd::EventFd;
+use nix::{
+    sys::eventfd::EventFd,
+    unistd::{fork, ForkResult},
+};
 use rand::random;
 use session::{
     kex::renegotiate_kex, ExpectsChannelOpen, PacketProcessingDecision, SessionStateEstablished,
@@ -646,15 +649,11 @@ fn handle_stream_with_preexisting_state(
             KeepProcessing::StopDisconnected => return Ok(()),
             KeepProcessing::StopAndTransferToChild => {
                 println!("Transferring!");
-                let mut random_name = [0u8; 48];
-                for i in 0..random_name.len() {
+                let mut socket_secret = [0u8; 20];
+                for i in 0..socket_secret.len() {
                     // generate a printable ascii character
-                    random_name[i] = random::<u8>() % 96 + 32;
+                    socket_secret[i] = random::<u8>() % 96 + 32;
                 }
-                let socket_secret = format!(
-                    "smicro-{}",
-                    std::str::from_utf8(&random_name).expect("invalid character in ascii!?")
-                );
                 let socket_path = SocketAddr::from_abstract_name(&socket_secret)?;
                 let socket = UnixListener::bind_addr(&socket_path)?;
 
@@ -665,8 +664,10 @@ fn handle_stream_with_preexisting_state(
                     .spawn()?;
 
                 let mut stdin = cmd.stdin.take().unwrap();
-                stdin.write_all(socket_secret.as_bytes())?;
+                stdin.write_all(&socket_secret)?;
                 stdin.write_all(b"\n")?;
+
+                cmd.wait()?;
 
                 let (mut slave_stream, _) = socket.accept()?;
 
@@ -675,10 +676,9 @@ fn handle_stream_with_preexisting_state(
                     sender_buf.send_over_socket(&mut slave_stream)?;
                     send_fd_over_socket(&mut slave_stream, stream)?;
                 };
-                state.serialize(&mut slave_stream)?;
                 slave_stream.shutdown(std::net::Shutdown::Both)?;
 
-                drop(socket);
+                state.serialize(&mut stdin)?;
 
                 return Ok(());
             }
@@ -780,6 +780,13 @@ struct Options {
 fn main() -> Result<(), Error> {
     let options: Options = argh::from_env();
 
+    if options.master_socket {
+        // detach the process from its sshd parent
+        if let ForkResult::Parent { .. } = unsafe { fork() }.map_err(|_| Error::ForkFailed)? {
+            return Ok(());
+        }
+    }
+
     let log_level = options.log_level.unwrap_or(Level::Info);
     if options.log_to_syslog {
         syslog::init(
@@ -806,7 +813,7 @@ fn main() -> Result<(), Error> {
             let client_socket = receive_fd_over_socket(&mut stream)?;
 
             let mut buf = Vec::new();
-            stream.read_to_end(&mut buf)?;
+            stdin().read_to_end(&mut buf)?;
 
             let state = match State::deserialize(buf.as_slice()) {
                 Err(e) => {
