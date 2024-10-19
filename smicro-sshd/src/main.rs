@@ -4,19 +4,15 @@
 use std::{
     cmp::min,
     collections::HashSet,
-    io::{stdin, ErrorKind, Read, Write},
+    io::{ErrorKind, Read, Write},
     ops::{BitOr, BitOrAssign},
-    os::{
-        fd::AsRawFd,
-        linux::{net::SocketAddrExt, process::ChildExt},
-        unix::net::{SocketAddr, UnixListener, UnixStream},
-    },
-    process::{Command, Stdio},
+    os::{fd::AsRawFd, linux::process::ChildExt},
     str::FromStr,
     thread,
 };
 
 use argh::FromArgs;
+use child::{receive_connection, transfer_connection};
 use log::{debug, error, info, trace, warn, Level};
 use messages::{MessageChannelClose, MessageChannelWindowAdjust};
 use mio::{
@@ -25,29 +21,22 @@ use mio::{
     Events, Interest, Poll, Token,
 };
 use nix::{
-    sys::eventfd::EventFd,
-    unistd::{fork, ForkResult},
+    sys::{eventfd::EventFd, prctl},
+    unistd::{fork, setgid, setuid, ForkResult},
 };
-use rand::random;
 use session::{
     kex::renegotiate_kex, ExpectsChannelOpen, PacketProcessingDecision, SessionStateEstablished,
 };
 use state::channel::{Channel, ChannelCommand, ChannelState};
 use syslog::Facility;
 
-use smicro_common::{
-    receive_fd_over_socket, send_fd_over_socket, LoopingBuffer, LoopingBufferReader,
-    LoopingBufferWriter,
-};
-use smicro_types::{
-    deserialize::DeserializePacket,
-    serialize::SerializePacket,
-    ssh::{
-        deserialize::parse_message_type,
-        types::{MessageType, SharedSSHSlice},
-    },
+use smicro_common::{LoopingBuffer, LoopingBufferReader, LoopingBufferWriter};
+use smicro_types::ssh::{
+    deserialize::parse_message_type,
+    types::{MessageType, SharedSSHSlice},
 };
 
+mod child;
 pub mod crypto;
 pub mod error;
 pub mod messages;
@@ -69,7 +58,7 @@ use crate::{
 enum KeepProcessing {
     Continue,
     StopDisconnected,
-    StopAndTransferToChild,
+    StopAndTransferToChild(String),
 }
 
 fn handle_packet<const SIZE: usize>(
@@ -137,10 +126,8 @@ fn handle_packet<const SIZE: usize>(
 
                     Ok(KeepProcessing::Continue)
                 }
-                PacketProcessingDecision::SpawnChild(new_session) => {
-                    *session = new_session;
-
-                    Ok(KeepProcessing::StopAndTransferToChild)
+                PacketProcessingDecision::SpawnChild(username) => {
+                    Ok(KeepProcessing::StopAndTransferToChild(username))
                 }
                 PacketProcessingDecision::PeerTriggeredDisconnection => {
                     Ok(KeepProcessing::StopDisconnected)
@@ -647,40 +634,8 @@ fn handle_stream_with_preexisting_state(
         match handle_packets(&mut reader_buf, &mut sender_buf, &mut session, &mut state)? {
             KeepProcessing::Continue => {}
             KeepProcessing::StopDisconnected => return Ok(()),
-            KeepProcessing::StopAndTransferToChild => {
-                println!("Transferring!");
-                let mut socket_secret = [0u8; 20];
-                for i in 0..socket_secret.len() {
-                    // generate a printable ascii character
-                    socket_secret[i] = random::<u8>() % 96 + 32;
-                }
-                let socket_path = SocketAddr::from_abstract_name(&socket_secret)?;
-                let socket = UnixListener::bind_addr(&socket_path)?;
-
-                let mut cmd = Command::new(&std::env::current_exe()?)
-                    .args(std::env::args().skip(1))
-                    .arg("--master-socket")
-                    .stdin(Stdio::piped())
-                    .spawn()?;
-
-                let mut stdin = cmd.stdin.take().unwrap();
-                stdin.write_all(&socket_secret)?;
-                stdin.write_all(b"\n")?;
-
-                cmd.wait()?;
-
-                let (mut slave_stream, _) = socket.accept()?;
-
-                unsafe {
-                    reader_buf.send_over_socket(&mut slave_stream)?;
-                    sender_buf.send_over_socket(&mut slave_stream)?;
-                    send_fd_over_socket(&mut slave_stream, stream)?;
-                };
-                slave_stream.shutdown(std::net::Shutdown::Both)?;
-
-                state.serialize(&mut stdin)?;
-
-                return Ok(());
+            KeepProcessing::StopAndTransferToChild(username) => {
+                return transfer_connection(state, reader_buf, sender_buf, stream, username);
             }
         }
 
@@ -721,8 +676,11 @@ fn handle_stream_with_preexisting_state(
     }
 }
 
-fn master_process() -> Result<(), Error> {
-    let mut listener = TcpListener::bind(std::net::SocketAddr::from_str("127.0.0.1:2222")?)?;
+fn master_process(options: Options) -> Result<(), Error> {
+    let mut listener = TcpListener::bind(std::net::SocketAddr::from_str(&format!(
+        "{}:{}",
+        options.listening_address, options.port
+    ))?)?;
 
     let mut poll = Poll::new()?;
     let mut events = Events::with_capacity(128);
@@ -761,11 +719,29 @@ fn master_process() -> Result<(), Error> {
     }
 }
 
+fn protect_process() -> Result<(), Error> {
+    prctl::set_dumpable(false).map_err(|_| Error::ChildProtectionFailed)?;
+    prctl::set_keepcaps(false).map_err(|_| Error::ChildProtectionFailed)?;
+    prctl::set_no_new_privs().map_err(|_| Error::ChildProtectionFailed)?;
+
+    Ok(())
+}
+
 #[derive(Debug, FromArgs)]
 #[argh(description = "Smicro SSHD server")]
 struct Options {
     #[argh(option, description = "level of logging")]
     log_level: Option<Level>,
+
+    #[argh(
+        option,
+        description = "bind IP address",
+        default = "String::from(\"0.0.0.0\")"
+    )]
+    listening_address: String,
+
+    #[argh(option, description = "listening port", default = "22")]
+    port: u16,
 
     #[argh(
         switch,
@@ -782,10 +758,12 @@ fn main() -> Result<(), Error> {
 
     if options.master_socket {
         // detach the process from its sshd parent
-        if let ForkResult::Parent { .. } = unsafe { fork() }.map_err(|_| Error::ForkFailed)? {
+        if let ForkResult::Parent { .. } = unsafe { fork() }.map_err(Error::ForkFailed)? {
             return Ok(());
         }
     }
+
+    protect_process()?;
 
     let log_level = options.log_level.unwrap_or(Level::Info);
     if options.log_to_syslog {
@@ -799,43 +777,25 @@ fn main() -> Result<(), Error> {
     }
 
     if options.master_socket {
-        let mut abstract_addr = String::with_capacity(64);
-        let _ = stdin().read_line(&mut abstract_addr)?;
-        // drop the newline character
-        abstract_addr.pop();
-        let socket_addr = SocketAddr::from_abstract_name(&abstract_addr.as_bytes())?;
-        let mut stream = UnixStream::connect_addr(&socket_addr)?;
+        let (user, state, reader_buf, sender_buf, stream) = receive_connection()?;
 
-        unsafe {
-            let reader_buf = <LoopingBuffer<MAX_PKT_SIZE>>::receive_over_socket(&mut stream)?;
-            let sender_buf = <LoopingBuffer<MAX_PKT_SIZE>>::receive_over_socket(&mut stream)?;
+        // switch to the user session
+        // TODO: do the switch with PAM
+        setgid(user.gid).map_err(Error::UserChangeFailed)?;
+        setuid(user.uid).map_err(Error::UserChangeFailed)?;
 
-            let client_socket = receive_fd_over_socket(&mut stream)?;
-
-            let mut buf = Vec::new();
-            stdin().read_to_end(&mut buf)?;
-
-            let state = match State::deserialize(buf.as_slice()) {
-                Err(e) => {
-                    println!("{:?}", e);
-                    return Err(e.into());
-                }
-                Ok((_, state)) => state,
-            };
-
-            handle_stream_with_preexisting_state(
-                client_socket,
-                reader_buf,
-                sender_buf,
-                state,
-                SessionStates::SessionStateEstablished(
-                    SessionStateEstablished::ExpectsChannelOpen(ExpectsChannelOpen {}),
-                ),
-            )?;
-        };
+        handle_stream_with_preexisting_state(
+            stream,
+            reader_buf,
+            sender_buf,
+            state,
+            SessionStates::SessionStateEstablished(SessionStateEstablished::ExpectsChannelOpen(
+                ExpectsChannelOpen {},
+            )),
+        )?;
 
         Ok(())
     } else {
-        master_process()
+        master_process(options)
     }
 }

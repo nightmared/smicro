@@ -20,12 +20,11 @@ use crate::{
         MessageUserAuthFailure, MessageUserAuthPublicKeyOk, MessageUserAuthRequest,
         MessageUserAuthSuccess, UserAuthPublickey,
     },
-    session::ExpectsChannelOpen,
     state::State,
     write_message,
 };
 
-use super::{PacketProcessingDecision, SessionStateEstablished, SessionStates};
+use super::{PacketProcessingDecision, SessionStateEstablished};
 
 #[declare_session_state(msg_type = MessageType::ServiceRequest)]
 pub struct ExpectsServiceRequest {}
@@ -216,17 +215,9 @@ impl ExpectsUserAuthRequest {
                     return Ok(SessionStateEstablished::ExpectsUserAuthRequest(self.clone()).into())
                 }
                 PubkeyAuthDecision::Accepted => {
-                    //return Ok(PacketProcessingDecision::NewState(
-                    //    SessionStates::SessionStateEstablished(
-                    //        SessionStateEstablished::ExpectsChannelOpen(ExpectsChannelOpen {}),
-                    //    ),
-                    //));
-
                     return Ok(PacketProcessingDecision::SpawnChild(
-                        SessionStates::SessionStateEstablished(
-                            SessionStateEstablished::ExpectsChannelOpen(ExpectsChannelOpen {}),
-                        ),
-                    ));
+                        msg.user_name.to_string(),
+                    ))
                 }
             }
         }

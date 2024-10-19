@@ -103,7 +103,11 @@ pub enum Error {
     #[error("Key type whose support is not implemented")]
     UnsupportedKeyType,
     #[error("Fork of the child process failed")]
-    ForkFailed,
+    ForkFailed(#[source] nix::errno::Errno),
+    #[error("Could not protect the child process from illegitimate accesses")]
+    ChildProtectionFailed,
+    #[error("Changing user failed")]
+    UserChangeFailed(#[source] nix::errno::Errno),
 }
 
 #[derive(thiserror::Error, Debug)]

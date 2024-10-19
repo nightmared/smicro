@@ -16,7 +16,7 @@ pub use self::session_establishment::{
 
 pub enum PacketProcessingDecision {
     NewState(SessionStates),
-    SpawnChild(SessionStates),
+    SpawnChild(String),
     PeerTriggeredDisconnection,
 }
 
