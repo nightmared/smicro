@@ -1,4 +1,5 @@
 #![feature(linux_pidfd)]
+#![feature(anonymous_pipe)]
 #![feature(unix_socket_ancillary_data)]
 
 use std::{
@@ -27,7 +28,7 @@ use nix::{
 use session::{
     kex::renegotiate_kex, ExpectsChannelOpen, PacketProcessingDecision, SessionStateEstablished,
 };
-use state::channel::{Channel, ChannelCommand, ChannelState};
+use state::channel::{Channel, ChannelCommand, ChannelFdWrapper, ChannelState};
 use syslog::Facility;
 
 use smicro_common::{LoopingBuffer, LoopingBufferReader, LoopingBufferWriter};
@@ -297,25 +298,30 @@ fn handle_channel_message(event_token: Token, chan: &mut Channel) -> Result<NonI
         .as_mut()
         .ok_or(Error::MissingCommandInChannel)?;
 
-    let mut res = NonIOProgress::Done;
-
-    if event_token.0 % 4 == 0 {
-        // stdin
-        write_buffer_to_stream(&mut cmd.stdin_buffer, &mut cmd.stdin)?;
-    } else if event_token.0 % 4 == 1 {
-        // stdout
-        res |= read_stream_to_buffer(&mut cmd.stdout, &mut cmd.stdout_buffer)?;
-    } else if event_token.0 % 4 == 2 {
-        // stderr
-        res |= read_stream_to_buffer(&mut cmd.stderr, &mut cmd.stderr_buffer)?;
-    } else if event_token.0 % 4 == 3 {
+    if event_token.0 % 4 == 3 {
         // maybe the process exited?
         if let Ok(Some(exit_status)) = cmd.command.try_wait() {
             chan.state = ChannelState::StoppedWithStatus(exit_status.code().unwrap_or(255));
         }
+        return Ok(NonIOProgress::Done);
     }
 
-    Ok(res)
+    match &mut cmd.fds {
+        ChannelFdWrapper::WithPty(pty) => {
+            cmd.flush_writeable_data()?;
+            return cmd.flush_readable_data();
+        }
+        ChannelFdWrapper::WithoutPty(ref mut fds) => {
+            if event_token.0 % 4 == 0 {
+                // stdin
+                cmd.flush_writeable_data()?;
+                return Ok(NonIOProgress::Done);
+            } else {
+                // stdout or stderr
+                return cmd.flush_readable_data();
+            }
+        }
+    }
 }
 
 fn handle_channel_data(event_token: Token, state: &mut State) -> Result<(), Error> {
@@ -348,23 +354,33 @@ fn register_channel(
 ) -> Result<(), std::io::Error> {
     debug!("Registering channel {}", chan_number);
     let token_base = (chan_number + 1) as usize * 4;
-    poll.registry().register(
-        &mut SourceFd(&cmd.stdin.as_raw_fd()),
-        Token(token_base),
-        Interest::WRITABLE,
-    )?;
-    poll.registry().register(
-        &mut SourceFd(&cmd.stdout.as_raw_fd()),
-        Token(token_base + 1),
-        Interest::READABLE,
-    )?;
-    poll.registry().register(
-        &mut SourceFd(&cmd.stderr.as_raw_fd()),
-        Token(token_base + 2),
-        Interest::READABLE,
-    )?;
+    let registry = poll.registry();
+    match &cmd.fds {
+        ChannelFdWrapper::WithPty(pty) => registry.register(
+            &mut SourceFd(&pty.as_raw_fd()),
+            Token(token_base),
+            Interest::READABLE | Interest::WRITABLE,
+        )?,
+        ChannelFdWrapper::WithoutPty(fds) => {
+            registry.register(
+                &mut SourceFd(&fds.stdin.as_raw_fd()),
+                Token(token_base),
+                Interest::WRITABLE,
+            )?;
+            registry.register(
+                &mut SourceFd(&fds.stdout.as_raw_fd()),
+                Token(token_base + 1),
+                Interest::READABLE,
+            )?;
+            registry.register(
+                &mut SourceFd(&fds.stderr.as_raw_fd()),
+                Token(token_base + 2),
+                Interest::READABLE,
+            )?;
+        }
+    }
 
-    poll.registry().register(
+    registry.register(
         &mut SourceFd(&cmd.command.pidfd()?.as_raw_fd()),
         Token(token_base + 3),
         Interest::READABLE,
@@ -376,9 +392,16 @@ fn register_channel(
 fn unregister_channel(poll: &mut Poll, chan: &Channel) -> Result<(), std::io::Error> {
     if let Some(cmd) = &chan.command {
         let registry = poll.registry();
-        registry.deregister(&mut SourceFd(&cmd.stdin.as_raw_fd()))?;
-        registry.deregister(&mut SourceFd(&cmd.stdout.as_raw_fd()))?;
-        registry.deregister(&mut SourceFd(&cmd.stderr.as_raw_fd()))?;
+        match &cmd.fds {
+            ChannelFdWrapper::WithPty(pty) => {
+                registry.deregister(&mut SourceFd(&pty.as_raw_fd()))?
+            }
+            ChannelFdWrapper::WithoutPty(fds) => {
+                registry.deregister(&mut SourceFd(&fds.stdin.as_raw_fd()))?;
+                registry.deregister(&mut SourceFd(&fds.stdout.as_raw_fd()))?;
+                registry.deregister(&mut SourceFd(&fds.stderr.as_raw_fd()))?;
+            }
+        }
         registry.deregister(&mut SourceFd(&cmd.command.pidfd()?.as_raw_fd()))?;
     }
 
@@ -386,7 +409,7 @@ fn unregister_channel(poll: &mut Poll, chan: &Channel) -> Result<(), std::io::Er
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum NonIOProgress {
+pub enum NonIOProgress {
     Continue,
     Done,
 }
@@ -463,9 +486,7 @@ fn flush_channel<const SIZE: usize, T: LoopingBufferWriter<SIZE>>(
             )?;
         }
 
-        if !cmd.stdin_buffer.get_readable_data().is_empty() {
-            write_buffer_to_stream(&mut cmd.stdin_buffer, &mut cmd.stdin)?;
-        }
+        cmd.flush_writeable_data()?;
 
         if !cmd.stdin_buffer.get_readable_data().is_empty()
             || !cmd.stdout_buffer.get_readable_data().is_empty()
@@ -646,10 +667,7 @@ fn handle_stream_with_preexisting_state(
             .filter(|chan| chan.state != ChannelState::Shutdowned)
             .filter_map(|chan| chan.command.as_mut())
         {
-            non_io_backed_progress |=
-                read_stream_to_buffer(&mut cmd.stdout, &mut cmd.stdout_buffer)?;
-            non_io_backed_progress |=
-                read_stream_to_buffer(&mut cmd.stderr, &mut cmd.stderr_buffer)?;
+            non_io_backed_progress |= cmd.flush_readable_data()?;
         }
 
         process_channel_states(

@@ -194,6 +194,23 @@ pub struct MessageChannelRequest<'a> {
     pub channel_specific_data: &'a [u8],
 }
 
+#[derive(Debug)]
+#[declare_deserializable_struct]
+pub struct PtyReq<'a> {
+    #[field(parser = parse_utf8_slice)]
+    pub variable: &'a str,
+    #[field(parser = be_u32)]
+    pub width_chars: u32,
+    #[field(parser = be_u32)]
+    pub height_chars: u32,
+    #[field(parser = be_u32)]
+    pub width_pixels: u32,
+    #[field(parser = be_u32)]
+    pub height_pixels: u32,
+    #[field(parser = parse_slice)]
+    pub modes: &'a [u8],
+}
+
 #[declare_message(ChannelFailure)]
 pub struct MessageChannelFailure {
     pub recipient_channel: u32,

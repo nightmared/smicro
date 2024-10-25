@@ -32,7 +32,7 @@ pub(crate) fn transfer_connection<const SIZE: usize>(
     let socket_path = SocketAddr::from_abstract_name(&socket_secret)?;
     let socket = UnixListener::bind_addr(&socket_path)?;
 
-    let mut cmd = Command::new(&std::env::current_exe()?)
+    let mut cmd = Command::new("/proc/self/exe")
         .args(std::env::args().skip(1))
         .arg("--master-socket")
         .stdin(Stdio::piped())
@@ -45,6 +45,7 @@ pub(crate) fn transfer_connection<const SIZE: usize>(
     stdin.write_all(username.as_bytes())?;
     stdin.write_all(b"\n")?;
 
+    // Wait for the child to detach itself
     cmd.wait()?;
 
     let (mut slave_stream, _) = socket.accept()?;

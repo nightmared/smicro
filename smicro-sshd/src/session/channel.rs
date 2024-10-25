@@ -1,16 +1,17 @@
-use std::os::fd::{AsRawFd, RawFd};
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
 use std::os::linux::process::CommandExt;
-use std::process::{Command, Stdio};
+use std::process::{ChildStdin, Command, Stdio};
 
 use log::{debug, warn};
+use nix::pty::{openpty, OpenptyResult, Winsize};
 use smicro_common::{LoopingBuffer, LoopingBufferWriter};
 use smicro_macros::declare_session_state;
 use smicro_types::deserialize::DeserializePacket;
 use smicro_types::sftp::deserialize::parse_utf8_slice;
 use smicro_types::ssh::types::MessageType;
 
-use crate::messages::{MessageChannelClose, MessageChannelEof};
-use crate::state::channel::{Channel, ChannelState};
+use crate::messages::{MessageChannelClose, MessageChannelEof, PtyReq};
+use crate::state::channel::{Channel, ChannelFdWithoutPty, ChannelFdWrapper, ChannelState};
 use crate::state::{DirectionState, State};
 use crate::{
     error::Error,
@@ -83,7 +84,18 @@ impl ExpectsChannelOpen {
     }
 }
 
-fn spawn_command(command: &str, with_env: bool) -> Result<ChannelCommand, Error> {
+fn spawn_command(
+    command: &str,
+    with_env: bool,
+    term: Option<OpenptyResult>,
+) -> Result<ChannelCommand, Error> {
+    let stdio_from_term = || -> Stdio {
+        if let Some(term) = &term {
+            unsafe { Stdio::from_raw_fd(term.slave.as_raw_fd()) }
+        } else {
+            Stdio::piped()
+        }
+    };
     // Shell injection FTW!
     // More seriously though, this will be acceptable because the user was identified
     // and this will be executed with the privileges of that target user once
@@ -98,9 +110,9 @@ fn spawn_command(command: &str, with_env: bool) -> Result<ChannelCommand, Error>
     } else {
         &mut inner_command
     }
-    .stdin(Stdio::piped())
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped())
+    .stdin(stdio_from_term())
+    .stdout(stdio_from_term())
+    .stderr(stdio_from_term())
     .create_pidfd(true)
     .spawn()?;
 
@@ -113,17 +125,27 @@ fn spawn_command(command: &str, with_env: bool) -> Result<ChannelCommand, Error>
         }
     };
 
-    let stdin = cmd.stdin.take().ok_or(Error::InvalidStdioHandle)?;
-    set_nonblocking(stdin.as_raw_fd())?;
-    let stdout = cmd.stdout.take().ok_or(Error::InvalidStdioHandle)?;
-    set_nonblocking(stdout.as_raw_fd())?;
-    let stderr = cmd.stderr.take().ok_or(Error::InvalidStdioHandle)?;
-    set_nonblocking(stderr.as_raw_fd())?;
+    let fds = if let Some(term) = term {
+        set_nonblocking(term.master.as_raw_fd())?;
+        ChannelFdWrapper::WithPty(term.master)
+    } else {
+        let stdin = cmd.stdin.take().ok_or(Error::InvalidStdioHandle)?;
+        set_nonblocking(stdin.as_raw_fd())?;
+        let stdout = cmd.stdout.take().ok_or(Error::InvalidStdioHandle)?;
+        set_nonblocking(stdout.as_raw_fd())?;
+        let stderr = cmd.stderr.take().ok_or(Error::InvalidStdioHandle)?;
+        set_nonblocking(stderr.as_raw_fd())?;
+
+        ChannelFdWrapper::WithoutPty(ChannelFdWithoutPty {
+            stdin,
+            stdout,
+            stderr,
+        })
+    };
+
     Ok(ChannelCommand {
         command: cmd,
-        stdin,
-        stdout,
-        stderr,
+        fds,
         stdin_buffer: LoopingBuffer::new()?,
         stdout_buffer: LoopingBuffer::new()?,
         stderr_buffer: LoopingBuffer::new()?,
@@ -136,45 +158,62 @@ fn handle_channel_request<const SIZE: usize, W: LoopingBufferWriter<SIZE>>(
     msg: MessageChannelRequest,
     chan: &mut Channel,
 ) -> Result<(), Error> {
-    if msg.requested_mode == "exec" {
-        let (_, command) = parse_utf8_slice(msg.channel_specific_data)?;
+    debug!("Got a channel request for mode '{}'", msg.requested_mode);
 
-        chan.command = Some(spawn_command(command, true)?);
-
-        if msg.want_reply {
-            let success = MessageChannelSuccess {
-                recipient_channel: chan.remote_channel_number,
-            };
-            write_message(sender, writer, &success)?;
-        }
-        Ok(())
-    } else if msg.requested_mode == "subsystem" {
-        let (_, requested_subsystem) = parse_utf8_slice(msg.channel_specific_data)?;
-        debug!(
-            "Got a request to open the subsystem '{}' on channel {}",
-            requested_subsystem, chan.remote_channel_number
-        );
-        if requested_subsystem == "sftp" {
-            let command = std::env::current_exe()?
-                .parent()
-                .unwrap()
-                .join("smicro_binhelper");
-
-            chan.command = Some(spawn_command(command.to_str().unwrap(), false)?);
-
-            if msg.want_reply {
-                let success = MessageChannelSuccess {
-                    recipient_channel: chan.remote_channel_number,
-                };
-                write_message(sender, writer, &success)?;
-            }
-        } else {
-            warn!("Unsupported filesystem");
-        }
-        Ok(())
-    } else {
-        Err(Error::UnsupportedChannelRequestKind)
+    if chan.command.is_some() {
+        return Err(Error::InvalidChannelReuse);
     }
+
+    match msg.requested_mode {
+        "exec" => {
+            let (_, command) = parse_utf8_slice(msg.channel_specific_data)?;
+
+            chan.command = Some(spawn_command(command, true, None)?);
+        }
+        "shell" => {
+            // TODO: retrieve the user shell and span the command
+            chan.command = Some(spawn_command("/bin/bash", true, chan.term.take())?);
+        }
+        "pty-req" => {
+            let (_, pty) = PtyReq::deserialize(msg.channel_specific_data)?;
+
+            // TODO; handle overflow
+            let term_size = Winsize {
+                ws_row: pty.width_chars as u16,
+                ws_col: pty.height_chars as u16,
+                ws_xpixel: pty.width_pixels as u16,
+                ws_ypixel: pty.height_pixels as u16,
+            };
+            chan.term = Some(openpty(&term_size, None).map_err(Error::PtyAllocationFailed)?);
+        }
+        "subsystem" => {
+            let (_, requested_subsystem) = parse_utf8_slice(msg.channel_specific_data)?;
+            debug!(
+                "Got a request to open the subsystem '{}' on channel {}",
+                requested_subsystem, chan.remote_channel_number
+            );
+            if requested_subsystem == "sftp" {
+                let command = std::env::current_exe()?
+                    .parent()
+                    .unwrap()
+                    .join("smicro_binhelper");
+
+                chan.command = Some(spawn_command(command.to_str().unwrap(), false, None)?);
+            } else {
+                warn!("Unsupported filesystem");
+                return Ok(());
+            }
+        }
+        _ => return Err(Error::UnsupportedChannelRequestKind),
+    };
+    if msg.want_reply {
+        let success = MessageChannelSuccess {
+            recipient_channel: chan.remote_channel_number,
+        };
+        write_message(sender, writer, &success)?;
+    }
+
+    Ok(())
 }
 
 // TODO: handle ChannelExtendedData

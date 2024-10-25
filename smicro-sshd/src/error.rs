@@ -108,6 +108,10 @@ pub enum Error {
     ChildProtectionFailed,
     #[error("Changing user failed")]
     UserChangeFailed(#[source] nix::errno::Errno),
+    #[error("Could not allocate a pty")]
+    PtyAllocationFailed(#[source] nix::errno::Errno),
+    #[error("Trying to spawn a command inside an already in-use channel")]
+    InvalidChannelReuse,
 }
 
 #[derive(thiserror::Error, Debug)]
