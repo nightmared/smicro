@@ -8,11 +8,12 @@ use std::{
     io::{ErrorKind, Read, Write},
     ops::{BitOr, BitOrAssign},
     os::{fd::AsRawFd, linux::process::ChildExt},
+    path::{Path, PathBuf},
     str::FromStr,
     thread,
 };
 
-use argh::FromArgs;
+use argh::FromArgValue;
 use child::{receive_connection, transfer_connection};
 use log::{debug, error, info, trace, warn, Level};
 use messages::{MessageChannelClose, MessageChannelWindowAdjust};
@@ -25,10 +26,14 @@ use nix::{
     sys::{eventfd::EventFd, prctl},
     unistd::{fork, setgid, setuid, ForkResult},
 };
+use options::Options;
 use session::{
     kex::renegotiate_kex, ExpectsChannelOpen, PacketProcessingDecision, SessionStateEstablished,
 };
-use state::channel::{Channel, ChannelCommand, ChannelFdWrapper, ChannelState};
+use state::{
+    channel::{Channel, ChannelCommand, ChannelFdWrapper, ChannelState},
+    AuthMode,
+};
 use syslog::Facility;
 
 use smicro_common::{LoopingBuffer, LoopingBufferReader, LoopingBufferWriter};
@@ -41,6 +46,7 @@ mod child;
 pub mod crypto;
 pub mod error;
 pub mod messages;
+mod options;
 pub mod packet;
 pub mod session;
 pub mod state;
@@ -576,11 +582,15 @@ fn process_channel_states<const SIZE: usize, W: LoopingBufferWriter<SIZE>>(
     Ok(())
 }
 
-fn handle_stream(stream: TcpStream) -> Result<(), Error> {
+fn handle_stream(
+    stream: TcpStream,
+    auth_mode: AuthMode,
+    host_keys_dir: &Path,
+) -> Result<(), Error> {
     let reader_buf = <LoopingBuffer<MAX_PKT_SIZE>>::new()?;
     let sender_buf = <LoopingBuffer<MAX_PKT_SIZE>>::new()?;
 
-    let state = State::new()?;
+    let state = State::new(auth_mode, host_keys_dir)?;
     let session = SessionStates::UninitializedSession(UninitializedSession {});
 
     handle_stream_with_preexisting_state(stream, reader_buf, sender_buf, state, session)
@@ -654,7 +664,10 @@ fn handle_stream_with_preexisting_state(
 
         match handle_packets(&mut reader_buf, &mut sender_buf, &mut session, &mut state)? {
             KeepProcessing::Continue => {}
-            KeepProcessing::StopDisconnected => return Ok(()),
+            KeepProcessing::StopDisconnected => {
+                info!("Connection terminated");
+                return Ok(());
+            }
             KeepProcessing::StopAndTransferToChild(username) => {
                 return transfer_connection(state, reader_buf, sender_buf, stream, username);
             }
@@ -694,7 +707,7 @@ fn handle_stream_with_preexisting_state(
     }
 }
 
-fn master_process(options: Options) -> Result<(), Error> {
+fn master_process(options: &Options) -> Result<(), Error> {
     let mut listener = TcpListener::bind(std::net::SocketAddr::from_str(&format!(
         "{}:{}",
         options.listening_address, options.port
@@ -720,11 +733,17 @@ fn master_process(options: Options) -> Result<(), Error> {
                 match listener.accept() {
                     Ok((stream, _address)) => {
                         info!("Received a new connection");
-                        thread::spawn(move || match handle_stream(stream) {
-                            Ok(()) => {
-                                info!("Connection terminated");
+                        let auth_mode = if options.single_user_mode {
+                            AuthMode::SingleUser(options.authorized_keys_file.clone())
+                        } else {
+                            AuthMode::MultiUser
+                        };
+
+                        let host_keys_dir = options.host_keys_dir.clone();
+                        thread::spawn(move || {
+                            if let Err(e) = handle_stream(stream, auth_mode, &host_keys_dir) {
+                                error!("Got an error while handling a stream: {:?}", e);
                             }
-                            Err(e) => error!("Got an error while handling a stream: {:?}", e),
                         });
                     }
                     Err(ref e) if e.kind() == ErrorKind::WouldBlock => break,
@@ -745,34 +764,15 @@ fn protect_process() -> Result<(), Error> {
     Ok(())
 }
 
-#[derive(Debug, FromArgs)]
-#[argh(description = "Smicro SSHD server")]
-struct Options {
-    #[argh(option, description = "level of logging")]
-    log_level: Option<Level>,
-
-    #[argh(
-        option,
-        description = "bind IP address",
-        default = "String::from(\"0.0.0.0\")"
-    )]
-    listening_address: String,
-
-    #[argh(option, description = "listening port", default = "22")]
-    port: u16,
-
-    #[argh(
-        switch,
-        description = "receive via stdin the socket path through which the connection will be transferred"
-    )]
-    master_socket: bool,
-
-    #[argh(switch, description = "log to syslog")]
-    log_to_syslog: bool,
-}
-
 fn main() -> Result<(), Error> {
     let options: Options = argh::from_env();
+
+    if options.single_user_mode && options.authorized_keys_file.file_name().is_none() {
+        eprintln!(
+            "Invalid argument: the authorized_key_file argument must be set in single user mode"
+        );
+        return Err(Error::InvalidArgument);
+    }
 
     if options.master_socket {
         // detach the process from its sshd parent
@@ -781,7 +781,9 @@ fn main() -> Result<(), Error> {
         }
     }
 
-    protect_process()?;
+    if !options.disable_protections {
+        protect_process()?;
+    }
 
     let log_level = options.log_level.unwrap_or(Level::Info);
     if options.log_to_syslog {
@@ -797,10 +799,11 @@ fn main() -> Result<(), Error> {
     if options.master_socket {
         let (user, state, reader_buf, sender_buf, stream) = receive_connection()?;
 
-        // switch to the user session
-        // TODO: do the switch with PAM
-        setgid(user.gid).map_err(Error::UserChangeFailed)?;
-        setuid(user.uid).map_err(Error::UserChangeFailed)?;
+        if !options.single_user_mode {
+            // switch to the user session
+            setgid(user.gid).map_err(Error::UserChangeFailed)?;
+            setuid(user.uid).map_err(Error::UserChangeFailed)?;
+        }
 
         handle_stream_with_preexisting_state(
             stream,
@@ -814,6 +817,6 @@ fn main() -> Result<(), Error> {
 
         Ok(())
     } else {
-        master_process(options)
+        master_process(&options)
     }
 }

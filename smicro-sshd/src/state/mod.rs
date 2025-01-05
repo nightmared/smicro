@@ -1,7 +1,12 @@
-use std::{fs::read_dir, num::Wrapping, os::unix::ffi::OsStrExt};
+use std::{
+    fs::read_dir,
+    num::Wrapping,
+    os::unix::ffi::OsStrExt,
+    path::{Path, PathBuf},
+};
 
 use log::info;
-use nom::Parser;
+use nom::{AsBytes, Parser};
 use rand::{rngs::ThreadRng, thread_rng};
 
 use smicro_macros::{declare_deserializable_struct, gen_serialize_impl};
@@ -88,6 +93,35 @@ fn create_option_none<T>(input: &[u8]) -> nom::IResult<&[u8], Option<T>, Parsing
 }
 
 #[derive(Debug)]
+pub enum AuthMode {
+    SingleUser(PathBuf),
+    MultiUser,
+}
+
+impl SerializePacket for AuthMode {
+    fn get_size(&self) -> usize {
+        match self {
+            AuthMode::SingleUser(e) => 1 + e.as_os_str().len(),
+            AuthMode::MultiUser => 1,
+        }
+    }
+
+    fn serialize<W: std::io::Write>(&self, mut output: W) -> Result<(), std::io::Error> {
+        match self {
+            AuthMode::SingleUser(e) => {
+                output.write(&[1])?;
+                output.write_all(e.as_os_str().as_bytes())?;
+            }
+            AuthMode::MultiUser => {
+                output.write(&[0])?;
+            }
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
 #[declare_deserializable_struct]
 pub struct State {
     pub sender: DirectionState,
@@ -104,6 +138,8 @@ pub struct State {
     pub channels: ChannelManager,
     #[field(parser = create_option_none)]
     pub rekeying: Option<MessageKeyExchangeInit>,
+    #[field(parser = parse_option_string.map(|v| v.map(PathBuf::from).map(AuthMode::SingleUser).unwrap_or(AuthMode::MultiUser)))]
+    pub auth_mode: AuthMode,
 }
 
 impl SerializePacket for State {
@@ -150,9 +186,9 @@ impl std::fmt::Debug for SessionCryptoMaterials {
 }
 
 impl State {
-    pub fn new() -> Result<Self, Error> {
+    pub fn new(auth_mode: AuthMode, host_keys_dir: &Path) -> Result<Self, Error> {
         let mut host_keys = Vec::new();
-        let files = read_dir("/etc/smicro")?;
+        let files = read_dir(host_keys_dir)?;
         for file in files {
             let file = file?;
             let filename = file.file_name();
@@ -186,6 +222,7 @@ impl State {
             authentified_user: None,
             channels: ChannelManager::new(),
             rekeying: None,
+            auth_mode,
         })
     }
 }

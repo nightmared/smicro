@@ -12,6 +12,7 @@ use smicro_types::{
 };
 
 use crate::crypto::sign::SignerIdentifier;
+use crate::state::AuthMode;
 use crate::{
     crypto::keys::{load_public_key_list, AuthorizedKey},
     error::Error,
@@ -65,11 +66,20 @@ enum PubkeyAuthDecision {
 }
 
 impl ExpectsUserAuthRequest {
-    fn get_authorized_keys_for_user(&self, user: &User) -> Result<Vec<AuthorizedKey>, Error> {
-        // TODO: this should be customizable
-        let mut key_location = user.dir.clone();
-        key_location.push(".ssh");
-        key_location.push("authorized_keys");
+    fn get_authorized_keys_for_user(
+        &self,
+        state: &State,
+        user: &User,
+    ) -> Result<Vec<AuthorizedKey>, Error> {
+        let key_location = if let AuthMode::SingleUser(ref auth_key_file) = state.auth_mode {
+            auth_key_file.clone()
+        } else {
+            // TODO: this should be customizable
+            let mut key_location = user.dir.clone();
+            key_location.push(".ssh");
+            key_location.push("authorized_keys");
+            key_location
+        };
 
         Ok(load_public_key_list(&key_location)?)
     }
@@ -199,7 +209,7 @@ impl ExpectsUserAuthRequest {
 
         let (_user_entry, authorized_keys) =
             if let Ok(Some(user_entry)) = User::from_name(msg.user_name) {
-                let authorized_keys = self.get_authorized_keys_for_user(&user_entry)?;
+                let authorized_keys = self.get_authorized_keys_for_user(&state, &user_entry)?;
                 (user_entry, authorized_keys)
             } else {
                 info!("User {} could not be found, aborting", msg.user_name);

@@ -8,6 +8,8 @@ use crate::state::channel::ChannelAllocationError;
 pub enum Error {
     #[error("Unsupported feature")]
     Unsupported,
+    #[error("Invalid argument")]
+    InvalidArgument,
     #[error("Building a syslog logger failed")]
     SyslogLoggerCreationFailed(#[from] syslog::Error),
     #[error("Couldn't set a logger")]
