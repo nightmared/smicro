@@ -14,7 +14,7 @@ use smicro_types::{
 
 use crate::{
     crypto::{CryptoAlg, KeyWrapper},
-    error::Error,
+    error::{CryptoOperationError, Error},
     MAX_PKT_SIZE,
 };
 
@@ -168,7 +168,11 @@ pub trait Cipher {
 
     fn required_space_to_encrypt(&self, data_len: usize) -> usize;
 
-    fn encrypt(&mut self, data: &mut [u8], sequence_number: u32) -> Result<(), Error>;
+    fn encrypt(
+        &mut self,
+        data: &mut [u8],
+        sequence_number: u32,
+    ) -> Result<(), CryptoOperationError>;
 
     fn decrypt<'a>(
         &mut self,
@@ -190,7 +194,11 @@ impl<T: Cipher> Cipher for KeyWrapper<T> {
         self.inner.required_space_to_encrypt(data_len)
     }
 
-    fn encrypt(&mut self, data: &mut [u8], sequence_number: u32) -> Result<(), Error> {
+    fn encrypt(
+        &mut self,
+        data: &mut [u8],
+        sequence_number: u32,
+    ) -> Result<(), CryptoOperationError> {
         self.inner.encrypt(data, sequence_number)
     }
 
@@ -210,7 +218,7 @@ pub struct Aes256CtrImpl {
 }
 
 impl CryptoAlgWithKey for Aes256CtrImpl {
-    fn new(keys: &[&[u8]]) -> Result<Self, Error> {
+    fn new(keys: &[&[u8]]) -> Result<Self, CryptoOperationError> {
         let raw_key = keys[0];
         let raw_iv = keys[1];
         let key = Array::try_from(&raw_key[0..Aes256Ctr::KEY_SIZE_BYTES])?;
@@ -230,7 +238,11 @@ impl Cipher for Aes256CtrImpl {
         data_len
     }
 
-    fn encrypt(&mut self, data: &mut [u8], _sequence_number: u32) -> Result<(), Error> {
+    fn encrypt(
+        &mut self,
+        data: &mut [u8],
+        _sequence_number: u32,
+    ) -> Result<(), CryptoOperationError> {
         self.cipher_main_message(data);
 
         Ok(())

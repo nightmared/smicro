@@ -6,7 +6,7 @@ use std::{
 };
 
 use log::info;
-use nom::{AsBytes, Parser};
+use nom::Parser;
 use rand::{rngs::ThreadRng, thread_rng};
 
 use smicro_macros::{declare_deserializable_struct, gen_serialize_impl};
@@ -188,9 +188,9 @@ impl std::fmt::Debug for SessionCryptoMaterials {
 impl State {
     pub fn new(auth_mode: AuthMode, host_keys_dir: &Path) -> Result<Self, Error> {
         let mut host_keys = Vec::new();
-        let files = read_dir(host_keys_dir)?;
+        let files = read_dir(host_keys_dir).map_err(Error::CannotOpenHostsKeyDir)?;
         for file in files {
-            let file = file?;
+            let file = file.map_err(Error::RetrievingFileInformationFailed)?;
             let filename = file.file_name();
             let filename = filename.as_bytes();
             if filename.starts_with(b"host_key") && !filename.ends_with(b".pub") {

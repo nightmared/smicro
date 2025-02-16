@@ -18,7 +18,10 @@ use smicro_macros::declare_deserializable_struct;
 use smicro_types::deserialize::DeserializePacket;
 use smicro_types::sftp::deserialize::{parse_slice, parse_utf8_string};
 
-use crate::{crypto::sign::SignerIdentifier, error::Error};
+use crate::{
+    crypto::sign::SignerIdentifier,
+    error::{CryptoOperationError, Error},
+};
 use crate::{error::KeyLoadingError, messages::negotiate_alg_signing_algorithms};
 
 use super::sign::SignerWrapper;
@@ -38,9 +41,10 @@ pub struct OpenSSHKeySerialized<'a> {
 }
 
 pub fn load_hostkey(hostkey_file: &Path) -> Result<SignerWrapper, Error> {
-    let mut f = File::open(hostkey_file)?;
+    let mut f = File::open(hostkey_file).map_err(Error::CannotOpenHostkeyFile)?;
     let mut file_content = Vec::with_capacity(4096);
-    f.read_to_end(&mut file_content)?;
+    f.read_to_end(&mut file_content)
+        .map_err(Error::CannotOpenHostkeyFile)?;
 
     let mut key_parser = delimited(
         tag("-----BEGIN OPENSSH PRIVATE KEY-----\n"),
@@ -129,7 +133,9 @@ pub struct AuthorizedKey {
     pub options: Vec<AuthorizedKeyOption>,
 }
 
-pub fn load_public_key_list(allowed_keys: &Path) -> Result<Vec<AuthorizedKey>, KeyLoadingError> {
+pub fn load_public_key_list(
+    allowed_keys: &Path,
+) -> Result<Vec<AuthorizedKey>, CryptoOperationError> {
     let mut f = File::open(allowed_keys)?;
     let mut file_content = Vec::with_capacity(4096);
     f.read_to_end(&mut file_content)?;

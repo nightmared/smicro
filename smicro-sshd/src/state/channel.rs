@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
-    os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
-    pipe::{PipeReader, PipeWriter},
+    io::{PipeReader, PipeWriter},
+    os::fd::{AsRawFd, FromRawFd, OwnedFd},
     process::{ChildStderr, ChildStdin, ChildStdout},
 };
 

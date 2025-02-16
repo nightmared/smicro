@@ -10,12 +10,18 @@ pub enum Error {
     Unsupported,
     #[error("Invalid argument")]
     InvalidArgument,
+    #[error("Could not bind the socket")]
+    BindFailed(#[source] std::io::Error),
+    #[error("Could not setup an epoll listener")]
+    MioSetupFailed(#[source] std::io::Error),
+    #[error("Could not receive an epoll event")]
+    MioReceiveEventFailed(#[source] std::io::Error),
     #[error("Building a syslog logger failed")]
     SyslogLoggerCreationFailed(#[from] syslog::Error),
     #[error("Couldn't set a logger")]
     SetLoggerFailed(#[from] log::SetLoggerError),
     #[error("An error occured during an IO operation")]
-    IoError(#[from] std::io::Error),
+    IoError(#[source] std::io::Error),
     #[error("Invalid listener address")]
     InvalidListenerAddress(#[from] AddrParseError),
     #[error("Received an invalid packet")]
@@ -32,10 +38,6 @@ pub enum Error {
     ProcessingFailed,
     #[error("Got data in a NEWKEYS message, this shouldn't happen")]
     DataInNewKeysMessage,
-    #[error("Invalid length of the key for the MAC")]
-    InvalidMACKeyLength,
-    #[error("The packet MAC is invalid")]
-    InvalidMAC,
     #[error("Invalid service name in SERVICE_REQUEST")]
     InvalidServiceRequest,
     #[error("Cryptographic error: invalid length")]
@@ -48,34 +50,14 @@ pub enum Error {
     ParsingError(#[from] nom::Err<ParsingError>),
     #[error("This message is not allowed in the current state")]
     DisallowedMessageType(MessageType),
-    #[error("Cryptographic error while doing elliptic curve operations")]
-    EllipticCurveCryptoError(#[from] elliptic_curve::Error),
-    #[error("Invalid point on the curve")]
-    InvalidPointForEcdh,
-    #[error("No host key could be found for that algorithm")]
-    NoGoodHostKeyFound(&'static str),
     #[error("Code error: this cryptographic algorithm should be implemented")]
     MissingCryptoCodePath,
-    #[error("Could not load a private key")]
-    KeyLoadingError(#[from] KeyLoadingError),
-    #[error("Could not sign some data")]
-    SigningError,
     #[error("Overflow: the sequence number wrapped")]
     SequenceNumberWrapped,
-    #[error("Could not decrypt data")]
-    DecryptionError,
-    #[error("Could not encrypt data")]
-    EncryptionError,
     #[error("No signature provided in the authentication request")]
     NoSignatureProvided,
-    #[error("This public key is not properly encoded")]
-    InvalidPublicKey,
-    #[error("Invalid length of the private key material")]
-    InvalidPrivateKeyLength,
     #[error("A session identifier should be available")]
     MissingSessionIdentifier,
-    #[error("This signature is not properly encoded")]
-    InvalidSignature,
     #[error("Cannot allocate a new channel")]
     ChannelAllocationError(#[from] ChannelAllocationError),
     #[error("Invalid channel message")]
@@ -96,10 +78,6 @@ pub enum Error {
     EventFdCreationFailed(#[source] nix::errno::Errno),
     #[error("Cannot signal an event")]
     EventFdSignalingFailed(#[source] nix::errno::Errno),
-    #[error("Invalid data size for crypto operation")]
-    SliceError(#[from] TryFromSliceError),
-    #[error("Invalid buffer size when performing digest calculation")]
-    InvalidBufferSize(#[from] digest::InvalidBufferSize),
     #[error("Invalid or undetected user name")]
     UnknownUserName,
     #[error("Key type whose support is not implemented")]
@@ -114,6 +92,64 @@ pub enum Error {
     PtyAllocationFailed(#[source] nix::errno::Errno),
     #[error("Trying to spawn a command inside an already in-use channel")]
     InvalidChannelReuse,
+    #[error("Couldn't open the host key directory")]
+    CannotOpenHostsKeyDir(#[source] std::io::Error),
+    #[error("Couldn't open a host key file")]
+    CannotOpenHostkeyFile(#[source] std::io::Error),
+    #[error("Couldn't stat() a file")]
+    RetrievingFileInformationFailed(#[source] std::io::Error),
+    #[error("Couldn't serialize a public key authentication request")]
+    UserPubKeySerializationFailed(#[source] std::io::Error),
+    #[error("Couldn't serialize a packet")]
+    PacketSerializationFailed(#[source] std::io::Error),
+    #[error("Cannot set a stream, pty or file descriptor as non-blocking")]
+    SetNonBlockingFailed(#[source] std::io::Error),
+    #[error("Cannot execute a program")]
+    ProgramExecutionFailed(#[source] std::io::Error),
+    #[error("Cannot locate the current binary")]
+    LocateBinaryFailed(#[source] std::io::Error),
+    #[error("Cryptographic failure")]
+    CryptoOperationFailed(#[from] CryptoOperationError),
+    #[error("Could not send a connection to our child")]
+    ConnectionTransferFailed(#[source] std::io::Error),
+    #[error("Could not retrieve a connection from our parent")]
+    ConnectionRetrievalFailed(#[source] std::io::Error),
+}
+
+#[derive(thiserror::Error, Debug)]
+pub enum CryptoOperationError {
+    #[error("Could not perfom a read/write")]
+    IoError(#[from] std::io::Error),
+    #[error("Could not sign some data")]
+    SigningError,
+    #[error("The packet MAC is invalid")]
+    InvalidMAC,
+    #[error("Invalid buffer size when performing digest calculation")]
+    InvalidBufferSize(#[from] digest::InvalidBufferSize),
+    #[error("Cryptographic error while doing elliptic curve operations")]
+    EllipticCurveCryptoError(#[from] elliptic_curve::Error),
+    #[error("Invalid point on the curve")]
+    InvalidPointForEcdh,
+    #[error("No host key could be found for that algorithm")]
+    NoGoodHostKeyFound(&'static str),
+    #[error("An error ocurred parsing a cryptography-related object")]
+    ParsingError(#[from] nom::Err<ParsingError>),
+    #[error("This public key is not properly encoded")]
+    InvalidPublicKey,
+    #[error("This signature is not properly encoded")]
+    InvalidSignature,
+    #[error("Could not load a private key")]
+    KeyLoadingError(#[from] KeyLoadingError),
+    #[error("Invalid length of the private key material")]
+    InvalidPrivateKeyLength,
+    #[error("Invalid length of the key for the MAC")]
+    InvalidMACKeyLength,
+    #[error("Invalid data size for crypto operation")]
+    SliceError(#[from] TryFromSliceError),
+    #[error("Could not decrypt data")]
+    DecryptionError,
+    #[error("Could not encrypt data")]
+    EncryptionError,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -148,4 +184,10 @@ pub enum KeyLoadingError {
     IoError(#[from] std::io::Error),
     #[error("An error ocurred parsing the key")]
     ParsingError(#[from] nom::Err<ParsingError>),
+}
+
+impl From<KeyLoadingError> for Error {
+    fn from(value: KeyLoadingError) -> Self {
+        Error::CryptoOperationFailed(CryptoOperationError::KeyLoadingError(value))
+    }
 }

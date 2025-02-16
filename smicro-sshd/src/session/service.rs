@@ -159,16 +159,20 @@ impl ExpectsUserAuthRequest {
             .session_identifier
             .as_ref()
             .ok_or(Error::MissingSessionIdentifier)?;
-        let mut message = Vec::new();
-        SharedSSHSlice(session_identifier.as_slice()).serialize(&mut message)?;
-        message.push(MessageType::UserAuthRequest as u8);
-        msg.user_name.serialize(&mut message)?;
-        msg.service_name.serialize(&mut message)?;
-        "publickey".serialize(&mut message)?;
-        // the signature is present
-        true.serialize(&mut message)?;
-        req.public_key_alg_name.serialize(&mut message)?;
-        SharedSSHSlice(&authorized_key.key_data).serialize(&mut message)?;
+        let message = (|| -> Result<Vec<u8>, std::io::Error> {
+            let mut message = Vec::new();
+            SharedSSHSlice(session_identifier.as_slice()).serialize(&mut message)?;
+            message.push(MessageType::UserAuthRequest as u8);
+            msg.user_name.serialize(&mut message)?;
+            msg.service_name.serialize(&mut message)?;
+            "publickey".serialize(&mut message)?;
+            // the signature is present
+            true.serialize(&mut message)?;
+            req.public_key_alg_name.serialize(&mut message)?;
+            SharedSSHSlice(&authorized_key.key_data).serialize(&mut message)?;
+            Ok(message)
+        })()
+        .map_err(Error::UserPubKeySerializationFailed)?;
 
         if !verifier.signature_is_valid(&authorized_key.key_data, &message, sig)? {
             info!(

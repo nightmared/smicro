@@ -85,15 +85,24 @@ pub fn write_message<
     let (output_buffer, mac_buffer) = underlying_buffer.split_at_mut(required_space);
 
     {
-        // little tricke for serialization, because the serialize() methods change the size of
+        // little trick for serialization, because the serialize() methods change the size of
         // output buffer, but we want to encrypt the whole buffer afterward
         let mut output_buffer = &mut *output_buffer;
 
         // the packet_length field does not count in the packet size)
-        ((real_packet_length - 4) as u32).serialize(&mut output_buffer)?;
-        let _ = output_buffer.write(&[padding_length as u8, T::get_message_type() as u8])?;
-        payload.serialize(&mut output_buffer)?;
-        padding.as_ref().serialize(&mut output_buffer)?;
+        ((real_packet_length - 4) as u32)
+            .serialize(&mut output_buffer)
+            .map_err(Error::PacketSerializationFailed)?;
+        let _ = output_buffer
+            .write(&[padding_length as u8, T::get_message_type() as u8])
+            .map_err(Error::PacketSerializationFailed)?;
+        payload
+            .serialize(&mut output_buffer)
+            .map_err(Error::PacketSerializationFailed)?;
+        padding
+            .as_ref()
+            .serialize(&mut output_buffer)
+            .map_err(Error::PacketSerializationFailed)?;
     }
 
     // compute the MAC on the unencrypted data

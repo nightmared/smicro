@@ -11,7 +11,7 @@ use smicro_types::ssh::deserialize::streaming_const_take;
 
 use crate::{
     crypto::{CryptoAlgWithKey, KeyWrapper},
-    error::Error,
+    error::{CryptoOperationError, Error},
     packet::MAX_PKT_SIZE,
 };
 
@@ -23,11 +23,11 @@ pub struct Chacha20Poly1305Impl {
 }
 
 impl CryptoAlgWithKey for Chacha20Poly1305Impl {
-    fn new(keys: &[&[u8]]) -> Result<Self, Error> {
+    fn new(keys: &[&[u8]]) -> Result<Self, CryptoOperationError> {
         let raw_key = keys[0];
         let mut fixed_raw_key = [0; 64];
         if raw_key.len() != 2 * Chacha20Poly1305::KEY_SIZE_BYTES {
-            return Err(Error::InvalidPrivateKeyLength);
+            return Err(CryptoOperationError::InvalidPrivateKeyLength);
         }
         fixed_raw_key.copy_from_slice(raw_key);
 
@@ -73,7 +73,11 @@ impl Cipher for Chacha20Poly1305Impl {
         data_len + POLY1305_BLOCK_SIZE
     }
 
-    fn encrypt(&mut self, data: &mut [u8], sequence_number: u32) -> Result<(), Error> {
+    fn encrypt(
+        &mut self,
+        data: &mut [u8],
+        sequence_number: u32,
+    ) -> Result<(), CryptoOperationError> {
         let mut tmp_auth_block = [0; POLY1305_BLOCK_SIZE];
         let (plaintext, auth_block) = data.split_at_mut(data.len() - POLY1305_BLOCK_SIZE);
         self.inner
@@ -130,13 +134,13 @@ pub struct Aes256GcmImplInner {
 }
 
 impl CryptoAlgWithKey for Aes256GcmImplInner {
-    fn new(keys: &[&[u8]]) -> Result<Self, Error> {
+    fn new(keys: &[&[u8]]) -> Result<Self, CryptoOperationError> {
         let raw_key = keys[0];
 
         Ok(Self {
             key: LessSafeKey::new(
                 UnboundKey::new(&AES_256_GCM, raw_key)
-                    .map_err(|_| Error::InvalidPrivateKeyLength)?,
+                    .map_err(|_| CryptoOperationError::InvalidPrivateKeyLength)?,
             ),
         })
     }
@@ -156,11 +160,15 @@ impl Cipher for Aes256GcmImpl {
         data_len + AES256GCM_TAG_SIZE
     }
 
-    fn encrypt(&mut self, data: &mut [u8], _sequence_number: u32) -> Result<(), Error> {
+    fn encrypt(
+        &mut self,
+        data: &mut [u8],
+        _sequence_number: u32,
+    ) -> Result<(), CryptoOperationError> {
         // this is a cipher with authenticated encryptions, so we need to extract the packet length
         // beforehand
         let (_, size_field) =
-            streaming_const_take::<4>(data).map_err(|_| Error::EncryptionError)?;
+            streaming_const_take::<4>(data).map_err(|_| CryptoOperationError::EncryptionError)?;
 
         // encrypt in place
         let cleartext_data_end = data.len() - AES256GCM_TAG_SIZE;
@@ -175,7 +183,7 @@ impl Cipher for Aes256GcmImpl {
                 Aad::from(&size_field),
                 &mut data[4..cleartext_data_end],
             )
-            .map_err(|_| Error::EncryptionError)?;
+            .map_err(|_| CryptoOperationError::EncryptionError)?;
 
         // succeeded -> let's update the nonce
         self.increment_nonce();

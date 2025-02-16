@@ -18,7 +18,7 @@ use smicro_types::{deserialize::DeserializePacket, serialize::SerializePacket};
 
 use crate::{
     crypto::{CryptoAlg, KeyWrapper},
-    error::Error,
+    error::{CryptoOperationError, Error},
 };
 
 use super::CryptoAlgWithKey;
@@ -28,7 +28,7 @@ use super::CryptoAlgWithKey;
 pub trait MACAllocator {
     fn key_size_bites(&self) -> usize;
 
-    fn allocate_with_key(&self, key: &[u8]) -> Result<MACWrapper, Error>;
+    fn allocate_with_key(&self, key: &[u8]) -> Result<MACWrapper, CryptoOperationError>;
 }
 
 #[derive(Clone, Debug)]
@@ -48,7 +48,7 @@ impl MACAllocator for HmacSha2256 {
         256
     }
 
-    fn allocate_with_key(&self, key: &[u8]) -> Result<MACWrapper, Error> {
+    fn allocate_with_key(&self, key: &[u8]) -> Result<MACWrapper, CryptoOperationError> {
         Ok(MACWrapper::KeyWrapperHmacSha256(KeyWrapper::new(&[key])?))
     }
 }
@@ -70,7 +70,7 @@ impl MACAllocator for HmacSha2512 {
         512
     }
 
-    fn allocate_with_key(&self, key: &[u8]) -> Result<MACWrapper, Error> {
+    fn allocate_with_key(&self, key: &[u8]) -> Result<MACWrapper, CryptoOperationError> {
         Ok(MACWrapper::KeyWrapperHmacSha512(KeyWrapper::new(&[key])?))
     }
 }
@@ -85,14 +85,14 @@ pub trait MAC {
         data: &[u8],
         sequence_number: u32,
         output: &mut [u8],
-    ) -> Result<(), Error>;
+    ) -> Result<(), CryptoOperationError>;
 
     fn verify(
         &mut self,
         data: &[u8],
         sequence_number: u32,
         expected_mac: &[u8],
-    ) -> Result<(), Error>;
+    ) -> Result<(), CryptoOperationError>;
 }
 
 impl crate::crypto::CryptoAlgName for Hmac<Sha256> {
@@ -132,7 +132,7 @@ where
         data: &[u8],
         sequence_number: u32,
         output: &mut [u8],
-    ) -> Result<(), Error> {
+    ) -> Result<(), CryptoOperationError> {
         sequence_number.serialize(&mut *self)?;
         data.serialize(&mut *self)?;
 
@@ -146,7 +146,7 @@ where
         data: &[u8],
         sequence_number: u32,
         expected_mac: &[u8],
-    ) -> Result<(), Error> {
+    ) -> Result<(), CryptoOperationError> {
         let mut computed_mac = [0; 64];
         self.compute(data, sequence_number, &mut computed_mac)?;
         // a mediocre attempt at constant-time comparison
@@ -155,7 +155,7 @@ where
             identical &= expected_mac[i] == computed_mac[i];
         }
         if !identical {
-            return Err(Error::InvalidMAC);
+            return Err(CryptoOperationError::InvalidMAC);
         }
 
         Ok(())
@@ -175,7 +175,7 @@ where
         data: &[u8],
         sequence_number: u32,
         output: &mut [u8],
-    ) -> Result<(), Error> {
+    ) -> Result<(), CryptoOperationError> {
         self.inner.compute(data, sequence_number, output)
     }
 
@@ -184,13 +184,14 @@ where
         data: &[u8],
         sequence_number: u32,
         expected_mac: &[u8],
-    ) -> Result<(), Error> {
+    ) -> Result<(), CryptoOperationError> {
         self.inner.verify(data, sequence_number, expected_mac)
     }
 }
 
 impl<T: digest::Mac + digest::KeyInit> CryptoAlgWithKey for T {
-    fn new(keys: &[&[u8]]) -> Result<Self, Error> {
-        <T as digest::Mac>::new_from_slice(keys[0]).map_err(|_| Error::InvalidMACKeyLength)
+    fn new(keys: &[&[u8]]) -> Result<Self, CryptoOperationError> {
+        <T as digest::Mac>::new_from_slice(keys[0])
+            .map_err(|_| CryptoOperationError::InvalidMACKeyLength)
     }
 }

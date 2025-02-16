@@ -114,7 +114,8 @@ fn spawn_command(
     .stdout(stdio_from_term())
     .stderr(stdio_from_term())
     .create_pidfd(true)
-    .spawn()?;
+    .spawn()
+    .map_err(Error::ProgramExecutionFailed)?;
 
     let set_nonblocking = |fd: RawFd| -> std::io::Result<()> {
         let value = 1 as libc::c_int;
@@ -126,15 +127,15 @@ fn spawn_command(
     };
 
     let fds = if let Some(term) = term {
-        set_nonblocking(term.master.as_raw_fd())?;
+        set_nonblocking(term.master.as_raw_fd()).map_err(Error::SetNonBlockingFailed)?;
         ChannelFdWrapper::WithPty(term.master)
     } else {
         let stdin = cmd.stdin.take().ok_or(Error::InvalidStdioHandle)?;
-        set_nonblocking(stdin.as_raw_fd())?;
+        set_nonblocking(stdin.as_raw_fd()).map_err(Error::SetNonBlockingFailed)?;
         let stdout = cmd.stdout.take().ok_or(Error::InvalidStdioHandle)?;
-        set_nonblocking(stdout.as_raw_fd())?;
+        set_nonblocking(stdout.as_raw_fd()).map_err(Error::SetNonBlockingFailed)?;
         let stderr = cmd.stderr.take().ok_or(Error::InvalidStdioHandle)?;
-        set_nonblocking(stderr.as_raw_fd())?;
+        set_nonblocking(stderr.as_raw_fd()).map_err(Error::SetNonBlockingFailed)?;
 
         ChannelFdWrapper::WithoutPty(ChannelFdWithoutPty {
             stdin,
@@ -193,7 +194,8 @@ fn handle_channel_request<const SIZE: usize, W: LoopingBufferWriter<SIZE>>(
                 requested_subsystem, chan.remote_channel_number
             );
             if requested_subsystem == "sftp" {
-                let command = std::env::current_exe()?
+                let command = std::env::current_exe()
+                    .map_err(Error::LocateBinaryFailed)?
                     .parent()
                     .unwrap()
                     .join("smicro_binhelper");

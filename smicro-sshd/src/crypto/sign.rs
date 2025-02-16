@@ -20,7 +20,7 @@ use smicro_types::{deserialize::DeserializePacket, sftp::deserialize::parse_utf8
 
 use crate::{
     crypto::{CryptoAlg, CryptoAlgName, KeyWrapper},
-    error::{Error, KeyLoadingError},
+    error::{CryptoOperationError, Error, KeyLoadingError},
 };
 
 use super::CryptoAlgWithKey;
@@ -40,7 +40,7 @@ pub trait SignerIdentifier {
         key: &[u8],
         message: &[u8],
         signature: &[u8],
-    ) -> Result<bool, Error>;
+    ) -> Result<bool, CryptoOperationError>;
 }
 
 #[derive(Clone, Debug)]
@@ -83,10 +83,10 @@ impl SignerIdentifier for EcdsaSha2Nistp521 {
         key: &[u8],
         message: &[u8],
         signature: &[u8],
-    ) -> Result<bool, Error> {
+    ) -> Result<bool, CryptoOperationError> {
         let (_, key) = KeyEcdsa::deserialize(key)?;
         let signer = <ecdsa::VerifyingKey<NistP521>>::from_sec1_bytes(key.key.0)
-            .map_err(|_| Error::InvalidPublicKey)?;
+            .map_err(|_| CryptoOperationError::InvalidPublicKey)?;
 
         let (_, sig) = SignatureWithName::deserialize(signature)?;
         let (_, raw_ecdsa_sig) = EcdsaSignature::deserialize(sig.key.0)?;
@@ -109,7 +109,7 @@ impl SignerIdentifier for EcdsaSha2Nistp521 {
         let s = expand_bignum(raw_ecdsa_sig.s)?;
 
         let ecdsa_sig = <ecdsa::Signature<NistP521>>::from_scalars(r, s)
-            .map_err(|_| Error::InvalidSignature)?;
+            .map_err(|_| CryptoOperationError::InvalidSignature)?;
 
         Ok(signer.verify(message, &ecdsa_sig).is_ok())
     }
@@ -149,7 +149,7 @@ impl SignerIdentifier for Ed25519 {
         key: &[u8],
         message: &[u8],
         signature: &[u8],
-    ) -> Result<bool, Error> {
+    ) -> Result<bool, CryptoOperationError> {
         let (_, key) = Ed25519Key::deserialize(key)?;
         let (_, sig) = SignatureWithName::deserialize(signature)?;
 
@@ -166,16 +166,17 @@ pub trait Signer {
 
     fn integer_size_bytes(&self) -> usize;
 
-    fn sign(&self, data_to_sign: &[u8], output: &mut dyn Write) -> Result<(), Error>;
+    fn sign(&self, data_to_sign: &[u8], output: &mut dyn Write)
+        -> Result<(), CryptoOperationError>;
 
-    fn serialize_key(&self) -> Result<Vec<u8>, Error>;
+    fn serialize_key(&self) -> Result<Vec<u8>, CryptoOperationError>;
 }
 
 #[declare_crypto_arg("ecdsa-sha2-nistp521")]
 pub struct EcdsaSha2Nistp521Signer(ecdsa::SigningKey<NistP521>);
 
 impl CryptoAlgWithKey for EcdsaSha2Nistp521Signer {
-    fn new(keys: &[&[u8]]) -> Result<Self, Error>
+    fn new(keys: &[&[u8]]) -> Result<Self, CryptoOperationError>
     where
         Self: Sized,
     {
@@ -213,10 +214,14 @@ impl Signer for EcdsaSha2Nistp521Signer {
         NISTP521_KEY_SIZE_BYTES
     }
 
-    fn sign(&self, data_to_sign: &[u8], output: &mut dyn Write) -> Result<(), Error> {
+    fn sign(
+        &self,
+        data_to_sign: &[u8],
+        output: &mut dyn Write,
+    ) -> Result<(), CryptoOperationError> {
         let data = (&self.0 as &dyn signature::Signer<Signature<NistP521>>)
             .try_sign(data_to_sign)
-            .map_err(|_| Error::SigningError)?
+            .map_err(|_| CryptoOperationError::SigningError)?
             .to_bytes();
 
         let r = PositiveBigNum(&data[0..self.integer_size_bytes()]);
@@ -227,7 +232,7 @@ impl Signer for EcdsaSha2Nistp521Signer {
         Ok(())
     }
 
-    fn serialize_key(&self) -> Result<Vec<u8>, Error> {
+    fn serialize_key(&self) -> Result<Vec<u8>, CryptoOperationError> {
         let mut k_server = Vec::new();
         KeyEcdsa {
             name: self.key_name(),
@@ -244,7 +249,7 @@ impl Signer for EcdsaSha2Nistp521Signer {
 pub struct Ed25519Signer(Ed25519KeyPair);
 
 impl CryptoAlgWithKey for Ed25519Signer {
-    fn new(keys: &[&[u8]]) -> Result<Self, Error>
+    fn new(keys: &[&[u8]]) -> Result<Self, CryptoOperationError>
     where
         Self: Sized,
     {
@@ -255,7 +260,7 @@ impl CryptoAlgWithKey for Ed25519Signer {
         // Extract the private key
         let private_key_seed = &secret_key_data[..ED25519_SIZE_BYTES];
         let key_pair = Ed25519KeyPair::from_seed_and_public_key(private_key_seed, public_key_data)
-            .map_err(|_| Error::KeyLoadingError(KeyLoadingError::NotASecretKey))?;
+            .map_err(|_| KeyLoadingError::NotASecretKey)?;
 
         Ok(Ed25519Signer(key_pair))
     }
@@ -270,13 +275,17 @@ impl Signer for Ed25519Signer {
         ED25519_SIZE_BYTES
     }
 
-    fn sign(&self, data_to_sign: &[u8], output: &mut dyn Write) -> Result<(), Error> {
+    fn sign(
+        &self,
+        data_to_sign: &[u8],
+        output: &mut dyn Write,
+    ) -> Result<(), CryptoOperationError> {
         let signature = self.0.sign(data_to_sign);
 
         Ok(signature.as_ref().serialize(output)?)
     }
 
-    fn serialize_key(&self) -> Result<Vec<u8>, Error> {
+    fn serialize_key(&self) -> Result<Vec<u8>, CryptoOperationError> {
         let mut k_server = Vec::new();
         Ed25519Key {
             name: self.key_name(),
@@ -297,11 +306,15 @@ impl<T: Signer> Signer for KeyWrapper<T> {
         self.inner.integer_size_bytes()
     }
 
-    fn sign(&self, data_to_sign: &[u8], output: &mut dyn Write) -> Result<(), Error> {
+    fn sign(
+        &self,
+        data_to_sign: &[u8],
+        output: &mut dyn Write,
+    ) -> Result<(), CryptoOperationError> {
         self.inner.sign(data_to_sign, output)
     }
 
-    fn serialize_key(&self) -> Result<Vec<u8>, Error> {
+    fn serialize_key(&self) -> Result<Vec<u8>, CryptoOperationError> {
         self.inner.serialize_key()
     }
 }

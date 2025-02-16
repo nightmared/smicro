@@ -16,6 +16,7 @@ use smicro_macros::{
 use smicro_types::ssh::types::{SSHSlice, SharedSSHSlice};
 use smicro_types::{deserialize::DeserializePacket, serialize::SerializePacket};
 
+use crate::error::CryptoOperationError;
 use crate::{
     crypto::{
         compute_exchange_hash, derive_encryption_key,
@@ -46,7 +47,7 @@ pub trait KEX {
         state: &mut State,
         ecdh_init: &MessageKexEcdhInit,
         received_kex_msg: &KexReceived,
-    ) -> Result<(MessageKexEcdhReply, KexNegotiatedKeys), Error>;
+    ) -> Result<(MessageKexEcdhReply, KexNegotiatedKeys), CryptoOperationError>;
 }
 
 #[derive(Clone, Debug)]
@@ -67,7 +68,7 @@ impl KEX for EcdhSha2Nistp521 {
         state: &mut State,
         ecdh_init: &MessageKexEcdhInit,
         received_kex_msg: &KexReceived,
-    ) -> Result<(MessageKexEcdhReply, KexNegotiatedKeys), Error> {
+    ) -> Result<(MessageKexEcdhReply, KexNegotiatedKeys), CryptoOperationError> {
         let crypto_algs = received_kex_msg.new_crypto_algs.clone();
 
         // Compute the shared secret
@@ -84,7 +85,7 @@ impl KEX for EcdhSha2Nistp521 {
             .mul(p521::Scalar::from_uint_unchecked(NistP521::ORDER))
             != p521::ProjectivePoint::IDENTITY
         {
-            return Err(Error::InvalidPointForEcdh);
+            return Err(CryptoOperationError::InvalidPointForEcdh);
         }
 
         let my_secret = EcEphemeralSecret::random(&mut state.receiver.rng);
@@ -96,7 +97,9 @@ impl KEX for EcdhSha2Nistp521 {
             .host_keys
             .iter()
             .find(|host_key| host_key.name() == crypto_algs.host_key_alg.name())
-            .ok_or(Error::NoGoodHostKeyFound(crypto_algs.host_key_alg.name()))?;
+            .ok_or(CryptoOperationError::NoGoodHostKeyFound(
+                crypto_algs.host_key_alg.name(),
+            ))?;
         let key_name = matching_host_key.name();
 
         // Print the server host key to a byte string
@@ -141,7 +144,7 @@ impl KEX for EcdhSha2Nistp521 {
             signature: kex_signature,
         };
 
-        let derive_key = |c: u8| -> Result<Vec<u8>, Error> {
+        let derive_key = |c: u8| -> Result<Vec<u8>, CryptoOperationError> {
             derive_encryption_key(
                 &mut <Sha512 as Digest>::new(),
                 &shared_secret,

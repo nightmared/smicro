@@ -22,7 +22,7 @@ pub(crate) fn transfer_connection<const SIZE: usize>(
     mut sender_buf: LoopingBuffer<SIZE>,
     stream: TcpStream,
     username: String,
-) -> Result<(), Error> {
+) -> Result<(), std::io::Error> {
     info!("transferring the connection to a new child");
     let mut socket_secret = [0u8; 20];
     for i in 0..socket_secret.len() {
@@ -74,13 +74,17 @@ pub(crate) fn receive_connection<const SIZE: usize>() -> Result<
 > {
     // Retrieve the socket path to receive the fds from the master process
     let mut abstract_addr = String::with_capacity(64);
-    let _ = stdin().read_line(&mut abstract_addr)?;
+    let _ = stdin()
+        .read_line(&mut abstract_addr)
+        .map_err(Error::ConnectionRetrievalFailed)?;
     // drop the newline character
     abstract_addr.pop();
 
     // username
     let mut username = String::with_capacity(64);
-    let _ = stdin().read_line(&mut username)?;
+    let _ = stdin()
+        .read_line(&mut username)
+        .map_err(Error::ConnectionRetrievalFailed)?;
     // drop the newline character
     username.pop();
 
@@ -93,20 +97,25 @@ pub(crate) fn receive_connection<const SIZE: usize>() -> Result<
         }
     };
 
-    let socket_addr = SocketAddr::from_abstract_name(&abstract_addr.as_bytes())?;
-    let mut stream = UnixStream::connect_addr(&socket_addr)?;
+    let socket_addr = SocketAddr::from_abstract_name(&abstract_addr.as_bytes())
+        .map_err(Error::ConnectionRetrievalFailed)?;
+    let mut stream =
+        UnixStream::connect_addr(&socket_addr).map_err(Error::ConnectionRetrievalFailed)?;
 
     let (reader_buf, sender_buf, client_socket) = unsafe {
         let reader_buf = <LoopingBuffer<SIZE>>::receive_over_socket(&mut stream)?;
         let sender_buf = <LoopingBuffer<SIZE>>::receive_over_socket(&mut stream)?;
 
-        let client_socket = receive_fd_over_socket(&mut stream)?;
+        let client_socket =
+            receive_fd_over_socket(&mut stream).map_err(Error::ConnectionRetrievalFailed)?;
 
         (reader_buf, sender_buf, client_socket)
     };
 
     let mut buf = Vec::new();
-    stdin().read_to_end(&mut buf)?;
+    stdin()
+        .read_to_end(&mut buf)
+        .map_err(Error::ConnectionRetrievalFailed)?;
 
     let state = match State::deserialize(buf.as_slice()) {
         Err(e) => {

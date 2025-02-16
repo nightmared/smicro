@@ -32,8 +32,10 @@ impl SessionState for UninitializedSession {
         input: &'a mut [u8],
     ) -> Result<(&'a [u8], PacketProcessingDecision), Error> {
         // Write the identification string
-        writer.write(IDENTIFIER_STRING.as_bytes())?;
-        writer.write(b"\r\n")?;
+        writer
+            .write(IDENTIFIER_STRING.as_bytes())
+            .map_err(Error::IoError)?;
+        writer.write(b"\r\n").map_err(Error::IoError)?;
         Ok((
             input,
             PacketProcessingDecision::NewState(SessionStates::IdentifierStringSent(

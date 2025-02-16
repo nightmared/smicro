@@ -165,7 +165,7 @@ fn read_stream_to_buffer<const SIZE: usize, R: Read + ?Sized>(
             Err(e) if e.kind() == ErrorKind::WouldBlock => {
                 break;
             }
-            Err(e) => return Err(Error::from(e)),
+            Err(e) => return Err(Error::IoError(e)),
         }
     }
 
@@ -193,7 +193,7 @@ fn write_buffer_to_stream<const SIZE: usize, W: Write + ?Sized>(
             Err(e) if e.kind() == ErrorKind::WouldBlock => {
                 break;
             }
-            Err(e) => return Err(Error::from(e)),
+            Err(e) => return Err(Error::IoError(e)),
         }
     }
 
@@ -603,25 +603,29 @@ fn handle_stream_with_preexisting_state(
     mut state: State,
     mut session: SessionStates,
 ) -> Result<(), Error> {
-    let mut poll = Poll::new()?;
+    let mut poll = Poll::new().map_err(Error::MioSetupFailed)?;
     let mut events = Events::with_capacity(128);
 
     let registry = poll.registry();
 
     let stream_token = Token(0);
-    registry.register(
-        &mut stream,
-        stream_token,
-        Interest::READABLE | Interest::WRITABLE,
-    )?;
+    registry
+        .register(
+            &mut stream,
+            stream_token,
+            Interest::READABLE | Interest::WRITABLE,
+        )
+        .map_err(Error::MioSetupFailed)?;
 
     let signal_token = Token(1);
     let data_available_eventfd = EventFd::new().map_err(Error::EventFdCreationFailed)?;
-    registry.register(
-        &mut SourceFd(&data_available_eventfd.as_raw_fd()),
-        signal_token,
-        Interest::READABLE,
-    )?;
+    registry
+        .register(
+            &mut SourceFd(&data_available_eventfd.as_raw_fd()),
+            signal_token,
+            Interest::READABLE,
+        )
+        .map_err(Error::MioSetupFailed)?;
 
     let mut registered_channels: HashSet<u32> = HashSet::new();
     let mut channels_to_remove: HashSet<u32> = HashSet::new();
@@ -630,7 +634,7 @@ fn handle_stream_with_preexisting_state(
         match poll.poll(&mut events, None) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(e) => return Err(e.into()),
+            Err(e) => return Err(Error::MioReceiveEventFailed(e)),
         }
 
         let mut non_io_backed_progress = NonIOProgress::Done;
@@ -669,7 +673,8 @@ fn handle_stream_with_preexisting_state(
                 return Ok(());
             }
             KeepProcessing::StopAndTransferToChild(username) => {
-                return transfer_connection(state, reader_buf, sender_buf, stream, username);
+                return transfer_connection(state, reader_buf, sender_buf, stream, username)
+                    .map_err(Error::ConnectionTransferFailed);
             }
         }
 
@@ -711,19 +716,21 @@ fn master_process(options: &Options) -> Result<(), Error> {
     let mut listener = TcpListener::bind(std::net::SocketAddr::from_str(&format!(
         "{}:{}",
         options.listening_address, options.port
-    ))?)?;
+    ))?)
+    .map_err(Error::BindFailed)?;
 
-    let mut poll = Poll::new()?;
+    let mut poll = Poll::new().map_err(Error::MioSetupFailed)?;
     let mut events = Events::with_capacity(128);
 
     poll.registry()
-        .register(&mut listener, Token(0), Interest::READABLE)?;
+        .register(&mut listener, Token(0), Interest::READABLE)
+        .map_err(Error::MioSetupFailed)?;
 
     loop {
         match poll.poll(&mut events, None) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(e) => return Err(e.into()),
+            Err(e) => return Err(Error::MioReceiveEventFailed(e)),
         }
 
         for _event in events.iter() {

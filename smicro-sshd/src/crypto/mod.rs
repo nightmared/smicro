@@ -11,6 +11,7 @@ use smicro_types::ssh::types::{
 };
 use smicro_types::{deserialize::DeserializePacket, serialize::SerializePacket};
 
+use crate::error::CryptoOperationError;
 use crate::messages::{MessageKexEcdhInit, MessageKeyExchangeInit};
 use crate::state::IDENTIFIER_STRING;
 use crate::{error::Error, state::State};
@@ -39,7 +40,7 @@ pub trait CryptoAlg {
 }
 
 pub trait CryptoAlgWithKey {
-    fn new(keys: &[&[u8]]) -> Result<Self, Error>
+    fn new(keys: &[&[u8]]) -> Result<Self, CryptoOperationError>
     where
         Self: Sized;
 }
@@ -66,7 +67,7 @@ fn compute_exchange_hash<C: elliptic_curve::Curve>(
     ecdh_init: &MessageKexEcdhInit,
     my_kex_message: &MessageKeyExchangeInit,
     peer_kex_message: &MessageKeyExchangeInit,
-) -> Result<Vec<u8>, Error> {
+) -> Result<Vec<u8>, CryptoOperationError> {
     let mut hash = HashAdaptor(hash);
 
     // Hash the identification strings
@@ -80,15 +81,16 @@ fn compute_exchange_hash<C: elliptic_curve::Curve>(
     IDENTIFIER_STRING.serialize(&mut hash)?;
 
     // Hash the SSH_MSG_KEXINIT messages
-    let mut serialize_kex_msg = |kex_msg: &MessageKeyExchangeInit| -> Result<(), Error> {
-        let mut tmp_buf = Vec::new();
-        kex_msg.serialize(&mut tmp_buf)?;
+    let mut serialize_kex_msg =
+        |kex_msg: &MessageKeyExchangeInit| -> Result<(), CryptoOperationError> {
+            let mut tmp_buf = Vec::new();
+            kex_msg.serialize(&mut tmp_buf)?;
 
-        ((tmp_buf.len() + 1) as u32).serialize(&mut hash)?;
-        (&[MessageType::KexInit as u8] as &[u8]).serialize(&mut hash)?;
-        tmp_buf.serialize(&mut hash)?;
-        Ok(())
-    };
+            ((tmp_buf.len() + 1) as u32).serialize(&mut hash)?;
+            (&[MessageType::KexInit as u8] as &[u8]).serialize(&mut hash)?;
+            tmp_buf.serialize(&mut hash)?;
+            Ok(())
+        };
     serialize_kex_msg(peer_kex_message)?;
     serialize_kex_msg(my_kex_message)?;
 
@@ -115,7 +117,7 @@ fn derive_encryption_key<C: elliptic_curve::Curve>(
     char_index: u8,
     session_id: &[u8],
     needed_bits: usize,
-) -> Result<Vec<u8>, Error> {
+) -> Result<Vec<u8>, CryptoOperationError> {
     let mut hash = HashAdaptor(hash);
 
     let mut keys: Vec<Vec<u8>> = Vec::new();
@@ -249,7 +251,7 @@ impl<T: CryptoAlgName> CryptoAlgName for KeyWrapper<T> {
 }
 
 impl<T: CryptoAlgWithKey + Sized> CryptoAlgWithKey for KeyWrapper<T> {
-    fn new(keys: &[&[u8]]) -> Result<Self, Error> {
+    fn new(keys: &[&[u8]]) -> Result<Self, CryptoOperationError> {
         let inner = T::new(keys)?;
         Ok(Self {
             keys: SlowSSHSlice(keys.iter().map(|x| SlowSSHSlice(x.to_vec())).collect()),
