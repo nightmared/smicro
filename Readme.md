@@ -3,4 +3,4 @@
 ## What
 
 A small & experimental SFTP server, with (soon™) port forwarding.
-However, this does not support interactive shell, and there is no plan to add that capability.
+Currently, interactive shellis supported, but it works very badly (e.g. PTY support is completely broken).

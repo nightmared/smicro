@@ -14,7 +14,10 @@ use smicro_types::{
     deserialize::DeserializePacket,
     error::ParsingError,
     serialize::SerializePacket,
-    ssh::types::{SharedSSHSlice, SharedSlowSSHSlice, SlowSSHSlice},
+    ssh::{
+        deserialize::parse_boolean,
+        types::{SharedSSHSlice, SharedSlowSSHSlice, SlowSSHSlice},
+    },
 };
 
 use crate::{
@@ -98,27 +101,8 @@ pub enum AuthMode {
     MultiUser,
 }
 
-impl SerializePacket for AuthMode {
-    fn get_size(&self) -> usize {
-        match self {
-            AuthMode::SingleUser(e) => 1 + e.as_os_str().len(),
-            AuthMode::MultiUser => 1,
-        }
-    }
-
-    fn serialize<W: std::io::Write>(&self, mut output: W) -> Result<(), std::io::Error> {
-        match self {
-            AuthMode::SingleUser(e) => {
-                output.write(&[1])?;
-                output.write_all(e.as_os_str().as_bytes())?;
-            }
-            AuthMode::MultiUser => {
-                output.write(&[0])?;
-            }
-        }
-
-        Ok(())
-    }
+fn create_auth_mode(input: &[u8]) -> nom::IResult<&[u8], AuthMode, ParsingError> {
+    Ok((input, AuthMode::MultiUser))
 }
 
 #[derive(Debug)]
@@ -138,7 +122,10 @@ pub struct State {
     pub channels: ChannelManager,
     #[field(parser = create_option_none)]
     pub rekeying: Option<MessageKeyExchangeInit>,
-    #[field(parser = parse_option_string.map(|v| v.map(PathBuf::from).map(AuthMode::SingleUser).unwrap_or(AuthMode::MultiUser)))]
+    #[field(parser = parse_boolean)]
+    pub enable_interactive_shell: bool,
+    // this value doesn't matter in the child
+    #[field(parser = create_auth_mode)]
     pub auth_mode: AuthMode,
 }
 
@@ -150,7 +137,7 @@ impl SerializePacket for State {
             + self.peer_identifier_string.get_size()
             + self.session_identifier.get_size()
             + self.authentified_user.get_size()
-            + self.rekeying.get_size()
+            + self.enable_interactive_shell.get_size()
     }
 
     fn serialize<W: std::io::Write>(&self, mut output: W) -> Result<(), std::io::Error> {
@@ -166,7 +153,7 @@ impl SerializePacket for State {
             .map(|v| SharedSSHSlice(v))
             .serialize(&mut output)?;
         self.authentified_user.serialize(&mut output)?;
-        self.rekeying.serialize(output)?;
+        self.enable_interactive_shell.serialize(&mut output)?;
 
         Ok(())
     }
@@ -186,7 +173,11 @@ impl std::fmt::Debug for SessionCryptoMaterials {
 }
 
 impl State {
-    pub fn new(auth_mode: AuthMode, host_keys_dir: &Path) -> Result<Self, Error> {
+    pub fn new(
+        auth_mode: AuthMode,
+        enable_interactive_shell: bool,
+        host_keys_dir: &Path,
+    ) -> Result<Self, Error> {
         let mut host_keys = Vec::new();
         let files = read_dir(host_keys_dir).map_err(Error::CannotOpenHostsKeyDir)?;
         for file in files {
@@ -223,6 +214,7 @@ impl State {
             channels: ChannelManager::new(),
             rekeying: None,
             auth_mode,
+            enable_interactive_shell,
         })
     }
 }

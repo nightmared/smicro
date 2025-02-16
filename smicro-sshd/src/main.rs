@@ -585,12 +585,13 @@ fn process_channel_states<const SIZE: usize, W: LoopingBufferWriter<SIZE>>(
 fn handle_stream(
     stream: TcpStream,
     auth_mode: AuthMode,
+    enable_interactive_shell: bool,
     host_keys_dir: &Path,
 ) -> Result<(), Error> {
     let reader_buf = <LoopingBuffer<MAX_PKT_SIZE>>::new()?;
     let sender_buf = <LoopingBuffer<MAX_PKT_SIZE>>::new()?;
 
-    let state = State::new(auth_mode, host_keys_dir)?;
+    let state = State::new(auth_mode, enable_interactive_shell, host_keys_dir)?;
     let session = SessionStates::UninitializedSession(UninitializedSession {});
 
     handle_stream_with_preexisting_state(stream, reader_buf, sender_buf, state, session)
@@ -747,8 +748,14 @@ fn master_process(options: &Options) -> Result<(), Error> {
                         };
 
                         let host_keys_dir = options.host_keys_dir.clone();
+                        let enable_interactive_shell = options.enable_interactive_shell;
                         thread::spawn(move || {
-                            if let Err(e) = handle_stream(stream, auth_mode, &host_keys_dir) {
+                            if let Err(e) = handle_stream(
+                                stream,
+                                auth_mode,
+                                enable_interactive_shell,
+                                &host_keys_dir,
+                            ) {
                                 error!("Got an error while handling a stream: {:?}", e);
                             }
                         });

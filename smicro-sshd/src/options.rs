@@ -42,6 +42,12 @@ pub struct Options {
     pub log_to_syslog: bool,
 
     #[argh(
+        switch,
+        description = "enable support for interactive shells (mostly broken)"
+    )]
+    pub enable_interactive_shell: bool,
+
+    #[argh(
         option,
         description = "path to the directory containing the host keys",
         default = "<PathBuf as std::str::FromStr>::from_str(\"/etc/smicro\").unwrap()"

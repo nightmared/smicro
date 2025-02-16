@@ -158,6 +158,7 @@ fn handle_channel_request<const SIZE: usize, W: LoopingBufferWriter<SIZE>>(
     writer: &mut W,
     msg: MessageChannelRequest,
     chan: &mut Channel,
+    enable_interactive_shell: bool,
 ) -> Result<(), Error> {
     debug!("Got a channel request for mode '{}'", msg.requested_mode);
 
@@ -165,27 +166,38 @@ fn handle_channel_request<const SIZE: usize, W: LoopingBufferWriter<SIZE>>(
         return Err(Error::InvalidChannelReuse);
     }
 
+    let mut success = false;
+
     match msg.requested_mode {
         "exec" => {
-            let (_, command) = parse_utf8_slice(msg.channel_specific_data)?;
+            if enable_interactive_shell {
+                let (_, command) = parse_utf8_slice(msg.channel_specific_data)?;
 
-            chan.command = Some(spawn_command(command, true, None)?);
+                chan.command = Some(spawn_command(command, true, None)?);
+                success = true;
+            }
         }
         "shell" => {
-            // TODO: retrieve the user shell and span the command
-            chan.command = Some(spawn_command("/bin/bash", true, chan.term.take())?);
+            if enable_interactive_shell {
+                // TODO: retrieve the user shell and span the command
+                chan.command = Some(spawn_command("/bin/bash", true, chan.term.take())?);
+                success = true;
+            }
         }
         "pty-req" => {
-            let (_, pty) = PtyReq::deserialize(msg.channel_specific_data)?;
+            if enable_interactive_shell {
+                let (_, pty) = PtyReq::deserialize(msg.channel_specific_data)?;
 
-            // TODO; handle overflow
-            let term_size = Winsize {
-                ws_row: pty.width_chars as u16,
-                ws_col: pty.height_chars as u16,
-                ws_xpixel: pty.width_pixels as u16,
-                ws_ypixel: pty.height_pixels as u16,
-            };
-            chan.term = Some(openpty(&term_size, None).map_err(Error::PtyAllocationFailed)?);
+                // TODO; handle overflow
+                let term_size = Winsize {
+                    ws_row: pty.width_chars as u16,
+                    ws_col: pty.height_chars as u16,
+                    ws_xpixel: pty.width_pixels as u16,
+                    ws_ypixel: pty.height_pixels as u16,
+                };
+                chan.term = Some(openpty(&term_size, None).map_err(Error::PtyAllocationFailed)?);
+                success = true;
+            }
         }
         "subsystem" => {
             let (_, requested_subsystem) = parse_utf8_slice(msg.channel_specific_data)?;
@@ -201,18 +213,25 @@ fn handle_channel_request<const SIZE: usize, W: LoopingBufferWriter<SIZE>>(
                     .join("smicro_binhelper");
 
                 chan.command = Some(spawn_command(command.to_str().unwrap(), false, None)?);
+                success = true;
             } else {
-                warn!("Unsupported filesystem");
-                return Ok(());
+                warn!("Unsupported subsystem");
             }
         }
         _ => return Err(Error::UnsupportedChannelRequestKind),
     };
     if msg.want_reply {
-        let success = MessageChannelSuccess {
-            recipient_channel: chan.remote_channel_number,
-        };
-        write_message(sender, writer, &success)?;
+        if success {
+            let success = MessageChannelSuccess {
+                recipient_channel: chan.remote_channel_number,
+            };
+            write_message(sender, writer, &success)?;
+        } else {
+            let failure = MessageChannelFailure {
+                recipient_channel: chan.remote_channel_number,
+            };
+            write_message(sender, writer, &failure)?;
+        }
     }
 
     Ok(())
@@ -238,7 +257,15 @@ impl AcceptsChannelMessages {
 
                 let chan = state.channels.get_channel(msg.recipient_channel)?;
 
-                if handle_channel_request(&mut state.sender, writer, msg, chan).is_err() {
+                if handle_channel_request(
+                    &mut state.sender,
+                    writer,
+                    msg,
+                    chan,
+                    state.enable_interactive_shell,
+                )
+                .is_err()
+                {
                     let failure = MessageChannelFailure {
                         recipient_channel: chan.remote_channel_number,
                     };
