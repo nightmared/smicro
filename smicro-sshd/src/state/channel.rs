@@ -10,8 +10,8 @@ use nix::pty::OpenptyResult;
 use smicro_common::{BufferCreationError, LoopingBuffer, LoopingBufferReader};
 
 use crate::{
-    error::Error, packet::MAX_PKT_SIZE, read_stream_to_buffer, write_buffer_to_stream,
-    NonIOProgress,
+    NonIOProgress, error::Error, packet::MAX_PKT_SIZE, read_stream_to_buffer,
+    write_buffer_to_stream,
 };
 
 #[derive(Debug)]
@@ -47,7 +47,7 @@ impl ChannelCommand {
                 // Do not drop the raw fd, as we still need it
                 std::mem::forget(pipe_reader);
             }
-            ChannelFdWrapper::WithoutPty(ref mut fds) => {
+            ChannelFdWrapper::WithoutPty(fds) => {
                 non_io_backed_progress |=
                     read_stream_to_buffer(&mut fds.stdout, &mut self.stdout_buffer)?;
                 non_io_backed_progress |=
@@ -69,7 +69,7 @@ impl ChannelCommand {
                 std::mem::forget(pipe_writer);
                 Ok(())
             }
-            ChannelFdWrapper::WithoutPty(ref mut fds) => Ok(write_buffer_to_stream(
+            ChannelFdWrapper::WithoutPty(fds) => Ok(write_buffer_to_stream(
                 &mut self.stdin_buffer,
                 &mut fds.stdin,
             )?),

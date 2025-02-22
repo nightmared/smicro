@@ -1,6 +1,6 @@
 [workspace]
 members = ["smicro-macros", "smicro-binhelper", "smicro-types", "smicro-sshd", "smicro-common"]
-resolver = "2"
+resolver = "3"
 
 [profile.release]
 debug = true

@@ -68,7 +68,7 @@ impl GlobalState {
             .map_or(
                 Err(StatusCode::Failure),
                 |Handle { filename, ty }| match ty {
-                    HandleType::Directory(ref mut dir) => Ok((filename, dir)),
+                    HandleType::Directory(dir) => Ok((filename, dir)),
                     _ => Err(StatusCode::Failure),
                 },
             )
@@ -79,7 +79,7 @@ impl GlobalState {
             .map_or(
                 Err(StatusCode::Failure),
                 |Handle { filename, ty }| match ty {
-                    HandleType::File(ref mut file) => Ok((filename, file)),
+                    HandleType::File(file) => Ok((filename, file)),
                     _ => Err(StatusCode::Failure),
                 },
             )

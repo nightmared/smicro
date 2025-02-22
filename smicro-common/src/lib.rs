@@ -435,7 +435,7 @@ pub unsafe fn receive_fd_over_socket<T: FromRawFd>(stream: &mut UnixStream) -> s
     }
 
     match fd {
-        Some(fd) => Ok(T::from_raw_fd(fd)),
+        Some(fd) => Ok(unsafe { T::from_raw_fd(fd) }),
         None => Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "Missing socket descriptor",

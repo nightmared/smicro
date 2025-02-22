@@ -8,31 +8,30 @@ use std::{
     io::{ErrorKind, Read, Write},
     ops::{BitOr, BitOrAssign},
     os::{fd::AsRawFd, linux::process::ChildExt},
-    path::{Path, PathBuf},
+    path::Path,
     str::FromStr,
     thread,
 };
 
-use argh::FromArgValue;
 use child::{receive_connection, transfer_connection};
-use log::{debug, error, info, trace, warn, Level};
+use log::{Level, debug, error, info, trace, warn};
 use messages::{MessageChannelClose, MessageChannelWindowAdjust};
 use mio::{
+    Events, Interest, Poll, Token,
     net::{TcpListener, TcpStream},
     unix::SourceFd,
-    Events, Interest, Poll, Token,
 };
 use nix::{
     sys::{eventfd::EventFd, prctl},
-    unistd::{fork, setgid, setuid, ForkResult},
+    unistd::{ForkResult, fork, setgid, setuid},
 };
 use options::Options;
 use session::{
-    kex::renegotiate_kex, ExpectsChannelOpen, PacketProcessingDecision, SessionStateEstablished,
+    ExpectsChannelOpen, PacketProcessingDecision, SessionStateEstablished, kex::renegotiate_kex,
 };
 use state::{
-    channel::{Channel, ChannelCommand, ChannelFdWrapper, ChannelState},
     AuthMode,
+    channel::{Channel, ChannelCommand, ChannelFdWrapper, ChannelState},
 };
 use syslog::Facility;
 
@@ -57,7 +56,7 @@ use crate::{
         ChannelExtendedDataCode, DisconnectReason, MessageChannelData, MessageChannelExtendedData,
         MessageChannelRequest, MessageDisconnect,
     },
-    packet::{write_message, MAX_PKT_SIZE},
+    packet::{MAX_PKT_SIZE, write_message},
     session::{SessionState, SessionStates, UninitializedSession},
     state::{DirectionState, State},
 };
@@ -313,11 +312,11 @@ fn handle_channel_message(event_token: Token, chan: &mut Channel) -> Result<NonI
     }
 
     match &mut cmd.fds {
-        ChannelFdWrapper::WithPty(pty) => {
+        ChannelFdWrapper::WithPty(_) => {
             cmd.flush_writeable_data()?;
             return cmd.flush_readable_data();
         }
-        ChannelFdWrapper::WithoutPty(ref mut fds) => {
+        ChannelFdWrapper::WithoutPty(_) => {
             if event_token.0 % 4 == 0 {
                 // stdin
                 cmd.flush_writeable_data()?;

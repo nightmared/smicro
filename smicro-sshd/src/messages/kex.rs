@@ -2,8 +2,8 @@ use std::cmp::max;
 use std::collections::HashSet;
 
 use log::{debug, error};
-use nom::number::complete::be_u32;
 use nom::Parser;
+use nom::number::complete::be_u32;
 use rand::Rng;
 
 use smicro_macros::{declare_crypto_algs_list, declare_deserializable_struct, declare_message};
@@ -18,13 +18,13 @@ use smicro_types::ssh::{
 
 use crate::crypto::sign::SignerWrapper;
 use crate::{
-    crypto::{cipher::CipherAllocator, mac::MACAllocator, CryptoAlg, CryptoAlgs},
+    crypto::{CryptoAlg, CryptoAlgs, cipher::CipherAllocator, mac::MACAllocator},
     error::Error,
     state::State,
 };
 
 pub fn gen_kex_initial_list(state: &mut State) -> MessageKeyExchangeInit {
-    let cookie: [u8; 16] = state.receiver.rng.gen();
+    let cookie: [u8; 16] = state.receiver.rng.r#gen();
 
     // suboptimal, but only done once per session opening, so let's ignore it for now
     let mut kex_algorithms: Vec<String> =
