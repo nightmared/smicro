@@ -2,8 +2,8 @@ use std::ops::Mul;
 
 use digest::Digest;
 use elliptic_curve::{
-    ecdh::EphemeralSecret as EcEphemeralSecret, scalar::FromUintUnchecked, Curve,
-    PublicKey as EcPublicKey,
+    Curve, PublicKey as EcPublicKey, ecdh::EphemeralSecret as EcEphemeralSecret,
+    scalar::FromUintUnchecked,
 };
 use nom::AsBytes;
 use p521::NistP521;
@@ -16,14 +16,12 @@ use smicro_macros::{
 use smicro_types::ssh::types::{SSHSlice, SharedSSHSlice};
 use smicro_types::{deserialize::DeserializePacket, serialize::SerializePacket};
 
-use crate::error::CryptoOperationError;
 use crate::{
     crypto::{
-        compute_exchange_hash, derive_encryption_key,
+        CryptoAlg, compute_exchange_hash, derive_encryption_key,
         sign::{SignatureWithName, Signer},
-        CryptoAlg,
     },
-    error::Error,
+    error::CryptoOperationError,
     messages::{MessageKexEcdhInit, MessageKexEcdhReply},
     session::KexReceived,
     state::State,

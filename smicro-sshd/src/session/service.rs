@@ -14,12 +14,12 @@ use smicro_types::{
 use crate::crypto::sign::SignerIdentifier;
 use crate::state::AuthMode;
 use crate::{
-    crypto::keys::{load_public_key_list, AuthorizedKey},
+    crypto::keys::{AuthorizedKey, load_public_key_list},
     error::Error,
     messages::{
-        negotiate_alg_signing_algorithms, MessageServiceAccept, MessageServiceRequest,
-        MessageUserAuthFailure, MessageUserAuthPublicKeyOk, MessageUserAuthRequest,
-        MessageUserAuthSuccess, UserAuthPublickey,
+        MessageServiceAccept, MessageServiceRequest, MessageUserAuthFailure,
+        MessageUserAuthPublicKeyOk, MessageUserAuthRequest, MessageUserAuthSuccess,
+        UserAuthPublickey, negotiate_alg_signing_algorithms,
     },
     state::State,
     write_message,
@@ -226,12 +226,14 @@ impl ExpectsUserAuthRequest {
             match self.auth_pub_key(state, writer, &authorized_key, &msg, &pk)? {
                 PubkeyAuthDecision::Rejected => continue,
                 PubkeyAuthDecision::WorkInProgress => {
-                    return Ok(SessionStateEstablished::ExpectsUserAuthRequest(self.clone()).into())
+                    return Ok(
+                        SessionStateEstablished::ExpectsUserAuthRequest(self.clone()).into(),
+                    );
                 }
                 PubkeyAuthDecision::Accepted => {
                     return Ok(PacketProcessingDecision::SpawnChild(
                         msg.user_name.to_string(),
-                    ))
+                    ));
                 }
             }
         }

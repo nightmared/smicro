@@ -1,11 +1,11 @@
 use cipher::{
-    consts::U256,
+    consts::{U64, U256},
     typenum::{IsLess, Le, NonZero},
 };
 use digest::{
+    DynDigest, HashMarker, OutputSizeUser,
     block_buffer::Eager,
     core_api::{BlockSizeUser, BufferKindUser, CoreProxy, FixedOutputCore, UpdateCore},
-    DynDigest, HashMarker,
 };
 use hmac::Hmac;
 use sha2::{Sha256, Sha512};
@@ -18,7 +18,7 @@ use smicro_types::{deserialize::DeserializePacket, serialize::SerializePacket};
 
 use crate::{
     crypto::{CryptoAlg, KeyWrapper},
-    error::{CryptoOperationError, Error},
+    error::CryptoOperationError,
 };
 
 use super::CryptoAlgWithKey;
@@ -75,7 +75,7 @@ impl MACAllocator for HmacSha2512 {
     }
 }
 
-#[create_wrapper_enum_implementing_trait(name = MACWrapper, serializable = true, deserializable = true)]
+#[create_wrapper_enum_implementing_trait(name = MACWrapper, serializable = true, deserializable = true, clonable = false)]
 #[implementors(KeyWrapper::<Hmac<Sha256>>, KeyWrapper::<Hmac<Sha512>>)]
 pub trait MAC {
     fn size_bytes(&self) -> usize;
@@ -117,14 +117,16 @@ where
     T::Core: Clone
         + Default
         + FixedOutputCore
+        + OutputSizeUser
         + UpdateCore
         + HashMarker
         + BufferKindUser<BufferKind = Eager>,
+    <T::Core as OutputSizeUser>::OutputSize: IsLess<U64>,
     <T::Core as BlockSizeUser>::BlockSize: IsLess<U256>,
     Le<<T::Core as BlockSizeUser>::BlockSize, U256>: NonZero,
 {
     fn size_bytes(&self) -> usize {
-        T::Core::block_size()
+        T::Core::output_size()
     }
 
     fn compute(
@@ -148,13 +150,23 @@ where
         expected_mac: &[u8],
     ) -> Result<(), CryptoOperationError> {
         let mut computed_mac = [0; 64];
-        self.compute(data, sequence_number, &mut computed_mac)?;
+        let computed_mac = &mut computed_mac[..self.size_bytes()];
+        self.compute(data, sequence_number, computed_mac)?;
         // a mediocre attempt at constant-time comparison
-        let mut identical = true;
+        let mut different_byte_present = 0;
         for i in 0..self.size_bytes() {
-            identical &= expected_mac[i] == computed_mac[i];
+            let diff = expected_mac[i] ^ computed_mac[i];
+            different_byte_present |= ((diff >> 7)
+                | (diff >> 6)
+                | (diff >> 5)
+                | (diff >> 4)
+                | (diff >> 3)
+                | (diff >> 2)
+                | (diff >> 1)
+                | diff)
+                & 1;
         }
-        if !identical {
+        if different_byte_present == 1 {
             return Err(CryptoOperationError::InvalidMAC);
         }
 

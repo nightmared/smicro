@@ -1,14 +1,12 @@
 use std::io::Write;
 
-use ecdsa::Signature;
+use ed25519_compact::PublicKey;
 use elliptic_curve::{
-    sec1::{EncodedPoint, FromEncodedPoint},
     AffinePoint,
+    sec1::{EncodedPoint, FromEncodedPoint},
 };
 use nom::Parser;
-use p521::NistP521;
-use ring::signature::{Ed25519KeyPair, KeyPair, VerificationAlgorithm, ED25519};
-use signature::Verifier;
+use p521::{NistP521, ecdsa::VerifyingKey, ecdsa::signature::Verifier};
 use smicro_macros::{
     create_wrapper_enum_implementing_trait, declare_crypto_arg, declare_deserializable_struct,
     gen_serialize_impl,
@@ -33,7 +31,7 @@ const NISTP521_KEY_SIZE_BYTES: usize = 66;
 #[implementors(EcdsaSha2Nistp521, Ed25519)]
 pub trait SignerIdentifier {
     fn deserialize_buf_to_key<'a>(&self, buf: &'a [u8])
-        -> Result<(&'a [u8], SignerWrapper), Error>;
+    -> Result<(&'a [u8], SignerWrapper), Error>;
 
     fn signature_is_valid(
         &self,
@@ -85,7 +83,7 @@ impl SignerIdentifier for EcdsaSha2Nistp521 {
         signature: &[u8],
     ) -> Result<bool, CryptoOperationError> {
         let (_, key) = KeyEcdsa::deserialize(key)?;
-        let signer = <ecdsa::VerifyingKey<NistP521>>::from_sec1_bytes(key.key.0)
+        let signer = VerifyingKey::from_sec1_bytes(key.key.0)
             .map_err(|_| CryptoOperationError::InvalidPublicKey)?;
 
         let (_, sig) = SignatureWithName::deserialize(signature)?;
@@ -132,15 +130,12 @@ impl SignerIdentifier for Ed25519 {
         &self,
         buf: &'a [u8],
     ) -> Result<(&'a [u8], SignerWrapper), Error> {
-        let (next_data, public_key_data) = parse_slice(buf)?;
+        let (next_data, _) = parse_slice(buf)?;
         let (next_data, secret_key_data) = parse_slice(next_data)?;
 
         Ok((
             next_data,
-            SignerWrapper::KeyWrapperEd25519Signer(KeyWrapper::new(&[
-                public_key_data,
-                secret_key_data,
-            ])?),
+            SignerWrapper::KeyWrapperEd25519Signer(KeyWrapper::new(&[secret_key_data])?),
         ))
     }
 
@@ -153,13 +148,15 @@ impl SignerIdentifier for Ed25519 {
         let (_, key) = Ed25519Key::deserialize(key)?;
         let (_, sig) = SignatureWithName::deserialize(signature)?;
 
-        Ok(ED25519
-            .verify(key.key.0.into(), message.into(), sig.key.0.into())
-            .is_ok())
+        let pk =
+            PublicKey::from_slice(key.key.0).map_err(|_| CryptoOperationError::InvalidPublicKey)?;
+        let signature = ed25519_compact::Signature::from_slice(&sig.key.0)
+            .map_err(|_| CryptoOperationError::InvalidSignature)?;
+        Ok(pk.verify(message, &signature).is_ok())
     }
 }
 
-#[create_wrapper_enum_implementing_trait(name = SignerWrapper, serializable = true, deserializable = true)]
+#[create_wrapper_enum_implementing_trait(name = SignerWrapper, serializable = true, deserializable = true, clonable = false)]
 #[implementors(KeyWrapper::<EcdsaSha2Nistp521Signer>, KeyWrapper::<Ed25519Signer>)]
 pub trait Signer {
     fn key_name(&self) -> &'static str;
@@ -167,7 +164,7 @@ pub trait Signer {
     fn integer_size_bytes(&self) -> usize;
 
     fn sign(&self, data_to_sign: &[u8], output: &mut dyn Write)
-        -> Result<(), CryptoOperationError>;
+    -> Result<(), CryptoOperationError>;
 
     fn serialize_key(&self) -> Result<Vec<u8>, CryptoOperationError>;
 }
@@ -219,7 +216,8 @@ impl Signer for EcdsaSha2Nistp521Signer {
         data_to_sign: &[u8],
         output: &mut dyn Write,
     ) -> Result<(), CryptoOperationError> {
-        let data = (&self.0 as &dyn signature::Signer<Signature<NistP521>>)
+        let data = (&p521::ecdsa::SigningKey::from(self.0.clone())
+            as &dyn signature::Signer<p521::ecdsa::Signature>)
             .try_sign(data_to_sign)
             .map_err(|_| CryptoOperationError::SigningError)?
             .to_bytes();
@@ -246,20 +244,16 @@ impl Signer for EcdsaSha2Nistp521Signer {
 }
 
 #[declare_crypto_arg("ssh-ed25519")]
-pub struct Ed25519Signer(Ed25519KeyPair);
+pub struct Ed25519Signer(ed25519_compact::KeyPair);
 
 impl CryptoAlgWithKey for Ed25519Signer {
     fn new(keys: &[&[u8]]) -> Result<Self, CryptoOperationError>
     where
         Self: Sized,
     {
-        let public_key_data = keys[0];
-        let secret_key_data = keys[1];
+        let secret_key_data = keys[0];
 
-        // secret_key_data contains the 32 bytes prefix and then a copy of the public key
-        // Extract the private key
-        let private_key_seed = &secret_key_data[..ED25519_SIZE_BYTES];
-        let key_pair = Ed25519KeyPair::from_seed_and_public_key(private_key_seed, public_key_data)
+        let key_pair = ed25519_compact::KeyPair::from_slice(secret_key_data)
             .map_err(|_| KeyLoadingError::NotASecretKey)?;
 
         Ok(Ed25519Signer(key_pair))
@@ -280,7 +274,7 @@ impl Signer for Ed25519Signer {
         data_to_sign: &[u8],
         output: &mut dyn Write,
     ) -> Result<(), CryptoOperationError> {
-        let signature = self.0.sign(data_to_sign);
+        let signature = self.0.sk.sign(data_to_sign, None);
 
         Ok(signature.as_ref().serialize(output)?)
     }
@@ -289,7 +283,7 @@ impl Signer for Ed25519Signer {
         let mut k_server = Vec::new();
         Ed25519Key {
             name: self.key_name(),
-            key: SharedSSHSlice(self.0.public_key().as_ref()),
+            key: SharedSSHSlice(self.0.sk.public_key().as_slice()),
         }
         .serialize(&mut k_server)?;
 

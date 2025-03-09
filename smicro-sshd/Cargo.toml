@@ -15,28 +15,31 @@ smicro_common = { path = "../smicro-common", features = ["share_loop"] }
 smicro_macros = { path = "../smicro-macros" }
 smicro_types = { path = "../smicro-types" }
 libc = "0.2.149"
-elliptic-curve = { version = "0.14.0-rc.1", features = ["ecdh", "sec1", "std"] }
-p521 = { version = "0.14.0-pre.2", features = ["sha512", "digest", "ecdh"] }
+elliptic-curve = { version = "0.13.8", features = ["ecdh", "sec1", "std"] }
+p521 = { version = "0.13.3", features = ["sha512", "digest", "ecdh"] }
 rand = "0.8.5"
 base64 = "0.21.7"
-ecdsa = { version = "0.17.0-pre.9", features = ["signing"] }
-signature = "2.3.0-pre.4"
+ecdsa = { version = "0.16.9", features = ["signing"] }
+signature = "2.2.0"
 sha2 = "0.10"
 digest = "0.10"
 hmac = { version = "0.12", features = ["reset"] }
 hybrid-array = "0.2.3"
 aes = "0.9.0-pre.2"
-cipher = "0.5.0-pre.7"
+cipher = "=0.5.0-pre.7"
 universal-hash = "0.6.0-rc.0"
 mio = { version = "1.0.0", features = ["os-ext", "net"] }
 nix = { version = "0.29", features = ["event", "user", "process", "term"] }
-ring = { version = "0.17.8" }
 argh = { version = "0.1.12", features = ["help"], default-features = false }
 
-aead = { version = "0.6.0-rc.0", optional = true }
-chacha20 = { version = "0.10.0-pre.2", features = ["legacy"], optional = true }
-poly1305 = { version = "0.9.0-rc.0", optional = true }
-aes-gcm = { version = "0.11.0-pre.2", optional = true }
+aead = { version = "0.6.0-rc.0" }
+chacha20 = { version = "0.10.0-pre.2", features = ["legacy"] }
+poly1305 = { version = "0.9.0-rc.0" }
+aes-gcm = { version = "0.11.0-pre.2" }
+ed25519 = "2.2.3"
+ed25519-compact = "2.1.1"
+
+# pinned because of incompatibilities
+inout = "=0.2.0-rc.3"
 
 [features]
-rustcrypto = ["dep:aead", "dep:chacha20", "dep:poly1305", "dep:aes-gcm"]

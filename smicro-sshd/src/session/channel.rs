@@ -1,9 +1,9 @@
-use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
+use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 use std::os::linux::process::CommandExt;
-use std::process::{ChildStdin, Command, Stdio};
+use std::process::{Command, Stdio};
 
 use log::{debug, warn};
-use nix::pty::{openpty, OpenptyResult, Winsize};
+use nix::pty::{OpenptyResult, Winsize, openpty};
 use smicro_common::{LoopingBuffer, LoopingBufferWriter};
 use smicro_macros::declare_session_state;
 use smicro_types::deserialize::DeserializePacket;

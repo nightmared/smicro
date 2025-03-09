@@ -3,8 +3,8 @@ use proc_macro2::Span;
 use proc_macro2_diagnostics::{Diagnostic, SpanDiagnosticExt};
 use quote::quote;
 use syn::{
-    parse, parse::Parser, punctuated::Punctuated, spanned::Spanned, token::Comma, Expr, ExprLit,
-    Fields, ItemStruct, Lit, LitBool, MetaNameValue, Token,
+    Expr, ExprLit, Fields, ItemStruct, Lit, LitBool, MetaNameValue, Token, parse, parse::Parser,
+    punctuated::Punctuated, spanned::Spanned, token::Comma,
 };
 
 pub(crate) fn declare_session_state_inner(
@@ -19,7 +19,7 @@ pub(crate) fn declare_session_state_inner(
         Err(e) => {
             return Err(
                 Span::call_site().error(format!("Couldn't parse the fields of the macro: {}", e))
-            )
+            );
         }
     };
 
@@ -69,7 +69,7 @@ pub(crate) fn declare_session_state_inner(
             return Err(ast
                 .fields
                 .span()
-                .error("Unnamed structures are not supported"))
+                .error("Unnamed structures are not supported"));
         }
         Fields::Named(named_fields) => named_fields.named,
     };

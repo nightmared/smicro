@@ -14,7 +14,7 @@ use smicro_types::{deserialize::DeserializePacket, serialize::SerializePacket};
 use crate::error::CryptoOperationError;
 use crate::messages::{MessageKexEcdhInit, MessageKeyExchangeInit};
 use crate::state::IDENTIFIER_STRING;
-use crate::{error::Error, state::State};
+use crate::state::State;
 
 pub(crate) mod cipher;
 pub(crate) mod kex;
@@ -195,23 +195,6 @@ impl<T> Debug for KeyWrapper<T> {
         f.debug_struct("KeyWrapper")
             .field("inner", &type_name::<T>())
             .finish()
-    }
-}
-
-impl<T: CryptoAlgWithKey> Clone for KeyWrapper<T> {
-    fn clone(&self) -> Self {
-        Self {
-            keys: self.keys.clone(),
-            inner: T::new(
-                &self
-                    .keys
-                    .0
-                    .iter()
-                    .map(|x| x.0.as_ref())
-                    .collect::<Vec<&[u8]>>(),
-            )
-            .expect("Couldn't clone a key from itself!?"),
-        }
     }
 }
 

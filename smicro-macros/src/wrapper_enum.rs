@@ -2,13 +2,14 @@ use proc_macro::TokenStream;
 use proc_macro2_diagnostics::{Diagnostic, SpanDiagnosticExt};
 use quote::quote;
 use syn::{
-    parse, parse::Parser, punctuated::Punctuated, spanned::Spanned, AngleBracketedGenericArguments,
-    Expr, ExprLit, ExprPath, FnArg, GenericArgument, Ident, ItemTrait, Lit, Meta, MetaList, Pat,
-    PatType, Path, PathArguments, Token, TraitItem, Type, TypePath,
+    AngleBracketedGenericArguments, Expr, ExprLit, ExprPath, FnArg, GenericArgument, Ident,
+    ItemTrait, Lit, Meta, MetaList, Pat, PatType, Path, PathArguments, Token, TraitItem, Type,
+    TypePath, parse, parse::Parser, punctuated::Punctuated, spanned::Spanned,
 };
 
 struct WrapperDeclarationArgs {
     name: Ident,
+    clonable: bool,
     serializable: bool,
     deserializable: bool,
 }
@@ -22,6 +23,7 @@ fn parse_wrapper_declaration_args(
     let mut name = None;
     let mut serializable = false;
     let mut deserializable = false;
+    let mut clonable = true;
 
     for arg in attribute_args.iter() {
         if let Meta::NameValue(namevalue) = arg {
@@ -42,6 +44,17 @@ fn parse_wrapper_declaration_args(
                             .value
                             .span()
                             .error(format!("Invalid type for the key {}", key)));
+                    }
+                }
+                "clonable" => {
+                    if let Expr::Lit(ExprLit {
+                        lit: Lit::Bool(boolean),
+                        ..
+                    }) = &namevalue.value
+                    {
+                        clonable = boolean.value;
+                    } else {
+                        return Err(namevalue.span().error("Expected a boolean"));
                     }
                 }
                 "serializable" => {
@@ -79,6 +92,7 @@ fn parse_wrapper_declaration_args(
 
     Ok(WrapperDeclarationArgs {
         name: name.unwrap().clone(),
+        clonable,
         serializable,
         deserializable,
     })
@@ -152,7 +166,7 @@ pub(crate) fn create_wrapper_enum_implementing_trait_inner(
             _ => {
                 return Err(item
                     .span()
-                    .error("Invalid type of items, only methods are supported"))
+                    .error("Invalid type of items, only methods are supported"));
             }
         };
         let attrs = f.attrs.clone();
@@ -245,10 +259,16 @@ pub(crate) fn create_wrapper_enum_implementing_trait_inner(
 
     ast.attrs = attrs;
 
+    let extra_attrs = if args.clonable {
+        quote!(Clone,)
+    } else {
+        quote!()
+    };
+
     Ok(quote! {
         #ast
 
-        #[derive(Clone, Debug)]
+        #[derive(#extra_attrs Debug)]
         pub enum #enum_name {
             #(#implementors_ident(#implementors)),*
         }

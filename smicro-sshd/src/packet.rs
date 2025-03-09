@@ -1,7 +1,7 @@
 use std::io::Write;
 
 use log::{trace, warn};
-use nom::{bytes::streaming::take, sequence::tuple, IResult};
+use nom::{IResult, bytes::streaming::take, sequence::tuple};
 use rand::Rng;
 use smicro_common::LoopingBufferWriter;
 use smicro_types::{error::ParsingError, serialize::SerializePacket};
