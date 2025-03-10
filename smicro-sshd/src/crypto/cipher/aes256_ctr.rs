@@ -61,6 +61,7 @@ impl CipherAllocator for Aes256Ctr {
 pub struct Aes256CtrImpl {
     raw_key: Array<u8, cipher::consts::U32>,
     key: aes::Aes256,
+    base_ctr: Array<u8, cipher::consts::U16>,
     ctr: Array<u8, cipher::consts::U16>,
 }
 
@@ -72,7 +73,12 @@ impl CryptoAlgWithKey for Aes256CtrImpl {
         let key = aes::Aes256::new(&raw_key);
         let ctr = Array::try_from(&raw_iv[0..Aes256Ctr::IV_SIZE_BYTES])?;
 
-        Ok(Self { raw_key, key, ctr })
+        Ok(Self {
+            raw_key,
+            key,
+            base_ctr: ctr,
+            ctr,
+        })
     }
 }
 
@@ -91,6 +97,9 @@ impl Cipher for Aes256CtrImpl {
         data: &mut [u8],
         _sequence_number: u32,
     ) -> Result<(), CryptoOperationError> {
+        // reset the counter state to the last successful decryption position
+        self.ctr = self.base_ctr;
+
         self.cipher_main_message(data);
 
         Ok(())
@@ -98,33 +107,44 @@ impl Cipher for Aes256CtrImpl {
 
     fn decrypt<'a>(
         &mut self,
-        input: &'a mut [u8],
+        input: &'a [u8],
+        tmp_packet: &'a mut [u8; MAX_PKT_SIZE],
         _sequence_number: u32,
     ) -> IResult<&'a [u8], &'a [u8], ParsingError> {
+        // reset the counter state to the last successful decryption position
+        self.ctr = self.base_ctr;
+
         // we need to extract the packet length from the first block
-        let _ = take(Aes256Ctr::BLOCK_SIZE_BYTES)(input.as_ref())?;
-        let pkt_size = self.get_pkt_size(&mut input[0..Aes256Ctr::BLOCK_SIZE_BYTES]);
-        // 5 = length field + 1 byte for the packet itself
-        if pkt_size < 5 || pkt_size as usize > MAX_PKT_SIZE {
+        let (next_data, first_block) = take(Aes256Ctr::BLOCK_SIZE_BYTES)(input.as_ref())?;
+        tmp_packet[0..Aes256Ctr::BLOCK_SIZE_BYTES].copy_from_slice(first_block);
+        self.cipher_block(tmp_packet);
+        let pkt_size =
+            u32::from_be_bytes([tmp_packet[0], tmp_packet[1], tmp_packet[2], tmp_packet[3]]);
+        // length field + packet content, rounded to the next block
+        let full_pkt_size = (pkt_size as usize + 4 + (Aes256Ctr::BLOCK_SIZE_BYTES - 1))
+            & !(Aes256Ctr::BLOCK_SIZE_BYTES - 1);
+        if full_pkt_size < Aes256Ctr::BLOCK_SIZE_BYTES || full_pkt_size > MAX_PKT_SIZE {
             return Err(nom::Err::Failure(ParsingError::InvalidPacketLength(
                 pkt_size as usize,
             )));
         }
 
-        // roundup to the next block number
-        let total_size = (pkt_size as usize + 4 + (Aes256Ctr::BLOCK_SIZE_BYTES - 1))
-            & !(Aes256Ctr::BLOCK_SIZE_BYTES - 1);
         // ensure we have enough data
-        let _ = take(total_size)(input.as_ref())?;
-
-        if pkt_size as usize + 4 > Aes256Ctr::BLOCK_SIZE_BYTES {
-            self.cipher_main_message(&mut input[Aes256Ctr::BLOCK_SIZE_BYTES..total_size]);
+        let (next_data, next_blocks) =
+            take(full_pkt_size - Aes256Ctr::BLOCK_SIZE_BYTES)(next_data)?;
+        for i in 0..next_blocks.len() {
+            tmp_packet[Aes256Ctr::BLOCK_SIZE_BYTES + i] = next_blocks[i];
         }
 
-        let next_data = &input[total_size..];
-        let cur_pkt_plaintext = &input[..total_size];
+        self.cipher_main_message(&mut tmp_packet[Aes256Ctr::BLOCK_SIZE_BYTES..full_pkt_size]);
+
+        let cur_pkt_plaintext = &tmp_packet[..full_pkt_size];
 
         Ok((next_data, cur_pkt_plaintext))
+    }
+
+    fn commit(&mut self) {
+        self.base_ctr = self.ctr;
     }
 }
 
@@ -170,12 +190,6 @@ impl Aes256CtrImpl {
         for i in 0..Aes256Ctr::BLOCK_SIZE_BYTES {
             array[i] ^= keystream[i];
         }
-    }
-
-    fn get_pkt_size(&mut self, arr: &mut [u8]) -> u32 {
-        self.cipher_block(arr);
-
-        u32::from_be_bytes([arr[0], arr[1], arr[2], arr[3]])
     }
 }
 

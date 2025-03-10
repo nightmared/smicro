@@ -117,7 +117,8 @@ impl Cipher for Chacha20Poly1305Impl {
 
     fn decrypt<'a>(
         &mut self,
-        input: &'a mut [u8],
+        input: &'a [u8],
+        tmp_packet: &'a mut [u8; MAX_PKT_SIZE],
         sequence_number: u32,
     ) -> nom::IResult<&'a [u8], &'a [u8], ParsingError> {
         // this is a cipher with authenticated encryptions, so we need to extract the packet length
@@ -131,24 +132,26 @@ impl Cipher for Chacha20Poly1305Impl {
             )));
         }
         // ensure there is enought data in the input slice
-        let (next_data, _) = take(pkt_size)(next_data)?;
-
-        let (_, expected_tag) = take(POLY1305_BLOCK_SIZE)(next_data)?;
-        let real_tag =
-            self.compute_poly1305_hash(&input[0..(pkt_size + 4) as usize], sequence_number);
+        let (next_data, encrypted_blocks) = take(pkt_size)(next_data)?;
+        let (next_data, expected_tag) = take(POLY1305_BLOCK_SIZE)(next_data)?;
+        let real_tag = self.compute_poly1305_hash(&input[..pkt_size as usize + 4], sequence_number);
         if bool::from(real_tag.ct_ne(expected_tag)) {
             return Err(nom::Err::Failure(ParsingError::InvalidMac));
         }
 
         // decrypt in place
-        input[0..4].copy_from_slice(pkt_size.to_be_bytes().as_slice());
-        self.cipher_main_message(&mut input[4..4 + pkt_size as usize], sequence_number);
+        tmp_packet[0..4].copy_from_slice(pkt_size.to_be_bytes().as_slice());
+        tmp_packet[4..pkt_size as usize + 4].copy_from_slice(encrypted_blocks);
 
-        let next_data = &input[poly1305::BLOCK_SIZE + 4 + pkt_size as usize..];
-        let cur_pkt_plaintext = &input[..4 + pkt_size as usize];
+        self.cipher_main_message(&mut tmp_packet[4..pkt_size as usize + 4], sequence_number);
+
+        let cur_pkt_plaintext = &tmp_packet[..pkt_size as usize + 4];
 
         Ok((next_data, cur_pkt_plaintext))
     }
+
+    // Nothing to do here, the sequence number is the only nonce we use here
+    fn commit(&mut self) {}
 }
 
 impl Chacha20Poly1305Impl {

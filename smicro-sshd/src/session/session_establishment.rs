@@ -1,21 +1,22 @@
 use log::{debug, trace};
 use nom::{
+    AsChar,
     bytes::streaming::{tag, take_until, take_while1},
     combinator::{opt, peek},
     multi::many_till,
     sequence::preceded,
-    AsChar,
 };
 use smicro_common::LoopingBufferWriter;
 
 use crate::{
     error::Error,
     messages::gen_kex_initial_list,
+    packet::MAX_PKT_SIZE,
     session::{
-        kex::SessionStateAllowedAfterKex, ExpectsServiceRequest, KexSent, SessionState,
-        SessionStateEstablished, SessionStates,
+        ExpectsServiceRequest, KexSent, SessionState, SessionStateEstablished, SessionStates,
+        kex::SessionStateAllowedAfterKex,
     },
-    state::{State, IDENTIFIER_STRING},
+    state::{IDENTIFIER_STRING, State},
     write_message,
 };
 
@@ -25,11 +26,12 @@ use super::PacketProcessingDecision;
 pub struct UninitializedSession {}
 
 impl SessionState for UninitializedSession {
-    fn process<'a, const SIZE: usize, W: LoopingBufferWriter<SIZE>>(
+    fn process<'a, 'b: 'a, const SIZE: usize, W: LoopingBufferWriter<SIZE>>(
         &mut self,
         _state: &mut State,
         writer: &mut W,
-        input: &'a mut [u8],
+        input: &'a [u8],
+        _tmp_packet: &'b mut [u8; MAX_PKT_SIZE],
     ) -> Result<(&'a [u8], PacketProcessingDecision), Error> {
         // Write the identification string
         writer
@@ -49,11 +51,12 @@ impl SessionState for UninitializedSession {
 pub struct IdentifierStringSent {}
 
 impl SessionState for IdentifierStringSent {
-    fn process<'a, const SIZE: usize, W: LoopingBufferWriter<SIZE>>(
+    fn process<'a, 'b: 'a, const SIZE: usize, W: LoopingBufferWriter<SIZE>>(
         &mut self,
         state: &mut State,
         _writer: &mut W,
-        input: &'a mut [u8],
+        input: &'a [u8],
+        _tmp_packet: &'b mut [u8; MAX_PKT_SIZE],
     ) -> Result<(&'a [u8], PacketProcessingDecision), Error> {
         let input = input as &[u8];
         let consume_until_carriage = &take_until(b"\r\n" as &[u8]);
@@ -103,11 +106,12 @@ impl SessionState for IdentifierStringSent {
 pub struct IdentifierStringReceived {}
 
 impl SessionState for IdentifierStringReceived {
-    fn process<'a, const SIZE: usize, W: LoopingBufferWriter<SIZE>>(
+    fn process<'a, 'b: 'a, const SIZE: usize, W: LoopingBufferWriter<SIZE>>(
         &mut self,
         state: &mut State,
         writer: &mut W,
-        input: &'a mut [u8],
+        input: &'a [u8],
+        _tmp_packet: &'b mut [u8; MAX_PKT_SIZE],
     ) -> Result<(&'a [u8], PacketProcessingDecision), Error> {
         debug!("Sending the MessageKeyExchangeInit packet");
         let kex_init_msg = gen_kex_initial_list(state);

@@ -22,7 +22,7 @@ use smicro_types::{
 
 use crate::{
     crypto::{
-        cipher::CipherWrapper, keys::load_hostkey, mac::MACWrapper, sign::SignerWrapper, CryptoAlgs,
+        CryptoAlgs, cipher::CipherWrapper, keys::load_hostkey, mac::MACWrapper, sign::SignerWrapper,
     },
     error::Error,
     messages::MessageKeyExchangeInit,

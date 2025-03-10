@@ -8,6 +8,7 @@ use smicro_types::error::ParsingError;
 use crate::{
     crypto::KeyWrapper,
     error::{CryptoOperationError, Error},
+    packet::MAX_PKT_SIZE,
 };
 
 use super::CryptoAlgWithKey;
@@ -50,9 +51,12 @@ pub trait Cipher {
 
     fn decrypt<'a>(
         &mut self,
-        input: &'a mut [u8],
+        input: &'a [u8],
+        tmp_packet: &'a mut [u8; MAX_PKT_SIZE],
         sequence_number: u32,
     ) -> IResult<&'a [u8], &'a [u8], ParsingError>;
+
+    fn commit(&mut self);
 }
 
 impl<T: Cipher> Cipher for KeyWrapper<T> {
@@ -78,9 +82,14 @@ impl<T: Cipher> Cipher for KeyWrapper<T> {
 
     fn decrypt<'a>(
         &mut self,
-        input: &'a mut [u8],
+        input: &'a [u8],
+        tmp_packet: &'a mut [u8; MAX_PKT_SIZE],
         sequence_number: u32,
     ) -> IResult<&'a [u8], &'a [u8], ParsingError> {
-        self.inner.decrypt(input, sequence_number)
+        self.inner.decrypt(input, tmp_packet, sequence_number)
+    }
+
+    fn commit(&mut self) {
+        self.inner.commit();
     }
 }

@@ -72,11 +72,12 @@ fn handle_packet<const SIZE: usize>(
     writer: &mut LoopingBuffer<SIZE>,
     session: &mut SessionStates,
     state: &mut State,
+    tmp_packet: &mut [u8; MAX_PKT_SIZE],
 ) -> Result<KeepProcessing, Error> {
     let available_data = buf.get_readable_data();
     let available_data_len = available_data.len();
     let mut atomic_writer = writer.get_atomic_writer();
-    let res = session.process(state, &mut atomic_writer, available_data);
+    let res = session.process(state, &mut atomic_writer, available_data, tmp_packet);
 
     match res {
         Err(e) => match e {
@@ -204,6 +205,7 @@ fn handle_packets<const SIZE: usize>(
     sender_buf: &mut LoopingBuffer<SIZE>,
     session: &mut SessionStates,
     state: &mut State,
+    tmp_packet: &mut [u8; MAX_PKT_SIZE],
 ) -> Result<KeepProcessing, Error> {
     loop {
         // rekey every two gigabytes
@@ -220,7 +222,7 @@ fn handle_packets<const SIZE: usize>(
 
             return Ok(KeepProcessing::Continue);
         }
-        match handle_packet(reader_buf, sender_buf, session, state) {
+        match handle_packet(reader_buf, sender_buf, session, state, tmp_packet) {
             Ok(KeepProcessing::Continue) => {}
             Ok(x) => return Ok(x),
             Err(Error::ParsingError(nom::Err::Incomplete(_))) => {
@@ -630,6 +632,8 @@ fn handle_stream_with_preexisting_state(
     let mut registered_channels: HashSet<u32> = HashSet::new();
     let mut channels_to_remove: HashSet<u32> = HashSet::new();
 
+    let mut tmp_packet = [0u8; MAX_PKT_SIZE];
+
     loop {
         match poll.poll(&mut events, None) {
             Ok(()) => {}
@@ -666,7 +670,13 @@ fn handle_stream_with_preexisting_state(
 
         non_io_backed_progress |= read_stream_to_buffer(&mut stream, &mut reader_buf)?;
 
-        match handle_packets(&mut reader_buf, &mut sender_buf, &mut session, &mut state)? {
+        match handle_packets(
+            &mut reader_buf,
+            &mut sender_buf,
+            &mut session,
+            &mut state,
+            &mut tmp_packet,
+        )? {
             KeepProcessing::Continue => {}
             KeepProcessing::StopDisconnected => {
                 info!("Connection terminated");

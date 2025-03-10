@@ -120,18 +120,19 @@ pub(crate) fn declare_session_state_inner(
         }
 
         impl crate::session::SessionState for #struct_name {
-            fn process<'a, const SIZE: usize, W: ::smicro_common::LoopingBufferWriter<SIZE>>(
+            fn process<'a, 'b: 'a, const SIZE: usize, W: ::smicro_common::LoopingBufferWriter<SIZE>>(
                 &mut self,
                 state: &mut crate::state::State,
                 writer: &mut W,
-                input: &'a mut [u8],
+                input: &'a [u8],
+                tmp_packet: &'b mut [u8; crate::packet::MAX_PKT_SIZE]
             ) -> Result<(&'a [u8], crate::session::PacketProcessingDecision), crate::error::Error> {
                 use ::smicro_types::{
                     deserialize::DeserializePacket,
                     ssh::types::MessageType
                 };
                 use crate::session::{SessionStates, SessionStateEstablished};
-                let (next, packet_payload) = crate::packet::parse_packet(input, state)?;
+                let (next, packet_payload) = crate::packet::parse_packet(input, tmp_packet, state)?;
 
                 let (message_data, message_type) = match crate::parse_message_type(packet_payload) {
                     Ok(x) => x,

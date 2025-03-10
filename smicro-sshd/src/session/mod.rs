@@ -1,5 +1,6 @@
 use smicro_common::LoopingBufferWriter;
 
+use crate::packet::MAX_PKT_SIZE;
 use crate::{error::Error, state::State};
 
 mod channel;
@@ -21,11 +22,12 @@ pub enum PacketProcessingDecision {
 }
 
 pub trait SessionState {
-    fn process<'a, const SIZE: usize, W: LoopingBufferWriter<SIZE>>(
+    fn process<'a, 'b: 'a, const SIZE: usize, W: LoopingBufferWriter<SIZE>>(
         &mut self,
         state: &mut State,
         writer: &mut W,
-        input: &'a mut [u8],
+        input: &'a [u8],
+        tmp_packet: &'b mut [u8; MAX_PKT_SIZE],
     ) -> Result<(&'a [u8], PacketProcessingDecision), Error>;
 }
 
@@ -37,14 +39,15 @@ macro_rules! define_state_list {
         }
 
         impl SessionState for $struct {
-            fn process<'a, const SIZE: usize, W: LoopingBufferWriter<SIZE>>(
+            fn process<'a, 'b: 'a, const SIZE: usize, W: LoopingBufferWriter<SIZE>>(
                 &mut self,
                 state: &mut State,
                 writer: &mut W,
-                input: &'a mut [u8],
+                input: &'a [u8],
+                tmp_packet: &'b mut [u8; MAX_PKT_SIZE],
             ) -> Result<(&'a [u8], PacketProcessingDecision), Error> {
                 match self {
-                    $($struct::$name(val) => val.process(state, writer, input),)*
+                    $($struct::$name(val) => val.process(state, writer, input, tmp_packet),)*
                 }
             }
         }

@@ -146,9 +146,6 @@ impl Cipher for Aes256GcmImpl {
             .encrypt_in_place_detached(&self.nonce, &size_field, &mut data[4..cleartext_data_end])
             .map_err(|_| CryptoOperationError::EncryptionError)?;
 
-        // succeeded -> let's update the nonce
-        self.increment_nonce();
-
         data[cleartext_data_end..].copy_from_slice(tag.as_slice());
 
         Ok(())
@@ -156,12 +153,13 @@ impl Cipher for Aes256GcmImpl {
 
     fn decrypt<'a>(
         &mut self,
-        input: &'a mut [u8],
+        input: &'a [u8],
+        tmp_packet: &'a mut [u8; MAX_PKT_SIZE],
         _sequence_number: u32,
     ) -> nom::IResult<&'a [u8], &'a [u8], ParsingError> {
         // this is a cipher with authenticated encryptions, so we need to extract the packet length
         // beforehand
-        let (next_data, size_field) = streaming_const_take::<4>(input)?;
+        let (_, size_field) = streaming_const_take::<4>(input)?;
         let (_, pkt_size) = be_u32(size_field.as_slice())?;
         // 5 = padding_length field + 4 bytes as this is the minimum possible padding
         if pkt_size < 5 || pkt_size as usize > MAX_PKT_SIZE {
@@ -170,33 +168,28 @@ impl Cipher for Aes256GcmImpl {
             )));
         }
         // ensure there is enought data in the input slice
-        let (next_data, _) = take(pkt_size)(next_data)?;
-
-        let (_, expected_tag) = streaming_const_take::<AES256GCM_TAG_SIZE>(next_data)?;
+        let (next_data, packet_payload) = take(pkt_size + 4)(input)?;
+        let (next_data, expected_tag) = streaming_const_take::<AES256GCM_TAG_SIZE>(next_data)?;
         let expected_tag = Array::from(expected_tag);
+
+        tmp_packet[..pkt_size as usize + 4].copy_from_slice(packet_payload);
 
         self.inner
             .decrypt_in_place_detached(
                 &self.nonce,
                 &size_field,
-                &mut input[4..4 + pkt_size as usize],
+                &mut tmp_packet[4..pkt_size as usize + 4],
                 &expected_tag,
             )
             .map_err(|_| nom::Err::Failure(ParsingError::InvalidMac))?;
 
-        // valid decryption: update the nonce
-        self.increment_nonce();
-
-        let next_data = &input[AES256GCM_TAG_SIZE + 4 + pkt_size as usize..];
-        let cur_pkt_plaintext = &input[..4 + pkt_size as usize];
+        let cur_pkt_plaintext = &tmp_packet[..pkt_size as usize + 4];
 
         Ok((next_data, cur_pkt_plaintext))
     }
-}
 
-impl Aes256GcmImpl {
-    fn increment_nonce(&mut self) {
-        // TODO: is this constant-time?
+    fn commit(&mut self) {
+        // valid decryption: update the nonce
         let next_invocation_counter = Wrapping(u64::from_be_bytes([
             self.nonce[4],
             self.nonce[5],

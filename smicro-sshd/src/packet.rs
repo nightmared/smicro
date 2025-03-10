@@ -124,6 +124,8 @@ pub fn write_message<
     if sender.sequence_number.0 == 0 {
         return Err(Error::SequenceNumberWrapped);
     }
+    // update the nonce/counters
+    sender.crypto_material.as_mut().map(|c| c.cipher.commit());
 
     trace!("Message sent!");
 
@@ -182,7 +184,8 @@ fn parse_plaintext_packet<'a>(
 }
 
 pub fn parse_packet<'a>(
-    input: &'a mut [u8],
+    input: &'a [u8],
+    tmp_packet: &'a mut [u8; MAX_PKT_SIZE],
     state: &mut State,
 ) -> IResult<&'a [u8], &'a [u8], ParsingError> {
     let cipher = state
@@ -194,7 +197,8 @@ pub fn parse_packet<'a>(
     let mut is_aead = false;
     let (next_data, (full_pkt, pkt_payload)) = if let Some(cipher) = cipher {
         is_aead = cipher.is_aead();
-        let (next_data, full_pkt) = cipher.decrypt(input, state.receiver.sequence_number.0)?;
+        let (next_data, full_pkt) =
+            cipher.decrypt(input, tmp_packet, state.receiver.sequence_number.0)?;
 
         let (should_be_empty, (_, pkt_payload)) = parse_plaintext_packet(full_pkt, Some(cipher))?;
         if !should_be_empty.is_empty() {
@@ -233,6 +237,12 @@ pub fn parse_packet<'a>(
     if state.receiver.sequence_number.0 == 0 {
         return Err(nom::Err::Failure(ParsingError::SequenceNumberWrapped));
     }
+    // update the nonce/counters
+    state
+        .receiver
+        .crypto_material
+        .as_mut()
+        .map(|c| c.cipher.commit());
 
     Ok((next_data, pkt_payload))
 }
