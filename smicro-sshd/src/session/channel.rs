@@ -1,17 +1,17 @@
-use std::os::fd::{AsRawFd, FromRawFd, RawFd};
+use std::os::fd::{AsRawFd, RawFd};
 use std::os::linux::process::CommandExt;
 use std::process::{Command, Stdio};
 
 use log::{debug, warn};
-use nix::pty::{OpenptyResult, Winsize, openpty};
 use smicro_common::{LoopingBuffer, LoopingBufferWriter};
 use smicro_macros::declare_session_state;
 use smicro_types::deserialize::DeserializePacket;
 use smicro_types::sftp::deserialize::parse_utf8_slice;
 use smicro_types::ssh::types::MessageType;
 
-use crate::messages::{MessageChannelClose, MessageChannelEof, PtyReq};
-use crate::state::channel::{Channel, ChannelFdWithoutPty, ChannelFdWrapper, ChannelState};
+use crate::io::FdStreamManager;
+use crate::messages::{MessageChannelClose, MessageChannelEof};
+use crate::state::channel::{Channel, ChannelState};
 use crate::state::{DirectionState, State};
 use crate::{
     error::Error,
@@ -84,18 +84,7 @@ impl ExpectsChannelOpen {
     }
 }
 
-fn spawn_command(
-    command: &str,
-    with_env: bool,
-    term: Option<OpenptyResult>,
-) -> Result<ChannelCommand, Error> {
-    let stdio_from_term = || -> Stdio {
-        if let Some(term) = &term {
-            unsafe { Stdio::from_raw_fd(term.slave.as_raw_fd()) }
-        } else {
-            Stdio::piped()
-        }
-    };
+fn spawn_command(command: &str, with_env: bool) -> Result<ChannelCommand, Error> {
     // Shell injection FTW!
     // More seriously though, this will be acceptable because the user was identified
     // and this will be executed with the privileges of that target user once
@@ -110,9 +99,9 @@ fn spawn_command(
     } else {
         &mut inner_command
     }
-    .stdin(stdio_from_term())
-    .stdout(stdio_from_term())
-    .stderr(stdio_from_term())
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
     .create_pidfd(true)
     .spawn()
     .map_err(Error::ProgramExecutionFailed)?;
@@ -126,30 +115,18 @@ fn spawn_command(
         }
     };
 
-    let fds = if let Some(term) = term {
-        set_nonblocking(term.master.as_raw_fd()).map_err(Error::SetNonBlockingFailed)?;
-        ChannelFdWrapper::WithPty(term.master)
-    } else {
-        let stdin = cmd.stdin.take().ok_or(Error::InvalidStdioHandle)?;
-        set_nonblocking(stdin.as_raw_fd()).map_err(Error::SetNonBlockingFailed)?;
-        let stdout = cmd.stdout.take().ok_or(Error::InvalidStdioHandle)?;
-        set_nonblocking(stdout.as_raw_fd()).map_err(Error::SetNonBlockingFailed)?;
-        let stderr = cmd.stderr.take().ok_or(Error::InvalidStdioHandle)?;
-        set_nonblocking(stderr.as_raw_fd()).map_err(Error::SetNonBlockingFailed)?;
-
-        ChannelFdWrapper::WithoutPty(ChannelFdWithoutPty {
-            stdin,
-            stdout,
-            stderr,
-        })
-    };
+    let stdin = cmd.stdin.take().ok_or(Error::InvalidStdioHandle)?;
+    set_nonblocking(stdin.as_raw_fd()).map_err(Error::SetNonBlockingFailed)?;
+    let stdout = cmd.stdout.take().ok_or(Error::InvalidStdioHandle)?;
+    set_nonblocking(stdout.as_raw_fd()).map_err(Error::SetNonBlockingFailed)?;
+    let stderr = cmd.stderr.take().ok_or(Error::InvalidStdioHandle)?;
+    set_nonblocking(stderr.as_raw_fd()).map_err(Error::SetNonBlockingFailed)?;
 
     Ok(ChannelCommand {
         command: cmd,
-        fds,
-        stdin_buffer: LoopingBuffer::new()?,
-        stdout_buffer: LoopingBuffer::new()?,
-        stderr_buffer: LoopingBuffer::new()?,
+        stdin: FdStreamManager::new(stdin, 0, LoopingBuffer::new()?, 0)?,
+        stdout: FdStreamManager::new(stdout, 0, LoopingBuffer::new()?, 0)?,
+        stderr: FdStreamManager::new(stderr, 0, LoopingBuffer::new()?, 0)?,
     })
 }
 
@@ -158,7 +135,7 @@ fn handle_channel_request<const SIZE: usize, W: LoopingBufferWriter<SIZE>>(
     writer: &mut W,
     msg: MessageChannelRequest,
     chan: &mut Channel,
-    enable_interactive_shell: bool,
+    enable_command_execution: bool,
 ) -> Result<(), Error> {
     debug!("Got a channel request for mode '{}'", msg.requested_mode);
 
@@ -170,32 +147,10 @@ fn handle_channel_request<const SIZE: usize, W: LoopingBufferWriter<SIZE>>(
 
     match msg.requested_mode {
         "exec" => {
-            if enable_interactive_shell {
+            if enable_command_execution {
                 let (_, command) = parse_utf8_slice(msg.channel_specific_data)?;
 
-                chan.command = Some(spawn_command(command, true, None)?);
-                success = true;
-            }
-        }
-        "shell" => {
-            if enable_interactive_shell {
-                // TODO: retrieve the user shell and span the command
-                chan.command = Some(spawn_command("/bin/bash", true, chan.term.take())?);
-                success = true;
-            }
-        }
-        "pty-req" => {
-            if enable_interactive_shell {
-                let (_, pty) = PtyReq::deserialize(msg.channel_specific_data)?;
-
-                // TODO; handle overflow
-                let term_size = Winsize {
-                    ws_row: pty.width_chars as u16,
-                    ws_col: pty.height_chars as u16,
-                    ws_xpixel: pty.width_pixels as u16,
-                    ws_ypixel: pty.height_pixels as u16,
-                };
-                chan.term = Some(openpty(&term_size, None).map_err(Error::PtyAllocationFailed)?);
+                chan.command = Some(spawn_command(command, true)?);
                 success = true;
             }
         }
@@ -212,7 +167,7 @@ fn handle_channel_request<const SIZE: usize, W: LoopingBufferWriter<SIZE>>(
                     .unwrap()
                     .join("smicro_binhelper");
 
-                chan.command = Some(spawn_command(command.to_str().unwrap(), false, None)?);
+                chan.command = Some(spawn_command(command.to_str().unwrap(), false)?);
                 success = true;
             } else {
                 warn!("Unsupported subsystem");
@@ -262,7 +217,7 @@ impl AcceptsChannelMessages {
                     writer,
                     msg,
                     chan,
-                    state.enable_interactive_shell,
+                    state.enable_command_execution,
                 )
                 .is_err()
                 {
@@ -289,7 +244,7 @@ impl AcceptsChannelMessages {
                         return Err(Error::ExceededChannelLength);
                     }
 
-                    if cmd.stdin_buffer.write(msg.data.0).is_err() {
+                    if cmd.stdin.write(msg.data.0).is_err() {
                         return Err(Error::IoError(std::io::Error::new(
                             std::io::ErrorKind::WouldBlock,
                             "Could not write data to the stdin buffer",

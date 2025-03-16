@@ -16,12 +16,16 @@ pub enum Error {
     MioSetupFailed(#[source] std::io::Error),
     #[error("Could not receive an epoll event")]
     MioReceiveEventFailed(#[source] std::io::Error),
+    #[error("Could not register a stream to the epoll loop")]
+    MioRegistrationFailed(#[source] std::io::Error),
     #[error("Building a syslog logger failed")]
     SyslogLoggerCreationFailed(#[from] syslog::Error),
     #[error("Couldn't set a logger")]
     SetLoggerFailed(#[from] log::SetLoggerError),
     #[error("An error occured during an IO operation")]
     IoError(#[source] std::io::Error),
+    #[error("A generic unix error happened")]
+    UnixError(#[from] nix::Error),
     #[error("Invalid listener address")]
     InvalidListenerAddress(#[from] AddrParseError),
     #[error("Received an invalid packet")]
@@ -114,6 +118,8 @@ pub enum Error {
     ConnectionTransferFailed(#[source] std::io::Error),
     #[error("Could not retrieve a connection from our parent")]
     ConnectionRetrievalFailed(#[source] std::io::Error),
+    #[error("Could not handle an event")]
+    HandleEventFailed(#[source] nix::Error),
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -178,7 +184,9 @@ pub enum KeyLoadingError {
     NotAnAffinePoint,
     #[error("Could not deserialize to a secret key")]
     NotASecretKey,
-    #[error("Mismatch between the public key embedded in the key format and the automatically derived verifying key")]
+    #[error(
+        "Mismatch between the public key embedded in the key format and the automatically derived verifying key"
+    )]
     VerifyingKeyMismatch,
     #[error("An error occured reading the key file")]
     IoError(#[from] std::io::Error),

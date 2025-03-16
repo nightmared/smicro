@@ -1,6 +1,7 @@
 use std::{
-    io::{stdin, Read, Write},
+    io::{Read, Write, stdin},
     os::{
+        fd::BorrowedFd,
         linux::net::SocketAddrExt,
         unix::net::{SocketAddr, UnixListener, UnixStream},
     },
@@ -11,16 +12,19 @@ use log::info;
 use mio::net::TcpStream;
 use nix::unistd::User;
 use rand::random;
-use smicro_common::{receive_fd_over_socket, send_fd_over_socket, LoopingBuffer};
+use smicro_common::{LoopingBuffer, receive_fd_over_socket, send_fd_over_socket};
 use smicro_types::{deserialize::DeserializePacket, serialize::SerializePacket};
 
-use crate::{error::Error, state::State};
+use crate::{
+    error::Error,
+    io::{FdStreamManager, ReadFromBuffer, ReadFromStream},
+    state::State,
+};
 
 pub(crate) fn transfer_connection<const SIZE: usize>(
     state: State,
-    mut reader_buf: LoopingBuffer<SIZE>,
-    mut sender_buf: LoopingBuffer<SIZE>,
-    stream: TcpStream,
+    mut reader_buf: FdStreamManager<SIZE, BorrowedFd<'_>, ReadFromStream>,
+    mut sender_buf: FdStreamManager<SIZE, BorrowedFd<'_>, ReadFromBuffer>,
     username: String,
 ) -> Result<(), std::io::Error> {
     info!("transferring the connection to a new child");
@@ -51,9 +55,9 @@ pub(crate) fn transfer_connection<const SIZE: usize>(
     let (mut slave_stream, _) = socket.accept()?;
 
     unsafe {
-        reader_buf.send_over_socket(&mut slave_stream)?;
-        sender_buf.send_over_socket(&mut slave_stream)?;
-        send_fd_over_socket(&mut slave_stream, stream)?;
+        reader_buf.buffer.send_over_socket(&mut slave_stream)?;
+        sender_buf.buffer.send_over_socket(&mut slave_stream)?;
+        send_fd_over_socket(&mut slave_stream, reader_buf.fd)?;
     };
     slave_stream.shutdown(std::net::Shutdown::Both)?;
 

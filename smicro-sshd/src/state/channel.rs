@@ -1,80 +1,24 @@
 use std::{
     collections::HashMap,
-    io::{PipeReader, PipeWriter},
-    os::fd::{AsRawFd, FromRawFd, OwnedFd},
     process::{ChildStderr, ChildStdin, ChildStdout},
 };
 
 use log::trace;
 use nix::pty::OpenptyResult;
-use smicro_common::{BufferCreationError, LoopingBuffer, LoopingBufferReader};
+use smicro_common::{BufferCreationError, LoopingBuffer};
 
 use crate::{
-    NonIOProgress, error::Error, packet::MAX_PKT_SIZE, read_stream_to_buffer,
-    write_buffer_to_stream,
+    error::Error,
+    io::{FdStreamManager, IOOperation, ReadFromBuffer, ReadFromStream},
+    packet::MAX_PKT_SIZE,
 };
-
-#[derive(Debug)]
-pub struct ChannelFdWithoutPty {
-    pub stdin: ChildStdin,
-    pub stdout: ChildStdout,
-    pub stderr: ChildStderr,
-}
-
-#[derive(Debug)]
-pub enum ChannelFdWrapper {
-    WithPty(OwnedFd),
-    WithoutPty(ChannelFdWithoutPty),
-}
 
 #[derive(Debug)]
 pub struct ChannelCommand {
     pub command: std::process::Child,
-    pub fds: ChannelFdWrapper,
-    pub stdin_buffer: LoopingBuffer<MAX_PKT_SIZE>,
-    pub stdout_buffer: LoopingBuffer<MAX_PKT_SIZE>,
-    pub stderr_buffer: LoopingBuffer<MAX_PKT_SIZE>,
-}
-
-impl ChannelCommand {
-    pub fn flush_readable_data(&mut self) -> Result<NonIOProgress, Error> {
-        let mut non_io_backed_progress = NonIOProgress::Done;
-        match &mut self.fds {
-            ChannelFdWrapper::WithPty(pty) => {
-                let mut pipe_reader = unsafe { PipeReader::from_raw_fd(pty.as_raw_fd()) };
-                non_io_backed_progress |=
-                    read_stream_to_buffer(&mut pipe_reader, &mut self.stdout_buffer)?;
-                // Do not drop the raw fd, as we still need it
-                std::mem::forget(pipe_reader);
-            }
-            ChannelFdWrapper::WithoutPty(fds) => {
-                non_io_backed_progress |=
-                    read_stream_to_buffer(&mut fds.stdout, &mut self.stdout_buffer)?;
-                non_io_backed_progress |=
-                    read_stream_to_buffer(&mut fds.stderr, &mut self.stderr_buffer)?;
-            }
-        }
-        Ok(non_io_backed_progress)
-    }
-
-    pub fn flush_writeable_data(&mut self) -> Result<(), Error> {
-        if self.stdin_buffer.get_readable_data().is_empty() {
-            return Ok(());
-        }
-
-        match &mut self.fds {
-            ChannelFdWrapper::WithPty(pty) => {
-                let mut pipe_writer = unsafe { PipeWriter::from_raw_fd(pty.as_raw_fd()) };
-                write_buffer_to_stream(&mut self.stdin_buffer, &mut pipe_writer)?;
-                std::mem::forget(pipe_writer);
-                Ok(())
-            }
-            ChannelFdWrapper::WithoutPty(fds) => Ok(write_buffer_to_stream(
-                &mut self.stdin_buffer,
-                &mut fds.stdin,
-            )?),
-        }
-    }
+    pub stdin: FdStreamManager<MAX_PKT_SIZE, ChildStdin, ReadFromBuffer>,
+    pub stdout: FdStreamManager<MAX_PKT_SIZE, ChildStdout, ReadFromStream>,
+    pub stderr: FdStreamManager<MAX_PKT_SIZE, ChildStderr, ReadFromStream>,
 }
 
 impl Drop for ChannelCommand {

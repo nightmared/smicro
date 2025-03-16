@@ -123,7 +123,7 @@ pub struct State {
     #[field(parser = create_option_none)]
     pub rekeying: Option<MessageKeyExchangeInit>,
     #[field(parser = parse_boolean)]
-    pub enable_interactive_shell: bool,
+    pub enable_command_execution: bool,
     // this value doesn't matter in the child
     #[field(parser = create_auth_mode)]
     pub auth_mode: AuthMode,
@@ -137,7 +137,7 @@ impl SerializePacket for State {
             + self.peer_identifier_string.get_size()
             + self.session_identifier.get_size()
             + self.authentified_user.get_size()
-            + self.enable_interactive_shell.get_size()
+            + self.enable_command_execution.get_size()
     }
 
     fn serialize<W: std::io::Write>(&self, mut output: W) -> Result<(), std::io::Error> {
@@ -153,7 +153,7 @@ impl SerializePacket for State {
             .map(|v| SharedSSHSlice(v))
             .serialize(&mut output)?;
         self.authentified_user.serialize(&mut output)?;
-        self.enable_interactive_shell.serialize(&mut output)?;
+        self.enable_command_execution.serialize(&mut output)?;
 
         Ok(())
     }
@@ -175,7 +175,7 @@ impl std::fmt::Debug for SessionCryptoMaterials {
 impl State {
     pub fn new(
         auth_mode: AuthMode,
-        enable_interactive_shell: bool,
+        enable_command_execution: bool,
         host_keys_dir: &Path,
     ) -> Result<Self, Error> {
         let mut host_keys = Vec::new();
@@ -214,7 +214,7 @@ impl State {
             channels: ChannelManager::new(),
             rekeying: None,
             auth_mode,
-            enable_interactive_shell,
+            enable_command_execution,
         })
     }
 }

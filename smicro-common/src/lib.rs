@@ -10,6 +10,8 @@ use std::{
     os::unix::net::{AncillaryData, AncillaryError, SocketAncillary, UnixStream},
 };
 
+use libc::free;
+
 #[derive(thiserror::Error, Debug)]
 pub enum BufferCreationError {
     #[error("A memory allocation failed")]
@@ -212,20 +214,6 @@ impl<const SIZE: usize> LoopingBuffer<SIZE> {
         })
     }
 
-    /// Return an 'atomic' writer.
-    /// By that, we mean atomic not in the sense of 'usable concurrently',
-    /// but in the sense that all the writes performed against it will only be commited
-    /// to the backing LoopingBuffer when calling `commit()`. This means that
-    /// all writes will be registered at once, or will not be (if an error happened
-    /// at some point).
-    pub fn get_atomic_writer(&mut self) -> AtomicLoopingBufferWriter<'_, SIZE> {
-        let end_pos = self.end_pos;
-        AtomicLoopingBufferWriter {
-            inner: self,
-            end_pos,
-        }
-    }
-
     #[cfg(feature = "share_loop")]
     /// Warning: unsafe as the looping buffer must not be used in the originating process after
     /// being sent (we risk concurrent use of the memory, and thus reading/writing uninitialized
@@ -351,46 +339,61 @@ impl<const SIZE: usize> LoopingBufferWriter<SIZE> for LoopingBuffer<SIZE> {
     }
 }
 
-pub struct AtomicLoopingBufferWriter<'a, const SIZE: usize> {
-    inner: &'a mut LoopingBuffer<SIZE>,
-    end_pos: usize,
+pub struct AtomicLoopingBufferWriter<'a, const SIZE: usize, T: LoopingBufferWriter<SIZE>> {
+    inner: &'a mut T,
+    offset: usize,
 }
 
-impl<const SIZE: usize> AtomicLoopingBufferWriter<'_, SIZE> {
+impl<const SIZE: usize, T: LoopingBufferWriter<SIZE>> AtomicLoopingBufferWriter<'_, SIZE, T> {
     pub fn commit(self) -> u64 {
-        let nb_written = self.end_pos - self.inner.end_pos;
+        let nb_written = self.offset;
         self.inner.advance_writer_pos(nb_written);
         nb_written as u64
     }
 }
 
-impl<const SIZE: usize> LoopingBufferWriter<SIZE> for AtomicLoopingBufferWriter<'_, SIZE> {
+impl<const SIZE: usize, T: LoopingBufferWriter<SIZE>> LoopingBufferWriter<SIZE>
+    for AtomicLoopingBufferWriter<'_, SIZE, T>
+{
     fn advance_writer_pos(&mut self, offset: usize) {
-        let new_size = self.end_pos + offset - self.inner.start_pos;
-        if new_size > SIZE {
+        let free_space = self.inner.get_writable_buffer().len() - self.offset;
+        if offset > free_space {
             panic!("An impossible number of bytes were written in the buffer, possible attack?");
         }
-        self.end_pos += offset;
+        self.offset += offset;
     }
 
     fn write(&mut self, buf: &[u8]) -> Result<(), Error> {
         let write_len = buf.len();
-        let new_size = self.end_pos + write_len - self.inner.start_pos;
-        if new_size > SIZE {
+        let writeable_buf = self.inner.get_writable_buffer();
+        let free_space = writeable_buf.len() - self.offset;
+        if write_len > free_space {
             return Err(Error::new(
                 ErrorKind::WouldBlock,
                 "Trying to write too much",
             ));
         }
 
-        self.inner.buf[self.end_pos..self.end_pos + write_len].copy_from_slice(buf);
-        self.end_pos += write_len;
+        writeable_buf[self.offset..self.offset + write_len].copy_from_slice(buf);
+        self.offset += write_len;
         Ok(())
     }
 
     fn get_writable_buffer(&mut self) -> &mut [u8] {
-        &mut self.inner.buf[self.end_pos..SIZE + self.inner.start_pos]
+        &mut self.inner.get_writable_buffer()[self.offset..]
     }
+}
+
+/// Return an 'atomic' writer.
+/// By that, we mean atomic not in the sense of 'usable concurrently',
+/// but in the sense that all the writes performed against it will only be commited
+/// to the backing LoopingBuffer when calling `commit()`. This means that
+/// all writes will be registered at once, or will not be (if an error happened
+/// at some point).
+pub fn get_atomic_writer<'a, const SIZE: usize, T: LoopingBufferWriter<SIZE>>(
+    inner: &'a mut T,
+) -> AtomicLoopingBufferWriter<'a, SIZE, T> {
+    AtomicLoopingBufferWriter { inner, offset: 0 }
 }
 
 #[cfg(feature = "share_loop")]

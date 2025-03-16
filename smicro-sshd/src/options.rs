@@ -43,9 +43,9 @@ pub struct Options {
 
     #[argh(
         switch,
-        description = "enable support for interactive shells (mostly broken)"
+        description = "enable running a remote command (PTY is not supported)"
     )]
-    pub enable_interactive_shell: bool,
+    pub enable_command_execution: bool,
 
     #[argh(
         option,
