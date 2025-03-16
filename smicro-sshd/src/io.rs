@@ -18,7 +18,7 @@ pub struct ReadFromBuffer;
 impl ReadDirection for ReadFromBuffer {}
 
 pub trait IOOperation {
-    fn register(&self, registry: &Registry) -> Result<(), std::io::Error>;
+    fn register(&self, registry: &Registry, register_fd: bool) -> Result<(), std::io::Error>;
     fn deregister(&self, registry: &Registry) -> Result<(), std::io::Error>;
     fn handle_event(&mut self, tok: Token) -> Result<(), Error>;
     fn notify(&mut self);
@@ -74,18 +74,22 @@ impl<const BUF_SIZE: usize, I, D: ReadDirection> Drop for FdStreamManager<BUF_SI
 impl<const BUF_SIZE: usize, I: AsRawFd> IOOperation
     for FdStreamManager<BUF_SIZE, I, ReadFromStream>
 {
-    fn register(&self, registry: &Registry) -> Result<(), std::io::Error> {
+    fn register(&self, registry: &Registry, register_fd: bool) -> Result<(), std::io::Error> {
         registry.register(
             &mut SourceFd(&self.buffer_notifier.as_raw_fd()),
             Token(self.buffer_identifier),
             Interest::READABLE,
         )?;
 
-        registry.register(
-            &mut SourceFd(&self.fd.as_raw_fd()),
-            Token(self.fd_identifier),
-            Interest::READABLE,
-        )
+        if register_fd {
+            registry.register(
+                &mut SourceFd(&self.fd.as_raw_fd()),
+                Token(self.fd_identifier),
+                Interest::READABLE,
+            )?;
+        }
+
+        Ok(())
     }
 
     fn deregister(&self, registry: &Registry) -> Result<(), std::io::Error> {
@@ -174,18 +178,22 @@ impl<const BUF_SIZE: usize, I: AsFd + AsRawFd> LoopingBufferReader<BUF_SIZE>
 impl<const BUF_SIZE: usize, I: AsFd + AsRawFd> IOOperation
     for FdStreamManager<BUF_SIZE, I, ReadFromBuffer>
 {
-    fn register(&self, registry: &Registry) -> Result<(), std::io::Error> {
+    fn register(&self, registry: &Registry, register_fd: bool) -> Result<(), std::io::Error> {
         registry.register(
             &mut SourceFd(&self.buffer_notifier.as_raw_fd()),
             Token(self.buffer_identifier),
             Interest::READABLE,
         )?;
 
-        registry.register(
-            &mut SourceFd(&self.fd.as_raw_fd()),
-            Token(self.fd_identifier),
-            Interest::WRITABLE,
-        )
+        if register_fd {
+            registry.register(
+                &mut SourceFd(&self.fd.as_raw_fd()),
+                Token(self.fd_identifier),
+                Interest::WRITABLE,
+            )?;
+        }
+
+        Ok(())
     }
 
     fn deregister(&self, registry: &Registry) -> Result<(), std::io::Error> {

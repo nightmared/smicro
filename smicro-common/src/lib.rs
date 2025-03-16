@@ -10,8 +10,6 @@ use std::{
     os::unix::net::{AncillaryData, AncillaryError, SocketAncillary, UnixStream},
 };
 
-use libc::free;
-
 #[derive(thiserror::Error, Debug)]
 pub enum BufferCreationError {
     #[error("A memory allocation failed")]

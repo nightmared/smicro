@@ -5,7 +5,7 @@
 use std::{
     cmp::min,
     collections::HashSet,
-    io::{ErrorKind, Read, Write},
+    io::ErrorKind,
     ops::{BitOr, BitOrAssign},
     os::{
         fd::{AsFd, AsRawFd},
@@ -26,7 +26,7 @@ use mio::{
     unix::SourceFd,
 };
 use nix::{
-    sys::{eventfd::EventFd, prctl},
+    sys::prctl,
     unistd::{ForkResult, fork, setgid, setuid},
 };
 use options::Options;
@@ -314,13 +314,13 @@ fn register_channel(
 
     cmd.stdin.fd_identifier = token_base;
     cmd.stdin.buffer_identifier = token_base + 1;
-    cmd.stdin.register(registry)?;
+    cmd.stdin.register(registry, true)?;
     cmd.stdout.fd_identifier = token_base + 2;
     cmd.stdout.buffer_identifier = token_base + 3;
-    cmd.stdout.register(registry)?;
+    cmd.stdout.register(registry, true)?;
     cmd.stderr.fd_identifier = token_base + 4;
     cmd.stderr.buffer_identifier = token_base + 5;
-    cmd.stderr.register(registry)?;
+    cmd.stderr.register(registry, true)?;
 
     Ok(())
 }
@@ -513,9 +513,9 @@ fn handle_stream(
 }
 
 fn handle_stream_with_preexisting_state(
-    mut stream: TcpStream,
-    mut reader_buf: LoopingBuffer<MAX_PKT_SIZE>,
-    mut sender_buf: LoopingBuffer<MAX_PKT_SIZE>,
+    stream: TcpStream,
+    reader_buf: LoopingBuffer<MAX_PKT_SIZE>,
+    sender_buf: LoopingBuffer<MAX_PKT_SIZE>,
     mut state: State,
     mut session: SessionStates,
 ) -> Result<(), Error> {
@@ -531,31 +531,25 @@ fn handle_stream_with_preexisting_state(
     let mut registered_channels: HashSet<u32> = HashSet::new();
     let mut channels_to_remove: HashSet<u32> = HashSet::new();
 
-    // TODO: improve the better error propagation here (instead of returning a generic nix::Error)
     let mut stream_reader: FdStreamManager<MAX_PKT_SIZE, _, ReadFromStream> = FdStreamManager::new(
         stream.as_fd(),
         stream_token,
         reader_buf,
         stream_read_buffer_token,
-    )?;
+    )
+    .map_err(Error::IOWrapperCreationFailed)?;
     stream_reader
-        .register(registry)
-        .map_err(Error::MioRegistrationFailed)?;
-    // TODO: cleanup that whole registration/deregistration mess
-    registry
-        .deregister(&mut SourceFd(&stream.as_raw_fd()))
+        .register(registry, false)
         .map_err(Error::MioRegistrationFailed)?;
     let mut stream_writer: FdStreamManager<MAX_PKT_SIZE, _, ReadFromBuffer> = FdStreamManager::new(
         stream.as_fd(),
         stream_token,
         sender_buf,
         stream_write_buffer_token,
-    )?;
+    )
+    .map_err(Error::IOWrapperCreationFailed)?;
     stream_writer
-        .register(registry)
-        .map_err(Error::MioRegistrationFailed)?;
-    registry
-        .deregister(&mut SourceFd(&stream.as_raw_fd()))
+        .register(registry, false)
         .map_err(Error::MioRegistrationFailed)?;
     registry
         .register(

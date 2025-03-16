@@ -5,11 +5,11 @@ use std::{
 
 use log::trace;
 use nix::pty::OpenptyResult;
-use smicro_common::{BufferCreationError, LoopingBuffer};
+use smicro_common::BufferCreationError;
 
 use crate::{
     error::Error,
-    io::{FdStreamManager, IOOperation, ReadFromBuffer, ReadFromStream},
+    io::{FdStreamManager, ReadFromBuffer, ReadFromStream},
     packet::MAX_PKT_SIZE,
 };
 

@@ -118,6 +118,8 @@ pub enum Error {
     ConnectionTransferFailed(#[source] std::io::Error),
     #[error("Could not retrieve a connection from our parent")]
     ConnectionRetrievalFailed(#[source] std::io::Error),
+    #[error("Could not create an IO wrapper")]
+    IOWrapperCreationFailed(#[source] nix::Error),
     #[error("Could not handle an event")]
     HandleEventFailed(#[source] nix::Error),
 }
