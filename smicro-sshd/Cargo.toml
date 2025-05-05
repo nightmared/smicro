@@ -33,7 +33,7 @@ nix = { version = "0.29", features = ["event", "user", "process", "term"] }
 argh = { version = "0.1.12", features = ["help"], default-features = false }
 
 aead = { version = "0.6.0-rc.0" }
-chacha20 = { version = "0.10.0-pre.2", features = ["legacy"] }
+chacha20 = { version = "0.10.0-pre.3", features = ["legacy"] }
 poly1305 = { version = "0.9.0-rc.0" }
 aes-gcm = { version = "0.11.0-pre.2" }
 ed25519 = "2.2.3"

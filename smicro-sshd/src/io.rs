@@ -7,7 +7,7 @@ use std::{
 use log::{info, trace, warn};
 
 use mio::{Interest, Registry, Token, unix::SourceFd};
-use nix::{Error, errno::Errno, sys::eventfd::EventFd, unistd::close};
+use nix::{Error, errno::Errno, sys::eventfd::EventFd};
 use smicro_common::{LoopingBuffer, LoopingBufferReader, LoopingBufferWriter};
 
 pub trait ReadDirection {}
@@ -35,7 +35,9 @@ pub struct FdStreamManager<const BUF_SIZE: usize, I, D: ReadDirection> {
     pub fd_identifier: usize,
     status: StreamManagerStatus,
     pub buffer: LoopingBuffer<BUF_SIZE>,
+    // token used to identify the notification eventfd in the poller
     pub buffer_identifier: usize,
+    // eventfd triggered when the buffer is available
     pub buffer_notifier: EventFd,
     _direction: PhantomData<D>,
 }
@@ -62,12 +64,6 @@ impl<const BUF_SIZE: usize, I, D: ReadDirection> FdStreamManager<BUF_SIZE, I, D>
             buffer_notifier: EventFd::new()?,
             _direction: PhantomData,
         })
-    }
-}
-
-impl<const BUF_SIZE: usize, I, D: ReadDirection> Drop for FdStreamManager<BUF_SIZE, I, D> {
-    fn drop(&mut self) {
-        let _ = close(self.buffer_notifier.as_raw_fd());
     }
 }
 
@@ -235,6 +231,7 @@ impl<const BUF_SIZE: usize, I: AsFd + AsRawFd> IOOperation
                     self.buffer.advance_reader_pos(written);
                 }
                 Err(e) if e == Errno::EWOULDBLOCK => {
+                    // the stream is full
                     self.status = StreamManagerStatus::Blocked;
                     break;
                 }

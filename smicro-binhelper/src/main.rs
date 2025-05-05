@@ -1,10 +1,10 @@
 use std::{
     fs::File,
-    io::{stdin, ErrorKind as IOErrorKind, Read, Write},
+    io::{ErrorKind as IOErrorKind, Read, Write, stdin},
     os::fd::FromRawFd,
 };
 
-use log::{debug, error, info, trace, LevelFilter};
+use log::{LevelFilter, debug, error, info, trace};
 use nom::{Err, IResult};
 use smicro_common::{LoopingBuffer, LoopingBufferReader, LoopingBufferWriter};
 use syslog::Facility;
@@ -13,7 +13,7 @@ use smicro_types::{
     error::ParsingError,
     serialize::SerializePacket,
     sftp::{
-        deserialize::{parse_command_header, Packet},
+        deserialize::{Packet, parse_command_header},
         types::{CommandType, StatusCode},
     },
 };
@@ -25,7 +25,7 @@ mod response;
 mod state;
 mod types;
 
-use command::{command_deserialize, Command, CommandWrapper};
+use command::{Command, CommandWrapper, command_deserialize};
 use error::Error;
 use response::{ResponsePacket, ResponseStatus, ResponseWrapper};
 use state::GlobalState;

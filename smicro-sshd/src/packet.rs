@@ -60,7 +60,7 @@ pub fn write_message<
     let mut cipher_is_aead = false;
     let required_space = if let Some(cipher) = cipher {
         cipher_is_aead = cipher.is_aead();
-        cipher.required_space_to_encrypt(real_packet_length)
+        real_packet_length + cipher.mac_size()
     } else {
         real_packet_length
     };
@@ -109,13 +109,13 @@ pub fn write_message<
     if mac_len != 0 {
         if let Some(mac) = mac {
             let mac_buffer = &mut mac_buffer[..mac_len];
-            mac.compute(output_buffer, sender.sequence_number.0, mac_buffer)?;
+            mac.compute(output_buffer, sender.sequence_number.0, mac_buffer);
         }
     }
 
     let cipher = crypto_mat.as_mut().map(|mat| &mut mat.cipher);
     if let Some(cipher) = cipher {
-        cipher.encrypt(output_buffer, sender.sequence_number.0)?;
+        cipher.encrypt(output_buffer, sender.sequence_number.0);
     }
 
     stream.advance_writer_pos(required_space + mac_len);

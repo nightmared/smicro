@@ -5,11 +5,7 @@ use nom::IResult;
 use smicro_macros::create_wrapper_enum_implementing_trait;
 use smicro_types::error::ParsingError;
 
-use crate::{
-    crypto::KeyWrapper,
-    error::{CryptoOperationError, Error},
-    packet::MAX_PKT_SIZE,
-};
+use crate::{crypto::KeyWrapper, error::Error, packet::MAX_PKT_SIZE};
 
 use super::CryptoAlgWithKey;
 
@@ -37,17 +33,16 @@ pub trait CipherAllocator {
 pub trait Cipher {
     fn block_size_bytes(&self) -> usize;
 
+    /// Size of the integrated Mac (this is 0 for non-AEAD ciphers).
+    fn mac_size(&self) -> usize {
+        0
+    }
+
     fn is_aead(&self) -> bool {
         false
     }
 
-    fn required_space_to_encrypt(&self, data_len: usize) -> usize;
-
-    fn encrypt(
-        &mut self,
-        data: &mut [u8],
-        sequence_number: u32,
-    ) -> Result<(), CryptoOperationError>;
+    fn encrypt(&mut self, data: &mut [u8], sequence_number: u32);
 
     fn decrypt<'a>(
         &mut self,
@@ -64,19 +59,15 @@ impl<T: Cipher> Cipher for KeyWrapper<T> {
         self.inner.block_size_bytes()
     }
 
+    fn mac_size(&self) -> usize {
+        self.inner.mac_size()
+    }
+
     fn is_aead(&self) -> bool {
         self.inner.is_aead()
     }
 
-    fn required_space_to_encrypt(&self, data_len: usize) -> usize {
-        self.inner.required_space_to_encrypt(data_len)
-    }
-
-    fn encrypt(
-        &mut self,
-        data: &mut [u8],
-        sequence_number: u32,
-    ) -> Result<(), CryptoOperationError> {
+    fn encrypt(&mut self, data: &mut [u8], sequence_number: u32) {
         self.inner.encrypt(data, sequence_number)
     }
 

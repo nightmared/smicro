@@ -87,22 +87,11 @@ impl Cipher for Aes256CtrImpl {
         Aes256Ctr::BLOCK_SIZE_BYTES
     }
 
-    fn required_space_to_encrypt(&self, data_len: usize) -> usize {
-        // size of the data itself
-        data_len
-    }
-
-    fn encrypt(
-        &mut self,
-        data: &mut [u8],
-        _sequence_number: u32,
-    ) -> Result<(), CryptoOperationError> {
+    fn encrypt(&mut self, data: &mut [u8], _sequence_number: u32) {
         // reset the counter state to the last successful decryption position
         self.ctr = self.base_ctr;
 
         self.cipher_main_message(data);
-
-        Ok(())
     }
 
     fn decrypt<'a>(

@@ -83,24 +83,20 @@ impl Cipher for Chacha20Poly1305Impl {
         64
     }
 
+    fn mac_size(&self) -> usize {
+        POLY1305_BLOCK_SIZE
+    }
+
     fn is_aead(&self) -> bool {
         true
     }
 
-    fn required_space_to_encrypt(&self, data_len: usize) -> usize {
-        // size of the data itself + the poly1305 tag size
-        data_len + POLY1305_BLOCK_SIZE
-    }
-
-    fn encrypt(
-        &mut self,
-        data: &mut [u8],
-        sequence_number: u32,
-    ) -> Result<(), CryptoOperationError> {
+    fn encrypt(&mut self, data: &mut [u8], sequence_number: u32) {
         // this is a cipher with authenticated encryptions, so we need to extract the packet length
         // beforehand
-        let (_, size_field) =
-            streaming_const_take::<4>(data).map_err(|_| CryptoOperationError::EncryptionError)?;
+        let (_, size_field) = streaming_const_take::<4>(data)
+            .map_err(|_| CryptoOperationError::EncryptionError)
+            .expect("Encryption failed: wrong data size?");
         let pkt_size = self.get_pkt_size(size_field, sequence_number);
         data[0..4].copy_from_slice(pkt_size.to_be_bytes().as_slice());
 
@@ -111,8 +107,6 @@ impl Cipher for Chacha20Poly1305Impl {
         let poly1305_tag = self.compute_poly1305_hash(&data[..cleartext_data_end], sequence_number);
 
         data[cleartext_data_end..].copy_from_slice(poly1305_tag.as_slice());
-
-        Ok(())
     }
 
     fn decrypt<'a>(

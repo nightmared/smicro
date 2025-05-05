@@ -1,5 +1,4 @@
 #![feature(linux_pidfd)]
-#![feature(anonymous_pipe)]
 #![feature(unix_socket_ancillary_data)]
 
 use std::{
@@ -26,6 +25,7 @@ use mio::{
     unix::SourceFd,
 };
 use nix::{
+    errno::Errno,
     sys::prctl,
     unistd::{ForkResult, fork, setgid, setuid},
 };
@@ -252,10 +252,12 @@ const POLL_NB_PER_CHAN: usize = 8;
 
 fn handle_channel_message(
     event_token: Token,
+    channel_number: u32,
     cmd: &mut ChannelCommand,
     chan_state: &mut ChannelState,
 ) -> Result<(), nix::Error> {
     if event_token.0 % POLL_NB_PER_CHAN == 6 {
+        debug!("Process exited on channel {}", channel_number);
         // maybe the process exited?
         if let Ok(Some(exit_status)) = cmd.command.try_wait() {
             *chan_state = ChannelState::StoppedWithStatus(exit_status.code().unwrap_or(255));
@@ -287,7 +289,7 @@ fn handle_channel_data(event_token: Token, state: &mut State) -> Result<(), Erro
             .as_mut()
             .ok_or(Error::MissingCommandInChannel)?;
 
-        match handle_channel_message(event_token, cmd, &mut chan.state) {
+        match handle_channel_message(event_token, channel_number, cmd, &mut chan.state) {
             Ok(_) => {}
             Err(e) if e == nix::Error::EPIPE => {
                 // The connection was closed: do not change the state, we will only do that once the process exited
@@ -321,6 +323,11 @@ fn register_channel(
     cmd.stderr.fd_identifier = token_base + 4;
     cmd.stderr.buffer_identifier = token_base + 5;
     cmd.stderr.register(registry, true)?;
+    registry.register(
+        &mut SourceFd(&cmd.command.pidfd()?.as_raw_fd()),
+        Token(token_base + 6),
+        Interest::READABLE,
+    )?;
 
     Ok(())
 }
@@ -451,6 +458,7 @@ fn process_channel_states<const SIZE: usize, W: LoopingBufferWriter<SIZE>>(
                 )?;
 
                 debug!("Exit status sent for channel {}", chan_number);
+                chan.state = ChannelState::Stopped;
             }
             ChannelState::Stopped => {
                 write_message(
@@ -571,38 +579,54 @@ fn handle_stream_with_preexisting_state(
         for ev in &events {
             let event_token = ev.token();
             trace!("Got token {}", event_token.0);
-            // DO not perform an if/else dance here, as events can be readavble AND
-            // writable simultaneously.
-            if (event_token.0 == stream_token && ev.is_readable())
+            if event_token.0 == stream_token
                 || event_token.0 == stream_read_buffer_token
-            {
-                stream_reader.handle_event(event_token)?;
-            }
-            if (event_token.0 == stream_token && ev.is_writable())
                 || event_token.0 == stream_write_buffer_token
             {
-                stream_writer.handle_event(event_token)?;
-            }
-            if event_token.0 >= POLL_NB_PER_CHAN {
-                handle_channel_data(event_token, &mut state)?;
-            }
-        }
+                // DO not perform an if/else dance here, as events can be readavble AND
+                // writable simultaneously.
+                if (event_token.0 == stream_token && ev.is_readable())
+                    || event_token.0 == stream_read_buffer_token
+                {
+                    let res = stream_reader.handle_event(event_token);
+                    match res {
+                        Ok(()) => {}
+                        Err(Errno::EPIPE) => {
+                            // the remote end shutdowned its sending window
+                            stream_reader
+                                .deregister(poll.registry())
+                                .map_err(Error::IoError)?;
+                        }
+                        _ => {
+                            return res.map_err(Error::UnixError);
+                        }
+                    }
+                }
+                if (event_token.0 == stream_token && ev.is_writable())
+                    || event_token.0 == stream_write_buffer_token
+                {
+                    stream_writer.handle_event(event_token)?;
+                }
 
-        match handle_packets(
-            &mut stream_reader,
-            &mut stream_writer,
-            &mut session,
-            &mut state,
-            &mut tmp_packet,
-        )? {
-            KeepProcessing::Continue => {}
-            KeepProcessing::StopDisconnected => {
-                info!("Connection terminated");
-                return Ok(());
-            }
-            KeepProcessing::StopAndTransferToChild(username) => {
-                return transfer_connection(state, stream_reader, stream_writer, username)
-                    .map_err(Error::ConnectionTransferFailed);
+                match handle_packets(
+                    &mut stream_reader,
+                    &mut stream_writer,
+                    &mut session,
+                    &mut state,
+                    &mut tmp_packet,
+                )? {
+                    KeepProcessing::Continue => {}
+                    KeepProcessing::StopDisconnected => {
+                        info!("Connection terminated");
+                        return Ok(());
+                    }
+                    KeepProcessing::StopAndTransferToChild(username) => {
+                        return transfer_connection(state, stream_reader, stream_writer, username)
+                            .map_err(Error::ConnectionTransferFailed);
+                    }
+                }
+            } else if event_token.0 >= POLL_NB_PER_CHAN {
+                handle_channel_data(event_token, &mut state)?;
             }
         }
 
@@ -613,7 +637,6 @@ fn handle_stream_with_preexisting_state(
             &mut registered_channels,
             &mut channels_to_remove,
         )?;
-
         for (_, chan) in state.channels.channels.iter_mut() {
             flush_channel(chan, &mut state.sender, &mut stream_writer)?;
         }

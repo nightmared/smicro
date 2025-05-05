@@ -3,7 +3,7 @@ use cipher::{
     typenum::{IsLess, Le, NonZero},
 };
 use digest::{
-    DynDigest, HashMarker, OutputSizeUser,
+    DynDigest, FixedOutputReset, HashMarker, OutputSizeUser,
     block_buffer::Eager,
     core_api::{BlockSizeUser, BufferKindUser, CoreProxy, FixedOutputCore, UpdateCore},
 };
@@ -80,12 +80,7 @@ impl MACAllocator for HmacSha2512 {
 pub trait MAC {
     fn size_bytes(&self) -> usize;
 
-    fn compute(
-        &mut self,
-        data: &[u8],
-        sequence_number: u32,
-        output: &mut [u8],
-    ) -> Result<(), CryptoOperationError>;
+    fn compute(&mut self, data: &[u8], sequence_number: u32, output: &mut [u8]);
 
     fn verify(
         &mut self,
@@ -129,18 +124,11 @@ where
         T::Core::output_size()
     }
 
-    fn compute(
-        &mut self,
-        data: &[u8],
-        sequence_number: u32,
-        output: &mut [u8],
-    ) -> Result<(), CryptoOperationError> {
-        sequence_number.serialize(&mut *self)?;
-        data.serialize(&mut *self)?;
+    fn compute(&mut self, data: &[u8], sequence_number: u32, output: &mut [u8]) {
+        self.update(&sequence_number.to_be_bytes());
+        self.update(&data);
 
-        self.finalize_into_reset(output)?;
-
-        Ok(())
+        FixedOutputReset::finalize_into_reset(self, digest::Output::<Self>::from_mut_slice(output));
     }
 
     fn verify(
@@ -151,7 +139,7 @@ where
     ) -> Result<(), CryptoOperationError> {
         let mut computed_mac = [0; 64];
         let computed_mac = &mut computed_mac[..self.size_bytes()];
-        self.compute(data, sequence_number, computed_mac)?;
+        self.compute(data, sequence_number, computed_mac);
         // a mediocre attempt at constant-time comparison
         let mut different_byte_present = 0;
         for i in 0..self.size_bytes() {
@@ -182,12 +170,7 @@ where
         self.inner.size_bytes()
     }
 
-    fn compute(
-        &mut self,
-        data: &[u8],
-        sequence_number: u32,
-        output: &mut [u8],
-    ) -> Result<(), CryptoOperationError> {
+    fn compute(&mut self, data: &[u8], sequence_number: u32, output: &mut [u8]) {
         self.inner.compute(data, sequence_number, output)
     }
 

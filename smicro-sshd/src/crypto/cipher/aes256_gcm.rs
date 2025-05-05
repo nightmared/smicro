@@ -119,24 +119,20 @@ impl Cipher for Aes256GcmImpl {
         Aes256Gcm::BLOCK_SIZE_BYTES
     }
 
+    fn mac_size(&self) -> usize {
+        AES256GCM_TAG_SIZE
+    }
+
     fn is_aead(&self) -> bool {
         true
     }
 
-    fn required_space_to_encrypt(&self, data_len: usize) -> usize {
-        // size of the data itself + the authentication tag size
-        data_len + AES256GCM_TAG_SIZE
-    }
-
-    fn encrypt(
-        &mut self,
-        data: &mut [u8],
-        _sequence_number: u32,
-    ) -> Result<(), CryptoOperationError> {
+    fn encrypt(&mut self, data: &mut [u8], _sequence_number: u32) {
         // this is a cipher with authenticated encryptions, so we need to extract the packet length
         // beforehand
-        let (_, size_field) =
-            streaming_const_take::<4>(data).map_err(|_| CryptoOperationError::EncryptionError)?;
+        let (_, size_field) = streaming_const_take::<4>(data)
+            .map_err(|_| CryptoOperationError::EncryptionError)
+            .expect("Invariant was violated: not enough data supplied");
 
         // encrypt in place
         let cleartext_data_end = data.len() - AES256GCM_TAG_SIZE;
@@ -144,11 +140,10 @@ impl Cipher for Aes256GcmImpl {
         let tag = self
             .inner
             .encrypt_in_place_detached(&self.nonce, &size_field, &mut data[4..cleartext_data_end])
-            .map_err(|_| CryptoOperationError::EncryptionError)?;
+            .map_err(|_| CryptoOperationError::EncryptionError)
+            .expect("Encryption failed: wrong data size?");
 
         data[cleartext_data_end..].copy_from_slice(tag.as_slice());
-
-        Ok(())
     }
 
     fn decrypt<'a>(
