@@ -29,98 +29,6 @@ use crate::{
 
 use super::{PacketProcessingDecision, SessionStateEstablished};
 
-#[declare_session_state(msg_type = MessageType::ChannelOpen)]
-pub struct ExpectsChannelOpen {}
-
-impl ExpectsChannelOpen {
-    pub fn inner_process<const SIZE: usize, W: LoopingBufferWriter<SIZE>>(
-        &self,
-        state: &mut State,
-        writer: &mut W,
-        _message_type: MessageType,
-        message_data: &[u8],
-    ) -> Result<PacketProcessingDecision, Error> {
-        let (_, msg) = MessageChannelOpen::deserialize(message_data)?;
-
-        let mut command = None;
-
-        match msg.channel_type {
-            "session" => {}
-            "direct-tcpip" => {
-                let (_, conn) = DirectTcpIpMessagePart::deserialize(msg.channel_specific_data)?;
-
-                match spawn_tcp(conn.remote_host, conn.remote_port as u16) {
-                    Ok(cmd) => {
-                        command = Some(ChannelType::ChannelTcp(cmd));
-                    }
-                    Err(e) => {
-                        info!("TCP connection failed: {:?}", e);
-                        // the TCP connection failed, let's abort
-                        write_message(
-                            &mut state.sender,
-                            writer,
-                            &MessageChannelOpenFailure::new(
-                                msg.sender_channel,
-                                ChannelOpenFailureReason::UnknownChannelType,
-                            ),
-                        )?;
-                        return Ok(SessionStateEstablished::ExpectsChannelOpen(self.clone()).into());
-                    }
-                }
-            }
-            _ => {
-                info!("Unsupported channel type {}", msg.channel_type);
-                write_message(
-                    &mut state.sender,
-                    writer,
-                    &MessageChannelOpenFailure::new(
-                        msg.sender_channel,
-                        ChannelOpenFailureReason::UnknownChannelType,
-                    ),
-                )?;
-
-                return Ok(SessionStateEstablished::ExpectsChannelOpen(self.clone()).into());
-            }
-        }
-
-        let local_chan_number = match state.channels.allocate_channel(
-            msg.sender_channel,
-            msg.max_pkt_size,
-            msg.initial_window_size,
-        ) {
-            Ok(chan) => chan,
-            Err(e) => {
-                write_message(
-                    &mut state.sender,
-                    writer,
-                    &MessageChannelOpenFailure::new(
-                        msg.sender_channel,
-                        ChannelOpenFailureReason::ConnectFailed,
-                    ),
-                )?;
-
-                return Err(Error::from(e));
-            }
-        };
-
-        if command.is_some() {
-            // safe as we just allocated the channel, and there is no concurrency
-            let chan = state.channels.get_channel(local_chan_number).unwrap();
-            chan.command = command;
-        }
-
-        let confirmation = MessageChannelOpenConfirmation {
-            recipient_channel: msg.sender_channel,
-            sender_channel: local_chan_number,
-            initial_window_size: msg.initial_window_size,
-            max_pkt_size: msg.max_pkt_size,
-        };
-        write_message(&mut state.sender, writer, &confirmation)?;
-
-        Ok(SessionStateEstablished::AcceptsChannelMessages(AcceptsChannelMessages {}).into())
-    }
-}
-
 fn set_nonblocking(fd: RawFd) -> std::io::Result<()> {
     let value = 1 as libc::c_int;
     if unsafe { libc::ioctl(fd, libc::FIONBIO, &value) } == -1 {
@@ -260,11 +168,11 @@ fn handle_channel_request<const SIZE: usize, W: LoopingBufferWriter<SIZE>>(
 
 // TODO: handle ChannelExtendedData
 #[declare_session_state(
-    msg_type = [MessageType::GlobalRequest, MessageType::ChannelRequest, MessageType::ChannelData, MessageType::ChannelWindowAdjust, MessageType::ChannelEof, MessageType::ChannelClose]
+    msg_type = [MessageType::ChannelOpen, MessageType::GlobalRequest, MessageType::ChannelRequest, MessageType::ChannelData, MessageType::ChannelWindowAdjust, MessageType::ChannelEof, MessageType::ChannelClose]
 )]
-pub struct AcceptsChannelMessages {}
+pub struct ExpectsChannelData {}
 
-impl AcceptsChannelMessages {
+impl ExpectsChannelData {
     pub fn inner_process<const SIZE: usize, W: LoopingBufferWriter<SIZE>>(
         &self,
         state: &mut State,
@@ -273,6 +181,88 @@ impl AcceptsChannelMessages {
         message_data: &[u8],
     ) -> Result<PacketProcessingDecision, Error> {
         match message_type {
+            MessageType::ChannelOpen => {
+                let (_, msg) = MessageChannelOpen::deserialize(message_data)?;
+
+                let mut command = None;
+
+                match msg.channel_type {
+                    "session" => {}
+                    "direct-tcpip" => {
+                        let (_, conn) =
+                            DirectTcpIpMessagePart::deserialize(msg.channel_specific_data)?;
+
+                        match spawn_tcp(conn.remote_host, conn.remote_port as u16) {
+                            Ok(cmd) => {
+                                command = Some(ChannelType::ChannelTcp(cmd));
+                            }
+                            Err(e) => {
+                                info!("TCP connection failed: {:?}", e);
+                                // the TCP connection failed, let's abort
+                                write_message(
+                                    &mut state.sender,
+                                    writer,
+                                    &MessageChannelOpenFailure::new(
+                                        msg.sender_channel,
+                                        ChannelOpenFailureReason::UnknownChannelType,
+                                    ),
+                                )?;
+                                return Ok(SessionStateEstablished::ExpectsChannelData(
+                                    self.clone(),
+                                )
+                                .into());
+                            }
+                        }
+                    }
+                    _ => {
+                        info!("Unsupported channel type {}", msg.channel_type);
+                        write_message(
+                            &mut state.sender,
+                            writer,
+                            &MessageChannelOpenFailure::new(
+                                msg.sender_channel,
+                                ChannelOpenFailureReason::UnknownChannelType,
+                            ),
+                        )?;
+
+                        return Ok(SessionStateEstablished::ExpectsChannelData(self.clone()).into());
+                    }
+                }
+
+                let local_chan_number = match state.channels.allocate_channel(
+                    msg.sender_channel,
+                    msg.max_pkt_size,
+                    msg.initial_window_size,
+                ) {
+                    Ok(chan) => chan,
+                    Err(e) => {
+                        write_message(
+                            &mut state.sender,
+                            writer,
+                            &MessageChannelOpenFailure::new(
+                                msg.sender_channel,
+                                ChannelOpenFailureReason::ConnectFailed,
+                            ),
+                        )?;
+
+                        return Err(Error::from(e));
+                    }
+                };
+
+                if command.is_some() {
+                    // safe as we just allocated the channel, and there is no concurrency
+                    let chan = state.channels.get_channel(local_chan_number).unwrap();
+                    chan.command = command;
+                }
+
+                let confirmation = MessageChannelOpenConfirmation {
+                    recipient_channel: msg.sender_channel,
+                    sender_channel: local_chan_number,
+                    initial_window_size: msg.initial_window_size,
+                    max_pkt_size: msg.max_pkt_size,
+                };
+                write_message(&mut state.sender, writer, &confirmation)?;
+            }
             MessageType::GlobalRequest => {
                 let (_, msg) = MessageGlobalRequest::deserialize(message_data)?;
 
@@ -344,7 +334,7 @@ impl AcceptsChannelMessages {
 
                 let chan = state.channels.get_channel(msg.recipient_channel)?;
 
-                chan.state = ChannelState::Stopped;
+                chan.state = ChannelState::RemoteEof;
             }
             MessageType::ChannelClose => {
                 let (_, msg) = MessageChannelClose::deserialize(message_data)?;
@@ -363,6 +353,6 @@ impl AcceptsChannelMessages {
             }
         }
 
-        Ok(SessionStateEstablished::AcceptsChannelMessages(self.clone()).into())
+        Ok(SessionStateEstablished::ExpectsChannelData(self.clone()).into())
     }
 }

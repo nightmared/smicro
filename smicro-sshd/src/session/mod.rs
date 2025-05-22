@@ -8,7 +8,7 @@ pub(crate) mod kex;
 mod service;
 mod session_establishment;
 
-pub use self::channel::{AcceptsChannelMessages, ExpectsChannelOpen};
+pub use self::channel::ExpectsChannelData;
 pub use self::kex::{KexReceived, KexReplySent, KexSent};
 pub use self::service::{ExpectsServiceRequest, ExpectsUserAuthRequest};
 pub use self::session_establishment::{
@@ -61,8 +61,7 @@ define_state_list!(
     KexReplySent,
     ExpectsServiceRequest,
     ExpectsUserAuthRequest,
-    ExpectsChannelOpen,
-    AcceptsChannelMessages
+    ExpectsChannelData
 );
 
 impl From<SessionStateEstablished> for PacketProcessingDecision {

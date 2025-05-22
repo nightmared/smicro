@@ -32,7 +32,7 @@ use nix::{
 };
 use options::Options;
 use session::{
-    ExpectsChannelOpen, PacketProcessingDecision, SessionStateEstablished, kex::renegotiate_kex,
+    ExpectsChannelData, PacketProcessingDecision, SessionStateEstablished, kex::renegotiate_kex,
 };
 use state::{
     AuthMode,
@@ -268,7 +268,7 @@ fn handle_channel_data(event: &Event, state: &mut State) -> Result<(), Error> {
             Ok(_) => {}
             Err(e) if e == nix::Error::EPIPE => {
                 debug!("Got a disconnection event on channel {}", channel_number);
-                // The connection was closed: do not change the state, we will only do that once the process exited
+                chan.state = ChannelState::Stopped;
             }
             Err(e) => {
                 return Err(Error::HandleEventFailed(e));
@@ -364,7 +364,7 @@ fn process_channel_states<const SIZE: usize, W: LoopingBufferWriter<SIZE>>(
 ) -> Result<(), Error> {
     for (&chan_number, chan) in state.channels.channels.iter_mut() {
         match chan.state {
-            ChannelState::Running => {
+            ChannelState::Running | ChannelState::RemoteEof => {
                 // register newly created channels on the event loop
                 if let Some(cmd) = &mut chan.command {
                     if registered_channels.insert(chan_number) {
@@ -388,16 +388,20 @@ fn process_channel_states<const SIZE: usize, W: LoopingBufferWriter<SIZE>>(
                 )?;
 
                 debug!("Exit status sent for channel {}", chan_number);
-                chan.state = ChannelState::Stopped;
+                if chan.state == ChannelState::Running || chan.state == ChannelState::RemoteEof {
+                    chan.state = ChannelState::Stopped;
+                }
             }
             ChannelState::Stopped => {
-                write_message(
-                    &mut state.sender,
-                    sender_buf,
-                    &MessageChannelClose {
-                        recipient_channel: chan.remote_channel_number,
-                    },
-                )?;
+                if chan.state == ChannelState::Running || chan.state == ChannelState::RemoteEof {
+                    write_message(
+                        &mut state.sender,
+                        sender_buf,
+                        &MessageChannelClose {
+                            recipient_channel: chan.remote_channel_number,
+                        },
+                    )?;
+                }
 
                 debug!("Close order sent to channel {}", chan_number);
 
@@ -687,9 +691,9 @@ fn main() -> Result<(), Error> {
             reader_buf,
             sender_buf,
             state,
-            SessionStates::SessionStateEstablished(SessionStateEstablished::ExpectsChannelOpen(
-                ExpectsChannelOpen {},
-            )),
+            SessionStates::SessionStateEstablished(
+                SessionStateEstablished::ExpectsChannelData(ExpectsChannelData {}).into(),
+            ),
         )?;
 
         Ok(())

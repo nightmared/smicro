@@ -179,6 +179,7 @@ impl DataChannel for ChannelTcp {
 #[derive(PartialEq, Debug)]
 pub enum ChannelState {
     Running,
+    RemoteEof,
     StoppedWithStatus(i32),
     Stopped,
     Shutdowned,

@@ -6,13 +6,13 @@ use smicro_types::ssh::types::MessageType;
 
 use crate::{
     crypto::{
-        cipher::CipherAllocator,
-        kex::{KexNegotiatedKeys, KEX},
-        mac::MACAllocator,
         CryptoAlgs,
+        cipher::CipherAllocator,
+        kex::{KEX, KexNegotiatedKeys},
+        mac::MACAllocator,
     },
     error::Error,
-    messages::{gen_kex_initial_list, MessageKexEcdhInit, MessageKeyExchangeInit, MessageNewKeys},
+    messages::{MessageKexEcdhInit, MessageKeyExchangeInit, MessageNewKeys, gen_kex_initial_list},
     state::{SessionCryptoMaterials, State},
     write_message,
 };
@@ -23,8 +23,7 @@ use super::{PacketProcessingDecision, SessionStateEstablished, SessionStates};
 pub(crate) enum SessionStateAllowedAfterKex {
     ExpectsServiceRequest(super::ExpectsServiceRequest),
     ExpectsUserAuthRequest(super::ExpectsUserAuthRequest),
-    ExpectsChannelOpen(super::ExpectsChannelOpen),
-    AcceptsChannelMessages(super::AcceptsChannelMessages),
+    ExpectsChannelData(super::ExpectsChannelData),
 }
 
 impl From<SessionStateAllowedAfterKex> for PacketProcessingDecision {
@@ -36,11 +35,8 @@ impl From<SessionStateAllowedAfterKex> for PacketProcessingDecision {
             SessionStateAllowedAfterKex::ExpectsUserAuthRequest(x) => {
                 SessionStateEstablished::ExpectsUserAuthRequest(x)
             }
-            SessionStateAllowedAfterKex::ExpectsChannelOpen(x) => {
-                SessionStateEstablished::ExpectsChannelOpen(x)
-            }
-            SessionStateAllowedAfterKex::AcceptsChannelMessages(x) => {
-                SessionStateEstablished::AcceptsChannelMessages(x)
+            SessionStateAllowedAfterKex::ExpectsChannelData(x) => {
+                SessionStateEstablished::ExpectsChannelData(x)
             }
         }))
     }

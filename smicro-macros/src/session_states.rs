@@ -78,8 +78,7 @@ pub(crate) fn declare_session_state_inner(
 
     let allowed_renegotiation = struct_name == "ExpectsServiceRequest"
         || struct_name == "ExpectsUserAuthRequest"
-        || struct_name == "ExpectsChannelOpen"
-        || struct_name == "AcceptsChannelMessages";
+        || struct_name == "ExpectsChannelData";
 
     let renegotiation_part = if allowed_renegotiation {
         quote!(
