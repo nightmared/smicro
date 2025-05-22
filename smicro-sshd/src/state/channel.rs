@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     os::{
-        fd::{AsRawFd, BorrowedFd, OwnedFd, RawFd},
+        fd::{AsRawFd, BorrowedFd, OwnedFd},
         linux::process::ChildExt,
     },
     process::{ChildStderr, ChildStdin, ChildStdout},
@@ -157,8 +157,8 @@ impl DataChannel for ChannelTcp {
     fn handle_channel_message(
         &mut self,
         event: &Event,
-        channel_number: u32,
-        chan_state: &mut ChannelState,
+        _channel_number: u32,
+        _chan_state: &mut ChannelState,
     ) -> Result<(), nix::Error> {
         if event.token().0 == self.data_in.fd_identifier {
             if event.is_readable() {

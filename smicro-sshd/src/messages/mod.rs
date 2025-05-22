@@ -205,6 +205,9 @@ pub struct MessageGlobalRequest<'a> {
     pub channel_specific_data: &'a [u8],
 }
 
+#[declare_message(RequestFailure)]
+pub struct MessageRequestFailure {}
+
 #[declare_message(ChannelRequest)]
 #[declare_deserializable_struct]
 pub struct MessageChannelRequest<'a> {

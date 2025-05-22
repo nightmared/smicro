@@ -5,11 +5,7 @@ use std::{
     cmp::min,
     collections::HashSet,
     io::ErrorKind,
-    ops::{BitOr, BitOrAssign},
-    os::{
-        fd::{AsFd, AsRawFd},
-        linux::process::ChildExt,
-    },
+    os::fd::{AsFd, AsRawFd},
     path::Path,
     str::FromStr,
     thread,
@@ -36,10 +32,7 @@ use session::{
 };
 use state::{
     AuthMode,
-    channel::{
-        Channel, ChannelCommand, ChannelState, ChannelTcp, ChannelType, DataChannel,
-        POLL_NB_PER_CHAN,
-    },
+    channel::{Channel, ChannelState, ChannelType, DataChannel, POLL_NB_PER_CHAN},
 };
 use syslog::Facility;
 

@@ -1,5 +1,5 @@
-use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
-use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
+use std::net::{TcpStream, ToSocketAddrs};
+use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 use std::os::linux::process::CommandExt;
 use std::process::{Command, Stdio};
 
@@ -13,6 +13,7 @@ use smicro_types::ssh::types::MessageType;
 use crate::io::FdStreamManager;
 use crate::messages::{
     DirectTcpIpMessagePart, MessageChannelClose, MessageChannelEof, MessageGlobalRequest,
+    MessageRequestFailure,
 };
 use crate::state::channel::{Channel, ChannelState, ChannelTcp, ChannelType};
 use crate::state::{DirectionState, State};
@@ -266,7 +267,12 @@ impl ExpectsChannelData {
             MessageType::GlobalRequest => {
                 let (_, msg) = MessageGlobalRequest::deserialize(message_data)?;
 
-                log::info!("{:?}", msg);
+                debug!(
+                    "Received a GlobalRequest ({:?}), but this is currently unsupported",
+                    msg
+                );
+
+                write_message(&mut state.sender, writer, &MessageRequestFailure {})?;
             }
             MessageType::ChannelRequest => {
                 let (_, msg) = MessageChannelRequest::deserialize(message_data)?;
