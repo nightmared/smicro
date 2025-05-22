@@ -12,6 +12,7 @@ struct WrapperDeclarationArgs {
     clonable: bool,
     serializable: bool,
     deserializable: bool,
+    crypto_alg: bool,
 }
 
 fn parse_wrapper_declaration_args(
@@ -23,6 +24,7 @@ fn parse_wrapper_declaration_args(
     let mut name = None;
     let mut serializable = false;
     let mut deserializable = false;
+    let mut crypto_alg = true;
     let mut clonable = true;
 
     for arg in attribute_args.iter() {
@@ -53,6 +55,17 @@ fn parse_wrapper_declaration_args(
                     }) = &namevalue.value
                     {
                         clonable = boolean.value;
+                    } else {
+                        return Err(namevalue.span().error("Expected a boolean"));
+                    }
+                }
+                "crypto_alg" => {
+                    if let Expr::Lit(ExprLit {
+                        lit: Lit::Bool(boolean),
+                        ..
+                    }) = &namevalue.value
+                    {
+                        crypto_alg = boolean.value;
                     } else {
                         return Err(namevalue.span().error("Expected a boolean"));
                     }
@@ -95,6 +108,7 @@ fn parse_wrapper_declaration_args(
         clonable,
         serializable,
         deserializable,
+        crypto_alg,
     })
 }
 
@@ -199,16 +213,20 @@ pub(crate) fn create_wrapper_enum_implementing_trait_inner(
     let trait_name = &ast.ident;
     let enum_name = &args.name;
 
-    let name_impl = quote!(
-        impl #enum_name {
-            pub fn name(&self) -> &'static str {
-                use crate::crypto::CryptoAlgName;
-                match self {
-                    #(Self::#implementors_ident(v) => v.name()),*
+    let name_impl = if args.crypto_alg {
+        quote!(
+            impl #enum_name {
+                pub fn name(&self) -> &'static str {
+                    use crate::crypto::CryptoAlgName;
+                    match self {
+                        #(Self::#implementors_ident(v) => v.name()),*
+                    }
                 }
             }
-        }
-    );
+        )
+    } else {
+        quote!()
+    };
 
     let deserialize_impl = if args.deserializable {
         quote!(

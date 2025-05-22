@@ -1,6 +1,6 @@
 use std::io::Write;
 
-use nom::{number::complete::be_u32, Parser};
+use nom::{Parser, number::complete::be_u32};
 
 use smicro_macros::{declare_deserializable_struct, declare_message};
 use smicro_types::sftp::deserialize::parse_utf8_slice;
@@ -17,8 +17,8 @@ use smicro_types::{
 mod kex;
 
 pub use self::kex::{
-    gen_kex_initial_list, negotiate_alg_signing_algorithms, MessageKexEcdhInit,
-    MessageKexEcdhReply, MessageKeyExchangeInit,
+    MessageKexEcdhInit, MessageKexEcdhReply, MessageKeyExchangeInit, gen_kex_initial_list,
+    negotiate_alg_signing_algorithms,
 };
 
 pub trait Message<'a>: Sized {
@@ -134,6 +134,19 @@ pub struct MessageChannelOpen<'a> {
     pub channel_specific_data: &'a [u8],
 }
 
+#[derive(Debug)]
+#[declare_deserializable_struct]
+pub struct DirectTcpIpMessagePart<'a> {
+    #[field(parser = parse_utf8_slice)]
+    pub remote_host: &'a str,
+    #[field(parser = be_u32)]
+    pub remote_port: u32,
+    #[field(parser = parse_utf8_slice)]
+    pub origin_host: &'a str,
+    #[field(parser = be_u32)]
+    pub origin_port: u32,
+}
+
 #[repr(u32)]
 #[derive(Copy, Clone, Debug)]
 pub enum ChannelOpenFailureReason {
@@ -179,6 +192,17 @@ pub struct MessageChannelOpenConfirmation {
     pub sender_channel: u32,
     pub initial_window_size: u32,
     pub max_pkt_size: u32,
+}
+
+#[declare_message(GlobalRequest)]
+#[declare_deserializable_struct]
+pub struct MessageGlobalRequest<'a> {
+    #[field(parser = parse_utf8_slice)]
+    pub request_name: &'a str,
+    #[field(parser = parse_boolean)]
+    pub want_reply: bool,
+    #[field(parser = nom::combinator::rest)]
+    pub channel_specific_data: &'a [u8],
 }
 
 #[declare_message(ChannelRequest)]

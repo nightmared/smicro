@@ -1,8 +1,9 @@
-use std::os::fd::{AsRawFd, RawFd};
+use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 use std::os::linux::process::CommandExt;
 use std::process::{Command, Stdio};
 
-use log::{debug, warn};
+use log::{debug, info, warn};
 use smicro_common::{LoopingBuffer, LoopingBufferWriter};
 use smicro_macros::declare_session_state;
 use smicro_types::deserialize::DeserializePacket;
@@ -10,8 +11,10 @@ use smicro_types::sftp::deserialize::parse_utf8_slice;
 use smicro_types::ssh::types::MessageType;
 
 use crate::io::FdStreamManager;
-use crate::messages::{MessageChannelClose, MessageChannelEof};
-use crate::state::channel::{Channel, ChannelState};
+use crate::messages::{
+    DirectTcpIpMessagePart, MessageChannelClose, MessageChannelEof, MessageGlobalRequest,
+};
+use crate::state::channel::{Channel, ChannelState, ChannelTcp, ChannelType};
 use crate::state::{DirectionState, State};
 use crate::{
     error::Error,
@@ -39,17 +42,45 @@ impl ExpectsChannelOpen {
     ) -> Result<PacketProcessingDecision, Error> {
         let (_, msg) = MessageChannelOpen::deserialize(message_data)?;
 
-        if msg.channel_type != "session" {
-            write_message(
-                &mut state.sender,
-                writer,
-                &MessageChannelOpenFailure::new(
-                    msg.sender_channel,
-                    ChannelOpenFailureReason::UnknownChannelType,
-                ),
-            )?;
+        let mut command = None;
 
-            return Err(Error::InvalidChannelMessage);
+        match msg.channel_type {
+            "session" => {}
+            "direct-tcpip" => {
+                let (_, conn) = DirectTcpIpMessagePart::deserialize(msg.channel_specific_data)?;
+
+                match spawn_tcp(conn.remote_host, conn.remote_port as u16) {
+                    Ok(cmd) => {
+                        command = Some(ChannelType::ChannelTcp(cmd));
+                    }
+                    Err(e) => {
+                        info!("TCP connection failed: {:?}", e);
+                        // the TCP connection failed, let's abort
+                        write_message(
+                            &mut state.sender,
+                            writer,
+                            &MessageChannelOpenFailure::new(
+                                msg.sender_channel,
+                                ChannelOpenFailureReason::UnknownChannelType,
+                            ),
+                        )?;
+                        return Ok(SessionStateEstablished::ExpectsChannelOpen(self.clone()).into());
+                    }
+                }
+            }
+            _ => {
+                info!("Unsupported channel type {}", msg.channel_type);
+                write_message(
+                    &mut state.sender,
+                    writer,
+                    &MessageChannelOpenFailure::new(
+                        msg.sender_channel,
+                        ChannelOpenFailureReason::UnknownChannelType,
+                    ),
+                )?;
+
+                return Ok(SessionStateEstablished::ExpectsChannelOpen(self.clone()).into());
+            }
         }
 
         let local_chan_number = match state.channels.allocate_channel(
@@ -72,6 +103,12 @@ impl ExpectsChannelOpen {
             }
         };
 
+        if command.is_some() {
+            // safe as we just allocated the channel, and there is no concurrency
+            let chan = state.channels.get_channel(local_chan_number).unwrap();
+            chan.command = command;
+        }
+
         let confirmation = MessageChannelOpenConfirmation {
             recipient_channel: msg.sender_channel,
             sender_channel: local_chan_number,
@@ -82,6 +119,41 @@ impl ExpectsChannelOpen {
 
         Ok(SessionStateEstablished::AcceptsChannelMessages(AcceptsChannelMessages {}).into())
     }
+}
+
+fn set_nonblocking(fd: RawFd) -> std::io::Result<()> {
+    let value = 1 as libc::c_int;
+    if unsafe { libc::ioctl(fd, libc::FIONBIO, &value) } == -1 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+fn spawn_tcp(remote_host: &str, remote_port: u16) -> Result<ChannelTcp, Error> {
+    let address = (remote_host, remote_port)
+        .to_socket_addrs()
+        .map_err(|_| Error::DnsResolutionFailure)?
+        .next()
+        .ok_or(Error::DnsResolutionReturnedNoEntry)?;
+
+    info!("Establishing a TCP connection to {:?}", address);
+
+    let stream = TcpStream::connect(address).map_err(|_| Error::TcpConnectFailed)?;
+    stream
+        .set_nonblocking(true)
+        .map_err(|_| Error::TcpConnectFailed)?;
+
+    let fd = unsafe { OwnedFd::from_raw_fd(stream.as_raw_fd()) };
+    let in_fd = unsafe { BorrowedFd::borrow_raw(stream.as_raw_fd()) };
+    let out_fd = unsafe { BorrowedFd::borrow_raw(stream.as_raw_fd()) };
+    std::mem::forget(stream);
+
+    Ok(ChannelTcp {
+        socket: fd,
+        data_in: FdStreamManager::new(in_fd, 0, LoopingBuffer::new()?, 0)?,
+        data_out: FdStreamManager::new(out_fd, 0, LoopingBuffer::new()?, 0)?,
+    })
 }
 
 fn spawn_command(command: &str, with_env: bool) -> Result<ChannelCommand, Error> {
@@ -105,15 +177,6 @@ fn spawn_command(command: &str, with_env: bool) -> Result<ChannelCommand, Error>
     .create_pidfd(true)
     .spawn()
     .map_err(Error::ProgramExecutionFailed)?;
-
-    let set_nonblocking = |fd: RawFd| -> std::io::Result<()> {
-        let value = 1 as libc::c_int;
-        if unsafe { libc::ioctl(fd, libc::FIONBIO, &value) } == -1 {
-            Err(std::io::Error::last_os_error())
-        } else {
-            Ok(())
-        }
-    };
 
     let stdin = cmd.stdin.take().ok_or(Error::InvalidStdioHandle)?;
     set_nonblocking(stdin.as_raw_fd()).map_err(Error::SetNonBlockingFailed)?;
@@ -150,7 +213,7 @@ fn handle_channel_request<const SIZE: usize, W: LoopingBufferWriter<SIZE>>(
             if enable_command_execution {
                 let (_, command) = parse_utf8_slice(msg.channel_specific_data)?;
 
-                chan.command = Some(spawn_command(command, true)?);
+                chan.command = Some(ChannelType::ChannelCommand(spawn_command(command, true)?));
                 success = true;
             }
         }
@@ -167,7 +230,10 @@ fn handle_channel_request<const SIZE: usize, W: LoopingBufferWriter<SIZE>>(
                     .unwrap()
                     .join("smicro_binhelper");
 
-                chan.command = Some(spawn_command(command.to_str().unwrap(), false)?);
+                chan.command = Some(ChannelType::ChannelCommand(spawn_command(
+                    command.to_str().unwrap(),
+                    false,
+                )?));
                 success = true;
             } else {
                 warn!("Unsupported subsystem");
@@ -194,7 +260,7 @@ fn handle_channel_request<const SIZE: usize, W: LoopingBufferWriter<SIZE>>(
 
 // TODO: handle ChannelExtendedData
 #[declare_session_state(
-    msg_type = [MessageType::ChannelRequest, MessageType::ChannelData, MessageType::ChannelWindowAdjust, MessageType::ChannelEof, MessageType::ChannelClose]
+    msg_type = [MessageType::GlobalRequest, MessageType::ChannelRequest, MessageType::ChannelData, MessageType::ChannelWindowAdjust, MessageType::ChannelEof, MessageType::ChannelClose]
 )]
 pub struct AcceptsChannelMessages {}
 
@@ -207,6 +273,11 @@ impl AcceptsChannelMessages {
         message_data: &[u8],
     ) -> Result<PacketProcessingDecision, Error> {
         match message_type {
+            MessageType::GlobalRequest => {
+                let (_, msg) = MessageGlobalRequest::deserialize(message_data)?;
+
+                log::info!("{:?}", msg);
+            }
             MessageType::ChannelRequest => {
                 let (_, msg) = MessageChannelRequest::deserialize(message_data)?;
 
@@ -229,9 +300,7 @@ impl AcceptsChannelMessages {
             }
             MessageType::ChannelData => {
                 let (_, msg) = MessageChannelData::deserialize(message_data)?;
-
                 let chan = state.channels.get_channel(msg.recipient_channel)?;
-
                 debug!("Got channel data ({} bytes)", msg.data.0.len());
 
                 if chan.state == ChannelState::Running {
@@ -244,7 +313,12 @@ impl AcceptsChannelMessages {
                         return Err(Error::ExceededChannelLength);
                     }
 
-                    if cmd.stdin.write(msg.data.0).is_err() {
+                    let write_res = match cmd {
+                        ChannelType::ChannelCommand(cmd) => cmd.stdin.write(msg.data.0),
+                        ChannelType::ChannelTcp(cmd) => cmd.data_in.write(msg.data.0),
+                    };
+
+                    if write_res.is_err() {
                         return Err(Error::IoError(std::io::Error::new(
                             std::io::ErrorKind::WouldBlock,
                             "Could not write data to the stdin buffer",
@@ -282,15 +356,7 @@ impl AcceptsChannelMessages {
                     msg.recipient_channel
                 );
 
-                write_message(
-                    &mut state.sender,
-                    writer,
-                    &MessageChannelClose {
-                        recipient_channel: chan.remote_channel_number,
-                    },
-                )?;
-
-                chan.state = ChannelState::Shutdowned;
+                chan.state = ChannelState::Stopped;
             }
             _ => {
                 unreachable!()

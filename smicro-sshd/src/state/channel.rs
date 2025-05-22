@@ -1,17 +1,39 @@
 use std::{
     collections::HashMap,
+    os::{
+        fd::{AsRawFd, BorrowedFd, OwnedFd, RawFd},
+        linux::process::ChildExt,
+    },
     process::{ChildStderr, ChildStdin, ChildStdout},
 };
 
-use log::trace;
-use nix::pty::OpenptyResult;
+use log::{debug, trace};
+use mio::{Interest, Poll, Token, event::Event, unix::SourceFd};
 use smicro_common::BufferCreationError;
+use smicro_macros::create_wrapper_enum_implementing_trait;
 
 use crate::{
     error::Error,
-    io::{FdStreamManager, ReadFromBuffer, ReadFromStream},
+    io::{FdStreamManager, IOOperation, ReadFromBuffer, ReadFromStream},
     packet::MAX_PKT_SIZE,
 };
+
+pub const POLL_NB_PER_CHAN: usize = 8;
+
+#[create_wrapper_enum_implementing_trait(name = ChannelType, crypto_alg = false, clonable = false)]
+#[implementors(ChannelCommand, ChannelTcp)]
+pub trait DataChannel {
+    fn register(&mut self, poll: &mut Poll, chan_number: u32) -> Result<(), std::io::Error>;
+
+    fn unregister(&mut self, poll: &mut Poll) -> Result<(), std::io::Error>;
+
+    fn handle_channel_message(
+        &mut self,
+        event: &Event,
+        channel_number: u32,
+        chan_state: &mut ChannelState,
+    ) -> Result<(), nix::Error>;
+}
 
 #[derive(Debug)]
 pub struct ChannelCommand {
@@ -21,6 +43,68 @@ pub struct ChannelCommand {
     pub stderr: FdStreamManager<MAX_PKT_SIZE, ChildStderr, ReadFromStream>,
 }
 
+impl DataChannel for ChannelCommand {
+    fn register(&mut self, poll: &mut Poll, chan_number: u32) -> Result<(), std::io::Error> {
+        debug!("Registering channel {}", chan_number);
+        let token_base = (chan_number + 1) as usize * POLL_NB_PER_CHAN;
+        let registry = poll.registry();
+
+        self.stdin.fd_identifier = token_base;
+        self.stdin.buffer_identifier = token_base + 1;
+        self.stdin.register(registry, true)?;
+        self.stdout.fd_identifier = token_base + 2;
+        self.stdout.buffer_identifier = token_base + 3;
+        self.stdout.register(registry, true)?;
+        self.stderr.fd_identifier = token_base + 4;
+        self.stderr.buffer_identifier = token_base + 5;
+        self.stderr.register(registry, true)?;
+        registry.register(
+            &mut SourceFd(&self.command.pidfd()?.as_raw_fd()),
+            Token(token_base + 6),
+            Interest::READABLE,
+        )?;
+
+        Ok(())
+    }
+
+    fn unregister(&mut self, poll: &mut Poll) -> Result<(), std::io::Error> {
+        let registry = poll.registry();
+        self.stdin.deregister(registry, true)?;
+        self.stdout.deregister(registry, true)?;
+        self.stderr.deregister(registry, true)?;
+        registry.deregister(&mut SourceFd(&self.command.pidfd()?.as_raw_fd()))?;
+
+        Ok(())
+    }
+
+    fn handle_channel_message(
+        &mut self,
+        event: &Event,
+        channel_number: u32,
+        chan_state: &mut ChannelState,
+    ) -> Result<(), nix::Error> {
+        if event.token().0 % POLL_NB_PER_CHAN == 6 {
+            debug!("Process exited on channel {}", channel_number);
+            // maybe the process exited?
+            if let Ok(Some(exit_status)) = self.command.try_wait() {
+                *chan_state = ChannelState::StoppedWithStatus(exit_status.code().unwrap_or(255));
+            }
+            return Ok(());
+        }
+
+        if (event.token().0 % POLL_NB_PER_CHAN) / 2 == 0 {
+            // stdin
+            self.stdin.handle_event(event.token())
+        } else if (event.token().0 % POLL_NB_PER_CHAN) / 2 == 1 {
+            // stdout
+            self.stdout.handle_event(event.token())
+        } else {
+            // stderr
+            self.stderr.handle_event(event.token())
+        }
+    }
+}
+
 impl Drop for ChannelCommand {
     fn drop(&mut self) {
         trace!("Dropping the command part of a channel");
@@ -28,6 +112,67 @@ impl Drop for ChannelCommand {
             .kill()
             .expect("Could not kill the child process");
         let _ = self.command.wait();
+    }
+}
+
+#[derive(Debug)]
+pub struct ChannelTcp {
+    pub socket: OwnedFd,
+    // unsafe, but we know we hold the ownedFd for as long as we own the BorrowedFd
+    pub data_in: FdStreamManager<MAX_PKT_SIZE, BorrowedFd<'static>, ReadFromBuffer>,
+    pub data_out: FdStreamManager<MAX_PKT_SIZE, BorrowedFd<'static>, ReadFromStream>,
+}
+
+impl DataChannel for ChannelTcp {
+    fn register(&mut self, poll: &mut Poll, chan_number: u32) -> Result<(), std::io::Error> {
+        debug!("Registering channel {}", chan_number);
+        let token_base = (chan_number + 1) as usize * POLL_NB_PER_CHAN;
+        let registry = poll.registry();
+
+        registry.register(
+            &mut SourceFd(&self.socket.as_raw_fd()),
+            Token(token_base),
+            Interest::READABLE | Interest::WRITABLE,
+        )?;
+
+        self.data_in.fd_identifier = token_base;
+        self.data_in.buffer_identifier = token_base + 1;
+        self.data_in.register(registry, false)?;
+        self.data_out.fd_identifier = token_base;
+        self.data_out.buffer_identifier = token_base + 3;
+        self.data_out.register(registry, false)?;
+
+        Ok(())
+    }
+
+    fn unregister(&mut self, poll: &mut Poll) -> Result<(), std::io::Error> {
+        let registry = poll.registry();
+        registry.deregister(&mut SourceFd(&self.socket.as_raw_fd()))?;
+        self.data_in.deregister(registry, false)?;
+        self.data_out.deregister(registry, false)?;
+
+        Ok(())
+    }
+
+    fn handle_channel_message(
+        &mut self,
+        event: &Event,
+        channel_number: u32,
+        chan_state: &mut ChannelState,
+    ) -> Result<(), nix::Error> {
+        if event.token().0 == self.data_in.fd_identifier {
+            if event.is_readable() {
+                self.data_in.handle_event(event.token())?;
+            }
+            if event.is_writable() {
+                self.data_out.handle_event(event.token())?;
+            }
+            Ok(())
+        } else if (event.token().0 % POLL_NB_PER_CHAN) / 2 == 0 {
+            self.data_in.handle_event(event.token())
+        } else {
+            self.data_out.handle_event(event.token())
+        }
     }
 }
 
@@ -46,8 +191,7 @@ pub struct Channel {
     pub sender_window_size: u32,
     pub max_pkt_size: u32,
     pub state: ChannelState,
-    pub term: Option<OpenptyResult>,
-    pub command: Option<ChannelCommand>,
+    pub command: Option<ChannelType>,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -95,7 +239,6 @@ impl ChannelManager {
                 sender_window_size: window_size,
                 max_pkt_size,
                 state: ChannelState::Running,
-                term: None,
                 command: None,
             },
         );

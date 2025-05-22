@@ -122,6 +122,12 @@ pub enum Error {
     IOWrapperCreationFailed(#[source] nix::Error),
     #[error("Could not handle an event")]
     HandleEventFailed(#[source] nix::Error),
+    #[error("Could not resolve a hostname")]
+    DnsResolutionFailure,
+    #[error("Got no entry when resolving a hostname")]
+    DnsResolutionReturnedNoEntry,
+    #[error("Could not connect to a remote host")]
+    TcpConnectFailed,
 }
 
 #[derive(thiserror::Error, Debug)]

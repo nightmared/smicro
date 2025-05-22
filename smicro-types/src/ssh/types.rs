@@ -25,6 +25,10 @@ pub enum MessageType {
 
     UserAuthPublickKeyOk = 60,
 
+    GlobalRequest = 80,
+    RequestSuccess = 81,
+    RequestFailure = 82,
+
     ChannelOpen = 90,
     ChannelOpenConfirmation = 91,
     ChannelOpenFailure = 92,
