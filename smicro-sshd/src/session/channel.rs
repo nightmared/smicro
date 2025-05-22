@@ -11,20 +11,19 @@ use smicro_types::sftp::deserialize::parse_utf8_slice;
 use smicro_types::ssh::types::MessageType;
 
 use crate::io::FdStreamManager;
-use crate::messages::{
-    DirectTcpIpMessagePart, MessageChannelClose, MessageChannelEof, MessageGlobalRequest,
-    MessageRequestFailure,
-};
-use crate::state::channel::{Channel, ChannelState, ChannelTcp, ChannelType};
-use crate::state::{DirectionState, State};
 use crate::{
     error::Error,
-    messages::{
-        ChannelOpenFailureReason, MessageChannelData, MessageChannelFailure, MessageChannelOpen,
+    messages::channel::{
+        ChannelOpenFailureReason, DirectTcpIpMessagePart, MessageChannelClose, MessageChannelData,
+        MessageChannelEof, MessageChannelFailure, MessageChannelOpen,
         MessageChannelOpenConfirmation, MessageChannelOpenFailure, MessageChannelRequest,
-        MessageChannelSuccess, MessageChannelWindowAdjust,
+        MessageChannelSuccess, MessageChannelWindowAdjust, MessageGlobalRequest,
+        MessageRequestFailure,
     },
-    state::channel::ChannelCommand,
+    state::{
+        DirectionState, State,
+        channel::{Channel, ChannelCommand, ChannelState, ChannelTcp, ChannelType},
+    },
     write_message,
 };
 
