@@ -92,7 +92,7 @@ fn process_command(
 
 pub fn parse_command(
     input: &[u8],
-) -> IResult<&[u8], Packet<CommandType, CommandWrapper>, ParsingError> {
+) -> IResult<&[u8], Packet<CommandType, CommandWrapper<'_>>, ParsingError> {
     let (_, hdr) = parse_command_header(input)?;
     if hdr.length as usize > MAX_PKT_SIZE {
         return Err(nom::Err::Failure(ParsingError::InvalidPacketLength(

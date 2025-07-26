@@ -2,11 +2,11 @@ use std::{
     cmp::min,
     ffi::{CString, OsString},
     fs::{
-        canonicalize, metadata, read_link, remove_dir, remove_file, rename, set_permissions,
-        symlink_metadata, DirBuilder, OpenOptions, Permissions,
+        DirBuilder, OpenOptions, Permissions, canonicalize, metadata, read_link, remove_dir,
+        remove_file, rename, set_permissions, symlink_metadata,
     },
     os::unix::{
-        fs::{chown, symlink, DirBuilderExt},
+        fs::{DirBuilderExt, chown, symlink},
         prelude::{FileExt, OpenOptionsExt, OsStrExt, PermissionsExt},
     },
     path::PathBuf,
@@ -15,8 +15,8 @@ use std::{
 use libc::timespec;
 use log::debug;
 use nom::{
-    number::complete::{be_u32, be_u64},
     Parser,
+    number::complete::{be_u32, be_u64},
 };
 
 use smicro_macros::declare_deserializable_struct;
@@ -24,8 +24,8 @@ use smicro_types::{deserialize::DeserializePacket, error::ParsingError, sftp::ty
 use smicro_types::{
     sftp::{
         deserialize::{
-            parse_attrs, parse_open_modes, parse_pathbuf, parse_slice, parse_utf8_slice,
-            parse_utf8_string, parse_version, PacketHeader,
+            PacketHeader, parse_attrs, parse_open_modes, parse_pathbuf, parse_slice,
+            parse_utf8_slice, parse_utf8_string, parse_version,
         },
         types::{Attrs, AttrsFlags, CommandType, Extension, OpenModes, Stat},
     },
@@ -33,9 +33,10 @@ use smicro_types::{
 };
 
 use crate::{
+    MAX_READ_LENGTH, Packet,
     error::Error,
     extensions::{
-        Extension as ExtensionTrait, ExtensionCopyData, ExtensionPosixRename, COPY_DATA_EXT,
+        COPY_DATA_EXT, Extension as ExtensionTrait, ExtensionCopyData, ExtensionPosixRename,
         POSIX_RENAME_EXT,
     },
     response::{
@@ -43,12 +44,11 @@ use crate::{
         ResponseWrapper,
     },
     state::GlobalState,
-    types::{generate_stat_from_path, HandleType},
-    Packet, MAX_READ_LENGTH,
+    types::{HandleType, generate_stat_from_path},
 };
 
 pub trait Command: std::fmt::Debug {
-    fn process(self, global_state: &mut GlobalState) -> Result<ResponseWrapper, Error>;
+    fn process(self, global_state: &mut GlobalState) -> Result<ResponseWrapper<'_>, Error>;
 }
 
 #[declare_deserializable_struct]
@@ -59,7 +59,7 @@ pub struct CommandInit {
 }
 
 impl Command for CommandInit {
-    fn process(self, _global_state: &mut GlobalState) -> Result<ResponseWrapper, Error> {
+    fn process(self, _global_state: &mut GlobalState) -> Result<ResponseWrapper<'_>, Error> {
         Ok(ResponseWrapper::Version(ResponseVersion {
             version: 3,
             extensions: vec![
@@ -84,7 +84,7 @@ pub struct CommandRealpath {
 }
 
 impl Command for CommandRealpath {
-    fn process(self, _global_state: &mut GlobalState) -> Result<ResponseWrapper, Error> {
+    fn process(self, _global_state: &mut GlobalState) -> Result<ResponseWrapper<'_>, Error> {
         let canonicalized_path = canonicalize(self.original_path)?.into_os_string();
         Ok(ResponseWrapper::Name(ResponseName {
             count: 1,
@@ -106,7 +106,7 @@ pub struct CommandOpendir {
 }
 
 impl Command for CommandOpendir {
-    fn process(self, global_state: &mut GlobalState) -> Result<ResponseWrapper, Error> {
+    fn process(self, global_state: &mut GlobalState) -> Result<ResponseWrapper<'_>, Error> {
         if !self.dir_path.is_dir() {
             return Ok(ResponseWrapper::Status(ResponseStatus::new(
                 StatusCode::Failure,
@@ -129,7 +129,7 @@ pub struct CommandReaddir {
 }
 
 impl Command for CommandReaddir {
-    fn process(self, global_state: &mut GlobalState) -> Result<ResponseWrapper, Error> {
+    fn process(self, global_state: &mut GlobalState) -> Result<ResponseWrapper<'_>, Error> {
         let (_name, dir_list) = global_state.get_dir_handle(&self.handle)?;
 
         let mut names = ResponseName {
@@ -172,7 +172,7 @@ pub struct CommandLstat {
 }
 
 impl Command for CommandLstat {
-    fn process(self, _global_state: &mut GlobalState) -> Result<ResponseWrapper, Error> {
+    fn process(self, _global_state: &mut GlobalState) -> Result<ResponseWrapper<'_>, Error> {
         let stat = symlink_metadata(self.filename)?;
         Ok(ResponseWrapper::Attrs(ResponseAttrs {
             attrs: Attrs::from_metadata(&stat),
@@ -188,7 +188,7 @@ pub struct CommandFstat {
 }
 
 impl Command for CommandFstat {
-    fn process(self, global_state: &mut GlobalState) -> Result<ResponseWrapper, Error> {
+    fn process(self, global_state: &mut GlobalState) -> Result<ResponseWrapper<'_>, Error> {
         let handle = match global_state.get_handle(&self.handle) {
             Some(x) => x,
             None => Err(StatusCode::Failure)?,
@@ -214,7 +214,7 @@ pub struct CommandStat {
 }
 
 impl Command for CommandStat {
-    fn process(self, _global_state: &mut GlobalState) -> Result<ResponseWrapper, Error> {
+    fn process(self, _global_state: &mut GlobalState) -> Result<ResponseWrapper<'_>, Error> {
         let stat = metadata(self.filename)?;
 
         Ok(ResponseWrapper::Attrs(ResponseAttrs {
@@ -235,7 +235,7 @@ pub struct CommandOpen {
 }
 
 impl Command for CommandOpen {
-    fn process(self, global_state: &mut GlobalState) -> Result<ResponseWrapper, Error> {
+    fn process(self, global_state: &mut GlobalState) -> Result<ResponseWrapper<'_>, Error> {
         if self.path.is_dir() {
             Err(StatusCode::Failure)?;
         };
@@ -278,7 +278,7 @@ pub struct CommandRead {
 static mut READ_BUF: [u8; MAX_READ_LENGTH] = [0; MAX_READ_LENGTH];
 
 impl Command for CommandRead {
-    fn process(self, global_state: &mut GlobalState) -> Result<ResponseWrapper, Error> {
+    fn process(self, global_state: &mut GlobalState) -> Result<ResponseWrapper<'_>, Error> {
         let (_name, file) = global_state.get_file_handle(&self.handle)?;
 
         let buf = unsafe { &mut READ_BUF[..min(MAX_READ_LENGTH, self.len as usize)] };
@@ -307,7 +307,7 @@ pub struct CommandWrite<'a> {
 }
 
 impl Command for CommandWrite<'_> {
-    fn process(self, global_state: &mut GlobalState) -> Result<ResponseWrapper, Error> {
+    fn process(self, global_state: &mut GlobalState) -> Result<ResponseWrapper<'_>, Error> {
         let (_name, file) = global_state.get_file_handle(self.handle)?;
 
         file.write_all_at(self.data, self.offset)?;
@@ -326,7 +326,7 @@ pub struct CommandRename {
 }
 
 impl Command for CommandRename {
-    fn process(self, _global_state: &mut GlobalState) -> Result<ResponseWrapper, Error> {
+    fn process(self, _global_state: &mut GlobalState) -> Result<ResponseWrapper<'_>, Error> {
         rename(&self.old_path, &self.new_path)?;
 
         Ok(ResponseWrapper::Status(ResponseStatus::new(StatusCode::Ok)))
@@ -341,7 +341,7 @@ pub struct CommandReadlink {
 }
 
 impl Command for CommandReadlink {
-    fn process(self, _global_state: &mut GlobalState) -> Result<ResponseWrapper, Error> {
+    fn process(self, _global_state: &mut GlobalState) -> Result<ResponseWrapper<'_>, Error> {
         if !self.path.is_symlink() {
             return Ok(ResponseWrapper::Status(ResponseStatus::new(
                 StatusCode::NoSuchFile,
@@ -373,7 +373,7 @@ pub struct CommandSymlink {
 }
 
 impl Command for CommandSymlink {
-    fn process(self, _global_state: &mut GlobalState) -> Result<ResponseWrapper, Error> {
+    fn process(self, _global_state: &mut GlobalState) -> Result<ResponseWrapper<'_>, Error> {
         symlink(&self.old_path, &self.new_path)?;
 
         Ok(ResponseWrapper::Status(ResponseStatus::new(StatusCode::Ok)))
@@ -388,7 +388,7 @@ pub struct CommandRemove {
 }
 
 impl Command for CommandRemove {
-    fn process(self, _global_state: &mut GlobalState) -> Result<ResponseWrapper, Error> {
+    fn process(self, _global_state: &mut GlobalState) -> Result<ResponseWrapper<'_>, Error> {
         remove_file(self.path)?;
 
         Ok(ResponseWrapper::Status(ResponseStatus::new(StatusCode::Ok)))
@@ -405,7 +405,7 @@ pub struct CommandMkdir {
 }
 
 impl Command for CommandMkdir {
-    fn process(self, _global_state: &mut GlobalState) -> Result<ResponseWrapper, Error> {
+    fn process(self, _global_state: &mut GlobalState) -> Result<ResponseWrapper<'_>, Error> {
         DirBuilder::new()
             .mode(self.attrs.permissions.unwrap_or(0o777))
             .create(&self.path)?;
@@ -422,7 +422,7 @@ pub struct CommandRmdir {
 }
 
 impl Command for CommandRmdir {
-    fn process(self, _global_state: &mut GlobalState) -> Result<ResponseWrapper, Error> {
+    fn process(self, _global_state: &mut GlobalState) -> Result<ResponseWrapper<'_>, Error> {
         remove_dir(self.path)?;
 
         Ok(ResponseWrapper::Status(ResponseStatus::new(StatusCode::Ok)))
@@ -439,7 +439,7 @@ pub struct CommandSetstat {
 }
 
 impl Command for CommandSetstat {
-    fn process(self, _global_state: &mut GlobalState) -> Result<ResponseWrapper, Error> {
+    fn process(self, _global_state: &mut GlobalState) -> Result<ResponseWrapper<'_>, Error> {
         if let Some(size) = self.attrs.size {
             OpenOptions::new()
                 .write(true)
@@ -496,7 +496,7 @@ pub struct CommandFsetstat {
 }
 
 impl Command for CommandFsetstat {
-    fn process(self, global_state: &mut GlobalState) -> Result<ResponseWrapper, Error> {
+    fn process(self, global_state: &mut GlobalState) -> Result<ResponseWrapper<'_>, Error> {
         let path = match global_state
             .get_handle(&self.handle)
             .map(|h| h.filename.clone())
@@ -505,7 +505,7 @@ impl Command for CommandFsetstat {
             None => {
                 return Ok(ResponseWrapper::Status(ResponseStatus::new(
                     StatusCode::NoSuchFile,
-                )))
+                )));
             }
         };
 
@@ -527,7 +527,7 @@ pub struct CommandClose {
 }
 
 impl Command for CommandClose {
-    fn process(self, global_state: &mut GlobalState) -> Result<ResponseWrapper, Error> {
+    fn process(self, global_state: &mut GlobalState) -> Result<ResponseWrapper<'_>, Error> {
         global_state.close_handle(&self.handle)?;
 
         Ok(ResponseWrapper::Status(ResponseStatus::new(StatusCode::Ok)))
@@ -544,7 +544,7 @@ pub struct CommandExtended<'a> {
 }
 
 impl Command for CommandExtended<'_> {
-    fn process(self, global_state: &mut GlobalState) -> Result<ResponseWrapper, Error> {
+    fn process(self, global_state: &mut GlobalState) -> Result<ResponseWrapper<'_>, Error> {
         // TODO: if I find enought motivation to do so, create a dedicated macro like
         // `generate_command_wrapper!` below
         Ok(match self.extension.as_str() {
@@ -569,7 +569,7 @@ macro_rules! generate_command_wrapper {
         }
 
         impl<'a> Command for CommandWrapper<'a> {
-            fn process(self, global_state: &mut GlobalState) -> Result<ResponseWrapper, Error> {
+            fn process(self, global_state: &mut GlobalState) -> Result<ResponseWrapper<'_>, Error> {
                 match self {
                     $(CommandWrapper::$cmd(val) => val.process(global_state)),*
                 }

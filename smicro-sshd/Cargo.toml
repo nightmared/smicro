@@ -24,15 +24,15 @@ signature = "2.2.0"
 sha2 = "0.10"
 digest = "0.10"
 hmac = { version = "0.12", features = ["reset"] }
-hybrid-array = "0.2.3"
+hybrid-array = "0.3.1"
 aes = "0.9.0-pre.2"
-cipher = "=0.5.0-pre.7"
+cipher = "^0.5.0-rc.0"
 universal-hash = "0.6.0-rc.0"
 mio = { version = "1.0.0", features = ["os-ext", "net"] }
 nix = { version = "0.29", features = ["event", "user", "process"] }
 argh = { version = "0.1.12", features = ["help"], default-features = false }
 
-aead = { version = "0.6.0-rc.0" }
+aead = { version = "0.6.0-rc.1" }
 chacha20 = { version = "0.10.0-pre.3", features = ["legacy"] }
 poly1305 = { version = "0.9.0-rc.0" }
 aes-gcm = { version = "0.11.0-pre.2" }
@@ -40,6 +40,6 @@ ed25519 = "2.2.3"
 ed25519-compact = "2.1.1"
 
 # pinned because of incompatibilities
-inout = "=0.2.0-rc.3"
+#inout = "=0.2.0-rc.3"
 
 [features]

@@ -25,7 +25,7 @@ use crate::response::{ResponseStatus, ResponseWrapper};
 use crate::state::GlobalState;
 
 pub trait Extension: std::fmt::Debug {
-    fn process(self, global_state: &mut GlobalState) -> Result<ResponseWrapper, Error>;
+    fn process(self, global_state: &mut GlobalState) -> Result<ResponseWrapper<'_>, Error>;
 }
 
 #[declare_deserializable_struct]
@@ -38,7 +38,7 @@ pub struct ExtensionPosixRename {
 }
 
 impl Extension for ExtensionPosixRename {
-    fn process(self, global_state: &mut GlobalState) -> Result<ResponseWrapper, Error> {
+    fn process(self, global_state: &mut GlobalState) -> Result<ResponseWrapper<'_>, Error> {
         CommandRename {
             old_path: self.old_path,
             new_path: self.new_path,
@@ -63,7 +63,7 @@ pub struct ExtensionCopyData {
 }
 
 impl Extension for ExtensionCopyData {
-    fn process(self, global_state: &mut GlobalState) -> Result<ResponseWrapper, Error> {
+    fn process(self, global_state: &mut GlobalState) -> Result<ResponseWrapper<'_>, Error> {
         let (_name, read_file) = global_state.get_file_handle(&self.read_handle)?;
         // Safe because we only use this fd inside this method, and there is no concurrency: the fd
         // cannot be closed under our feet

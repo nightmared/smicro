@@ -1,7 +1,8 @@
 use std::{fmt::Debug, num::Wrapping};
 
-use aead::{AeadMutInPlace, KeyInit};
+use aead::{AeadInOut, KeyInit};
 use aes_gcm::Aes256Gcm as OfficialAes256Gcm;
+use cipher::InOutBuf;
 use hybrid_array::Array;
 use nom::{bytes::streaming::take, number::complete::be_u32};
 use smicro_macros::{declare_crypto_arg, declare_deserializable_struct, gen_serialize_impl};
@@ -139,7 +140,11 @@ impl Cipher for Aes256GcmImpl {
 
         let tag = self
             .inner
-            .encrypt_in_place_detached(&self.nonce, &size_field, &mut data[4..cleartext_data_end])
+            .encrypt_inout_detached(
+                &self.nonce,
+                &size_field,
+                InOutBuf::from(&mut data[4..cleartext_data_end]),
+            )
             .map_err(|_| CryptoOperationError::EncryptionError)
             .expect("Encryption failed: wrong data size?");
 
@@ -170,10 +175,10 @@ impl Cipher for Aes256GcmImpl {
         tmp_packet[..pkt_size as usize + 4].copy_from_slice(packet_payload);
 
         self.inner
-            .decrypt_in_place_detached(
+            .decrypt_inout_detached(
                 &self.nonce,
                 &size_field,
-                &mut tmp_packet[4..pkt_size as usize + 4],
+                InOutBuf::from(&mut tmp_packet[4..pkt_size as usize + 4]),
                 &expected_tag,
             )
             .map_err(|_| nom::Err::Failure(ParsingError::InvalidMac))?;
